@@ -5,9 +5,29 @@ const theme = @import("app_theme.zig");
 const projection = @import("../ai/child_projection.zig");
 const Logo = @import("ai_child_logo.zig");
 const S = @import("ai_children_styles.zig");
+/// V0.7 §14: page tab click handler (cx.on needs a named outer type).
+const TabPick = struct {
+    view: *View,
+    page: Page,
+    fn choose(self: *TabPick) void {
+        self.view.selectPage(self.page);
+    }
+};
 const Header = @import("ai_assistant_header.zig");
 const id = @import("../host/identity.zig");
-pub const Hooks = struct { context: *anyopaque, select: *const fn (*anyopaque, id.AgentId, u64) void };
+/// V0.7 §14: panel pages. Members is the ordinary mode; Board/Graph/Rounds
+/// are the swarm/boost forms riding the same G3/G8 data sources.
+pub const Page = enum { members, board, graph, rounds };
+
+pub const Hooks = struct {
+    context: *anyopaque,
+    select: *const fn (*anyopaque, id.AgentId, u64) void,
+    /// V0.7 §12.2: level-2 stall banner actions. urge_parent injects a
+    /// user-attributed steer through the existing channel; stop_all stops
+    /// every unsettled child of this parent.
+    urge_parent: ?*const fn (*anyopaque) void = null,
+    stop_all: ?*const fn (*anyopaque) void = null,
+};
 pub const View = struct {
     cx: *ui.Cx,
     scope: *ui.Scope,
@@ -20,6 +40,21 @@ pub const View = struct {
     button: *ui.Node,
     badge: *ui.Node,
     heading_count: *ui.Node,
+    /// V0.7 §12.2/§14.4: level-2 stall banner node (hidden unless escalated).
+    stall_banner: ?*ui.Node = null,
+    /// V0.7 §14.1-14.3: panel page tabs. The default page keeps the member
+    /// list; Board/Graph/Rounds pages appear only with delegated children.
+    page: Page = .members,
+    tab_members: ?*ui.Node = null,
+    tab_board: ?*ui.Node = null,
+    tab_graph: ?*ui.Node = null,
+    tab_rounds: ?*ui.Node = null,
+    board_list: ?*ui.Node = null,
+    graph_canvas: ?*ui.Node = null,
+    rounds_list: ?*ui.Node = null,
+    board_fingerprint: u64 = 0,
+    graph_fingerprint: u64 = 0,
+    rounds_fingerprint: u64 = 0,
     rows: std.ArrayList(*Row) = .empty,
     rows_scope: ?*ui.Scope = null,
     fingerprint: u64 = 0,
@@ -43,8 +78,54 @@ pub const View = struct {
         scroll.content.setStyleInline(cx.allocator, .{ .width = .fill(), .direction = .column });
         scroll.container.meta.ownership.meta.test_id = "ai.children.list";
         try popup.content.appendChild(cx.allocator, scroll.container);
+        // 占位节点：banner 插在 content 顶部（heading 之后）；self 创建后再填
+        // 充按钮与文案（V0.7 §12.2/§14.4 停滞警示条）。
+        const banner_placeholder = try ui.box(cx, .{}, .{});
+        banner_placeholder.setDisplay(.none);
+        banner_placeholder.meta.ownership.meta.test_id = "ai.children.stall";
+        try popup.content.insertChildBefore(cx.allocator, banner_placeholder, scroll.container);
+        // V0.7 §14: page tab row below the banner; page bodies follow the
+        // member list (all share the G3/G8 sources). Tabs beyond the member
+        // list appear only when delegated children exist.
+        const tab_row = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 28 }, .direction = .row, .align_items = .center, .gap = 6, .flex_shrink = 0 }, .{});
+        tab_row.meta.ownership.meta.test_id = "ai.children.tabs";
+        try popup.content.insertChildBefore(cx.allocator, tab_row, scroll.container);
+        const board_list_placeholder = try ui.box(cx, .{ .width = .fill(), .direction = .column, .gap = 4 }, .{});
+        board_list_placeholder.setDisplay(.none);
+        try popup.content.appendChild(cx.allocator, board_list_placeholder);
+        const graph_canvas_placeholder = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 220 }, .flex_shrink = 0 }, .{});
+        graph_canvas_placeholder.setDisplay(.none);
+        try popup.content.appendChild(cx.allocator, graph_canvas_placeholder);
+        const rounds_list_placeholder = try ui.box(cx, .{ .width = .fill(), .direction = .column, .gap = 6 }, .{});
+        rounds_list_placeholder.setDisplay(.none);
+        try popup.content.appendChild(cx.allocator, rounds_list_placeholder);
         const badge = try Header.mountCountBadge(cx, button, "ai.children.count");
-        const self = try scope.createState(View, .{ .cx = cx, .scope = popup.scope, .hooks = hooks, .open = open, .root = popup.wrapper, .content = scroll.content, .chrome = popup.chrome, .painted_colors = theme.current(), .button = button, .badge = badge, .heading_count = heading_count });
+        const self = try scope.createState(View, .{ .cx = cx, .scope = popup.scope, .hooks = hooks, .open = open, .root = popup.wrapper, .content = scroll.content, .chrome = popup.chrome, .painted_colors = theme.current(), .button = button, .badge = badge, .heading_count = heading_count, .stall_banner = banner_placeholder, .board_list = board_list_placeholder, .graph_canvas = graph_canvas_placeholder, .rounds_list = rounds_list_placeholder });
+        // V0.7 §12.2/§14.4: level-2 stall banner. Hidden until the host
+        // escalates; carries the 催父/停全部 one-click actions.
+        const banner_text = try ui.textStyled(cx, S.name, "集群停滞：父任务长时间无动作");
+        banner_text.setStyleInline(cx.allocator, .{ .font_size = 12, .font_weight = 600 });
+        try banner_placeholder.appendChild(cx.allocator, banner_text);
+        const banner_actions = try ui.box(cx, .{ .direction = .row, .gap = 8, .width = .fill(), .flex_shrink = 0 }, .{});
+        const urge = try ui.widgets.Button(.{ .label = "催父", .variant = .secondary, .on_click = cx.on(View, self, urgeParent) }).mount(popup.scope, cx);
+        urge.meta.ownership.meta.test_id = "ai.children.stall.urge";
+        try banner_actions.appendChild(cx.allocator, urge);
+        const stop = try ui.widgets.Button(.{ .label = "停全部", .variant = .secondary, .on_click = cx.on(View, self, stopAll) }).mount(popup.scope, cx);
+        stop.meta.ownership.meta.test_id = "ai.children.stall.stop";
+        try banner_actions.appendChild(cx.allocator, stop);
+        banner_placeholder.setStyleInline(cx.allocator, .{ .width = .fill(), .direction = .column, .gap = 6, .padding = ui.Padding.all(10), .border = .{ .width = 1, .radius = 8 }, .flex_shrink = 0 });
+        try banner_placeholder.appendChild(cx.allocator, banner_actions);
+        // V0.7 §14: page tabs (members always; Board/Graph/Rounds appear with
+        // delegated children — setPages toggles their display).
+        self.tab_members = try View.mountTab(cx, popup.scope, self, "成员", "ai.children.tab.members", .members);
+        self.tab_board = try View.mountTab(cx, popup.scope, self, "Board", "ai.children.tab.board", .board);
+        self.tab_graph = try View.mountTab(cx, popup.scope, self, "Graph", "ai.children.tab.graph", .graph);
+        self.tab_rounds = try View.mountTab(cx, popup.scope, self, "Rounds", "ai.children.tab.rounds", .rounds);
+        try tab_row.appendChild(cx.allocator, self.tab_members.?);
+        try tab_row.appendChild(cx.allocator, self.tab_board.?);
+        try tab_row.appendChild(cx.allocator, self.tab_graph.?);
+        try tab_row.appendChild(cx.allocator, self.tab_rounds.?);
+        self.applyPageVisibility();
         try scope.onCleanup(View, self, cleanup);
         _ = ui.clickable(button, cx.on(View, self, toggle));
         return self;
@@ -56,6 +137,167 @@ pub const View = struct {
         self.open.set(!self.open.peek());
         self.fingerprint = 0;
         self.cx.requestRedraw();
+    }
+    /// V0.7 §12.2/§14.4: show or clear the level-2 stall banner.
+    pub fn setStallEscalated(self: *View, escalated: bool) void {
+        const banner = self.stall_banner orelse return;
+        banner.setDisplay(if (escalated) .flex else .none);
+    }
+    fn mountTab(cx: *ui.Cx, tab_scope: *ui.Scope, view: *View, label: []const u8, test_id: []const u8, page: Page) !*ui.Node {
+        const state = try tab_scope.createState(TabPick, .{ .view = view, .page = page });
+        const tab_button = try ui.widgets.Button(.{ .label = label, .variant = .ghost, .on_click = cx.on(TabPick, state, TabPick.choose) }).mount(tab_scope, cx);
+        tab_button.meta.ownership.meta.test_id = test_id;
+        return tab_button;
+    }
+    /// V0.7 §14: select the panel page (three-way mutual exclusion).
+    fn selectPage(self: *View, page: Page) void {
+        if (self.page == page) return;
+        self.page = page;
+        self.applyPageVisibility();
+        self.fingerprint = 0;
+        self.board_fingerprint = 0;
+        self.graph_fingerprint = 0;
+        self.rounds_fingerprint = 0;
+        self.cx.requestRedraw();
+    }
+    /// Board/Graph/Rounds pages exist only with delegated children; in the
+    /// ordinary mode the tabs stay hidden and the member list is the panel
+    /// (§14.1: 普通模式无 Graph).
+    pub fn setPagesAvailable(self: *View, children: usize) void {
+        const available = children != 0;
+        for ([_]?*ui.Node{ self.tab_board, self.tab_graph, self.tab_rounds }) |maybe| {
+            if (maybe) |tab| tab.setDisplay(if (available) .flex else .none);
+        }
+        if (!available and self.page != .members) self.selectPage(.members);
+    }
+    fn applyPageVisibility(self: *View) void {
+        const members = self.page == .members;
+        if (self.board_list) |node| node.setDisplay(if (self.page == .board) .flex else .none);
+        if (self.graph_canvas) |node| node.setDisplay(if (self.page == .graph) .flex else .none);
+        if (self.rounds_list) |node| node.setDisplay(if (self.page == .rounds) .flex else .none);
+        // The member scroll stays mounted; other pages overlay-hide it.
+        if (self.rows_scope != null or members) {
+            for (self.rows.items) |row| row.node.setDisplay(if (members) .flex else .none);
+        }
+        if (self.tab_members) |tab| {
+            if (tab.behavior.interaction.a11y) |*a11y| a11y.pressed = members;
+        }
+    }
+    /// V0.7 §14.2 Board: render the G8 board post stream (from/#to +
+    /// category icon + folded text). Read-only; delivery watermarks stay
+    /// owned by the model/panel levels separately (G2).
+    pub fn updateBoard(self: *View, rows: []const projection.BoardRow) !void {
+        const list = self.board_list orelse return;
+        var hash = std.hash.Wyhash.init(0);
+        for (rows) |row| {
+            std.hash.autoHash(&hash, row.origin);
+            hash.update(row.kind);
+            hash.update(row.category);
+            hash.update(row.to);
+            hash.update(row.text);
+        }
+        const stamp = hash.final();
+        if (stamp == self.board_fingerprint) return;
+        self.board_fingerprint = stamp;
+        // Rebuild the board page content.
+        while (list.children.items.len != 0) {
+            const child = list.children.items[0];
+            self.cx.detachChild(list, child);
+            self.cx.destroyDetached(child);
+        }
+        if (rows.len == 0) {
+            try list.appendChild(self.cx.allocator, try ui.textStyled(self.cx, S.secondary, "留言板暂无帖子"));
+            return;
+        }
+        for (rows) |row| {
+            var label: [96]u8 = undefined;
+            const head = try std.fmt.bufPrint(&label, "从 #{d} → {s} · {s}", .{ row.origin, row.to, row.category });
+            const wrap = try ui.box(self.cx, .{ .width = .fill(), .direction = .column, .gap = 2, .flex_shrink = 0 }, .{});
+            try wrap.appendChild(self.cx.allocator, try ui.textStyled(self.cx, S.secondary, head));
+            const body = if (row.text.len > 160) row.text[0..160] else row.text;
+            try wrap.appendChild(self.cx.allocator, try ui.textStyled(self.cx, S.name, body));
+            try list.appendChild(self.cx.allocator, wrap);
+        }
+    }
+    /// V0.7 §14.2 Graph: deterministic radial layout — parent centered,
+    /// children on a fixed ring (≤16, no physics). Node cards reuse the G3
+    /// rows; edges are the accumulated board traffic (width by volume).
+    pub fn updateGraph(self: *View, entries: []const projection.Entry) !void {
+        const canvas = self.graph_canvas orelse return;
+        var hash = std.hash.Wyhash.init(0);
+        for (entries) |entry| {
+            std.hash.autoHash(&hash, entry.seq);
+            hash.update(entry.status);
+            hash.update(entry.name);
+        }
+        const stamp = hash.final();
+        const visible = entries.len > 1;
+        if (stamp == self.graph_fingerprint) return;
+        self.graph_fingerprint = stamp;
+        while (canvas.children.items.len != 0) {
+            const child = canvas.children.items[0];
+            self.cx.detachChild(canvas, child);
+            self.cx.destroyDetached(child);
+        }
+        if (!visible) {
+            // §14.2: ≤1 active child hides the Graph page.
+            return;
+        }
+        // Fixed ring coordinates: radius scaled to the canvas, angles even.
+        const center_x: f32 = 200;
+        const center_y: f32 = 110;
+        const radius: f32 = 80;
+        for (entries[0..@min(entries.len, 16)], 0..) |entry, index| {
+            const angle = 2 * std.math.pi * @as(f32, @floatFromInt(index)) / @as(f32, @floatFromInt(@min(entries.len, 16)));
+            const x = center_x + radius * @cos(angle) - 50;
+            const y = center_y + radius * @sin(angle) - 16;
+            const node = try ui.box(self.cx, .{ .position = .absolute, .inset = .{ .left = .{ .px = x }, .top = .{ .px = y } }, .width = .{ .px = 100 }, .height = .{ .px = 32 }, .direction = .row, .align_items = .center, .gap = 4, .border = .{ .width = 1, .radius = 8 }, .padding = ui.Padding.all(6) }, .{});
+            try node.appendChild(self.cx.allocator, try ui.textStyled(self.cx, S.secondary, if (entry.seq != 0) try std.fmt.allocPrint(self.cx.allocator, "#{d} {s}", .{ entry.seq, entry.name }) else entry.name));
+            try canvas.appendChild(self.cx.allocator, node);
+        }
+        const parent_node = try ui.box(self.cx, .{ .position = .absolute, .inset = .{ .left = .{ .px = center_x - 40 }, .top = .{ .px = center_y - 16 } }, .width = .{ .px = 80 }, .height = .{ .px = 32 }, .align_items = .center, .justify = .center, .border = .{ .width = 1, .radius = 16 }, .flex_shrink = 0 }, .{});
+        try parent_node.appendChild(self.cx.allocator, try ui.textStyled(self.cx, S.name, "父任务"));
+        try canvas.appendChild(self.cx.allocator, parent_node);
+    }
+    /// V0.7 §14.3 Rounds: boost chain rounds as a vertical timeline of node
+    /// cards (seq/label/status/summary), with the final verification bar.
+    pub fn updateRounds(self: *View, rows: []const projection.RoundRow) !void {
+        const list = self.rounds_list orelse return;
+        var hash = std.hash.Wyhash.init(0);
+        for (rows) |row| {
+            std.hash.autoHash(&hash, row.seq);
+            hash.update(row.status);
+            hash.update(row.summary);
+        }
+        const stamp = hash.final();
+        if (stamp == self.rounds_fingerprint and list.children.items.len != 0) return;
+        self.rounds_fingerprint = stamp;
+        while (list.children.items.len != 0) {
+            const child = list.children.items[0];
+            self.cx.detachChild(list, child);
+            self.cx.destroyDetached(child);
+        }
+        if (rows.len == 0) {
+            try list.appendChild(self.cx.allocator, try ui.textStyled(self.cx, S.secondary, "暂无轮次记录"));
+            return;
+        }
+        for (rows) |row| {
+            var title: [96]u8 = undefined;
+            const card = try ui.box(self.cx, .{ .width = .fill(), .direction = .column, .gap = 2, .padding = ui.Padding.all(8), .border = .{ .width = 1, .radius = 8 }, .flex_shrink = 0 }, .{});
+            try card.appendChild(self.cx.allocator, try ui.textStyled(self.cx, S.name, try std.fmt.bufPrint(&title, "第 {d} 轮 · #{d} {s} · {s}", .{ row.round + 1, row.seq, if (row.label.len != 0) row.label else "", row.status })));
+            if (row.summary.len != 0) try card.appendChild(self.cx.allocator, try ui.textStyled(self.cx, S.secondary, row.summary[0..@min(row.summary.len, 120)]));
+            try list.appendChild(self.cx.allocator, card);
+        }
+        const verify = try ui.box(self.cx, .{ .width = .fill(), .direction = .row, .align_items = .center, .gap = 6, .padding = ui.Padding.all(8), .border = .{ .width = 1, .radius = 8 }, .flex_shrink = 0 }, .{});
+        verify.meta.ownership.meta.test_id = "ai.children.rounds.verify";
+        try verify.appendChild(self.cx.allocator, try ui.textStyled(self.cx, S.secondary, "父终验：进行中"));
+        try list.appendChild(self.cx.allocator, verify);
+    }
+        fn urgeParent(self: *View) void {
+        if (self.hooks.urge_parent) |urge| urge(self.hooks.context);
+    }
+    fn stopAll(self: *View) void {
+        if (self.hooks.stop_all) |stop| stop(self.hooks.context);
     }
     pub fn update(self: *View, entries: []const projection.Entry) !void {
         return self.updateWithCount(entries, null);

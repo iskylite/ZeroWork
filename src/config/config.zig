@@ -142,6 +142,7 @@ pub const Config = struct {
         if (self.ai.default_effort) |effort| try writer.print("default_effort = \"{s}\"\n", .{@tagName(effort)});
         try writer.print("child_context_mode = \"{s}\"\nchild_reuse_policy = \"{s}\"\n", .{ @tagName(self.ai.child_context_mode), @tagName(self.ai.child_reuse_policy) });
         try writer.print("interactive_batch_fallback = {}\nchild_max_active = {d}\nchild_request_concurrency = {d}\nmodel_slots = {d}\n", .{ self.ai.interactive_batch_fallback, self.ai.child_max_active, self.ai.child_request_concurrency, self.ai.model_slots });
+        try writer.print("swarm_mode_default = \"{s}\"\nswarm_stall_minutes = {d}\nswarm_stall_parent_minutes = {d}\nboost_max_rounds = {d}\n", .{ @tagName(self.ai.swarm_mode_default), self.ai.swarm_stall_minutes, self.ai.swarm_stall_parent_minutes, self.ai.boost_max_rounds });
         if (self.ai.extensions.skills.len != 0 or self.ai.extensions.servers.len != 0) {
             var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
             defer arena.deinit();
@@ -255,6 +256,15 @@ pub const Config = struct {
                 } else if (eq(key, "model_slots")) {
                     self.ai.model_slots = try parseInt(u8, value);
                     if (self.ai.model_slots < 2 or self.ai.model_slots > 8) return error.OutOfRange;
+                } else if (eq(key, "swarm_mode_default")) self.ai.swarm_mode_default = std.meta.stringToEnum(SwarmModeDefault, try parseString(value)) orelse return error.InvalidValue else if (eq(key, "swarm_stall_minutes")) {
+                    self.ai.swarm_stall_minutes = try parseInt(u8, value);
+                    if (self.ai.swarm_stall_minutes < 1 or self.ai.swarm_stall_minutes > 30) return error.OutOfRange;
+                } else if (eq(key, "swarm_stall_parent_minutes")) {
+                    self.ai.swarm_stall_parent_minutes = try parseInt(u8, value);
+                    if (self.ai.swarm_stall_parent_minutes < 1 or self.ai.swarm_stall_parent_minutes > 30) return error.OutOfRange;
+                } else if (eq(key, "boost_max_rounds")) {
+                    self.ai.boost_max_rounds = try parseInt(u8, value);
+                    if (self.ai.boost_max_rounds < 1 or self.ai.boost_max_rounds > 8) return error.OutOfRange;
                 } else if (eq(key, "default_provider")) self.ai.default_provider = try parseString(value) else if (eq(key, "default_effort")) self.ai.default_effort = std.meta.stringToEnum(@import("../ai/provider.zig").Effort, try parseString(value)) orelse return error.InvalidValue else if (eq(key, "permission_mode")) self.ai.permission_mode = std.meta.stringToEnum(PermissionMode, try parseString(value)) orelse return error.InvalidValue else if (eq(key, "execution_mode")) self.ai.execution_mode = ExecutionMode.parse(try parseString(value)) orelse return error.InvalidExecutionMode else if (eq(key, "session_retention")) self.ai.session_retention = std.meta.stringToEnum(SessionRetention, try parseString(value)) orelse return error.InvalidSessionRetention else if (eq(key, "follow_up_mode")) self.ai.follow_up_mode = std.meta.stringToEnum(FollowUpMode, try parseString(value)) orelse return error.InvalidValue else if (eq(key, "step_display")) self.ai.step_display = std.meta.stringToEnum(StepDisplay, try parseString(value)) orelse return error.InvalidValue else if (eq(key, "redact_ip")) self.ai.redact_ip = try parseBool(value) else if (eq(key, "error_hint")) self.ai.error_hint = try parseBool(value) else if (eq(key, "provider_count")) self.ai.provider_count = try parseInt(usize, value) else try self.applyProvider(allocator, key, value);
             },
             .log => {
@@ -479,6 +489,7 @@ pub const StepDisplay = enum { collapsed, expanded };
 pub const FollowUpMode = enum { queue, steer };
 
 pub const ChildContextMode = enum { independent, inherit };
+pub const SwarmModeDefault = enum { auto, swarm, boost };
 pub const ChildReusePolicy = enum { new, prefer_reuse, model };
 pub const Ai = struct {
     child_context_mode: ChildContextMode = .independent,
@@ -494,6 +505,14 @@ pub const Ai = struct {
     child_request_concurrency: u8 = 2,
     /// V0.7 §2.3: process-level concurrent model request slots (2–8).
     model_slots: u8 = 4,
+    /// V0.7 §12.3: session initial swarm mode (auto/swarm/boost).
+    swarm_mode_default: SwarmModeDefault = .auto,
+    /// V0.7 §12.3: stall level-one threshold in minutes (1–30).
+    swarm_stall_minutes: u8 = 3,
+    /// V0.7 §12.3: stall level-two threshold in minutes (1–30).
+    swarm_stall_parent_minutes: u8 = 2,
+    /// V0.7 §12.3: boost chain round ceiling (1–8, declared by parent ≤8).
+    boost_max_rounds: u8 = 5,
     extensions: ai_extensions.Extensions = .{},
     follow_up_mode: FollowUpMode = .steer,
     default_provider: []const u8 = "anthropic",

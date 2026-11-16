@@ -34,6 +34,11 @@ pub const Host = struct {
     persistence_failure: ?anyerror = null,
     /// V0.7 §12.2: last host stall sweep timestamp (monotonic ns).
     last_stall_sweep: i128 = 0,
+    /// V0.7 §12.2/§14.4: level-1 idle window start (ms) and the escalated
+    /// level-2 banner state (parent task) with the 催父/停全部 actions.
+    stall_since_ms: i64 = 0,
+    stall_escalated: bool = false,
+    stall_parent_task: ?@import("../host/identity.zig").TaskId = null,
     pub fn init(a: std.mem.Allocator) Host {
         return .{ .allocator = a, .service = runtime.Service.init(a), .presentations = legacy.Store.init(a) };
     }

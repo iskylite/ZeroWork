@@ -187,3 +187,34 @@ test "v0.7 depends_on 门控与 challenge 工具契约" {
     // 依赖引用解析与环检测。
     try std.testing.expectError(error.DependencyCycle, orchestration.containsSelf(&.{1, 2}, 2));
 }
+
+test "v0.7 §12.3 swarm 配置键解析、范围与往返 + 停滞升级阈值读配置" {
+    const C = @import("config/config.zig");
+    const prompts = @import("ai/swarm_prompts.zig");
+    // 默认值。
+    const defaults = try C.Config.parse("[ai]\n");
+    try std.testing.expectEqual(C.SwarmModeDefault.auto, defaults.ai.swarm_mode_default);
+    try std.testing.expectEqual(@as(u8, 3), defaults.ai.swarm_stall_minutes);
+    try std.testing.expectEqual(@as(u8, 2), defaults.ai.swarm_stall_parent_minutes);
+    try std.testing.expectEqual(@as(u8, 5), defaults.ai.boost_max_rounds);
+    // 配置值与往返。
+    const configured = try C.Config.parse("[ai]\nswarm_mode_default = \"swarm\"\nswarm_stall_minutes = 5\nswarm_stall_parent_minutes = 4\nboost_max_rounds = 8\n");
+    try std.testing.expectEqual(C.SwarmModeDefault.swarm, configured.ai.swarm_mode_default);
+    try std.testing.expectEqual(@as(u8, 5), configured.ai.swarm_stall_minutes);
+    try std.testing.expectEqual(@as(u8, 4), configured.ai.swarm_stall_parent_minutes);
+    try std.testing.expectEqual(@as(u8, 8), configured.ai.boost_max_rounds);
+    var buffer: [4096]u8 = undefined;
+    const reloaded = try C.Config.parse(try configured.format(&buffer));
+    try std.testing.expectEqual(C.SwarmModeDefault.swarm, reloaded.ai.swarm_mode_default);
+    try std.testing.expectEqual(@as(u8, 8), reloaded.ai.boost_max_rounds);
+    // 越限错误定位。
+    try std.testing.expectError(error.OutOfRange, C.Config.parse("[ai]\nswarm_stall_minutes = 0\n"));
+    try std.testing.expectError(error.OutOfRange, C.Config.parse("[ai]\nswarm_stall_minutes = 31\n"));
+    try std.testing.expectError(error.OutOfRange, C.Config.parse("[ai]\nswarm_stall_parent_minutes = 0\n"));
+    try std.testing.expectError(error.OutOfRange, C.Config.parse("[ai]\nboost_max_rounds = 9\n"));
+    try std.testing.expectError(error.InvalidValue, C.Config.parse("[ai]\nswarm_mode_default = \"turbo\"\n"));
+    // 停滞阈值构造自配置（§12.2 读配置语义）。
+    const stall: prompts.StallConfig = .{ .idle_minutes = reloaded.ai.swarm_stall_minutes, .parent_minutes = reloaded.ai.swarm_stall_parent_minutes };
+    try std.testing.expectEqual(@as(u8, 5), stall.idle_minutes);
+    try std.testing.expectEqual(@as(u8, 4), stall.parent_minutes);
+}

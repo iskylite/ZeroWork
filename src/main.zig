@@ -979,7 +979,49 @@ const AiHost = struct {
         prefs.execution_mode = controls.execution_mode orelse .auto;
         try shared_host.service.store.updateChildSettings(parent, record.child.?.info.agent, record.child_settings_revision, prefs, allowed);
     }
-    fn childSelected(raw: *anyopaque, agent: @import("host/identity.zig").AgentId, revision: u64) void {
+    /// V0.7 §12.2 "催父": inject a user-attributed steer through the existing
+    /// channel (never a model message) to nudge the parent; the banner state
+    /// clears because the parent is no longer idle.
+    fn stallUrgeParent(raw: *anyopaque) void {
+        const self: *AiHost = @ptrCast(@alignCast(raw));
+        const shared_host = self.shared_service orelse return;
+        shared_host.stall_escalated = false;
+        shared_host.stall_since_ms = 0;
+        const runner = self.execution().attached_runner orelse return;
+        const conversation = runner.agent.current orelse return;
+        const fence = shared_host.service.store.fence(conversation) catch return;
+        _ = shared_host.service.submit(fence, @import("host/identity.zig").SubmissionId.generate(), .{ .content = "请检查集群状态并汇总当前进展。" }, .steer) catch return;
+        if (self.feedback) |view| view.show("已催父：注入提醒消息", .completion);
+        self.cx.requestRedraw();
+    }
+    /// V0.7 §12.2 "停全部": stop every unsettled child of this parent root.
+    /// The parent task itself keeps running so it can settle its answer.
+    fn stallStopAll(raw: *anyopaque) void {
+        const self: *AiHost = @ptrCast(@alignCast(raw));
+        const shared_host = self.shared_service orelse return;
+        shared_host.stall_escalated = false;
+        shared_host.stall_since_ms = 0;
+        const budget = @import("ai/task_budget.zig");
+        for (shared_host.service.runners.items) |runner| {
+            if (runner.agent.role != .child or runner.agent.current == null) continue;
+            const root = runner.task_root orelse continue;
+            root.lock();
+            var running = false;
+            for (root.facts[0..root.count]) |fact| {
+                if (fact.parent != null and !budget.terminal(fact.status) and fact.status != .human_wait) {
+                    running = true;
+                    break;
+                }
+            }
+            root.mutex.unlock();
+            if (!running) continue;
+            const ticket = shared_host.service.store.fence(runner.agent.current.?) catch continue;
+            shared_host.service.stop(ticket) catch continue;
+        }
+        if (self.feedback) |view| view.show("已停止全部未收尾子任务", .completion);
+        self.cx.requestRedraw();
+    }
+        fn childSelected(raw: *anyopaque, agent: @import("host/identity.zig").AgentId, revision: u64) void {
         const self: *AiHost = @ptrCast(@alignCast(raw));
         self.child_open_requested = .{ .agent = agent, .revision = revision, .parent = self.child_list_parent orelse if (self.assistant_states.?.find(self.display_conversation orelse return)) |state| state.conversation_id else null };
         self.cx.requestRedraw();
@@ -1033,6 +1075,8 @@ const AiHost = struct {
         }
         if (self.children_view) |view| {
             const shared_host = self.shared_service orelse return;
+            // V0.7 §12.2/§14.4: surface the level-2 stall escalation.
+            view.setStallEscalated(shared_host.stall_escalated);
             const state = (self.assistant_states orelse return).find(self.display_conversation orelse return) orelse return;
             const rows = try @import("ai/child_projection.zig").query(self.allocator, &shared_host.service, self.child_list_parent orelse state.conversation_id);
             defer self.allocator.free(rows);
@@ -1044,6 +1088,15 @@ const AiHost = struct {
                 };
             }
             try view.updateWithCount(rows, running_count);
+            // V0.7 §14: Board/Graph/Rounds pages ride the G3/G8 sources.
+            view.setPagesAvailable(rows.len);
+            const board_rows = try @import("ai/child_projection.zig").boardRows(self.allocator, &shared_host.service, self.child_list_parent orelse state.conversation_id);
+            defer self.allocator.free(board_rows);
+            try view.updateBoard(board_rows);
+            try view.updateGraph(rows);
+            const round_rows = try @import("ai/child_projection.zig").roundRows(self.allocator, &shared_host.service, self.child_list_parent orelse state.conversation_id);
+            defer self.allocator.free(round_rows);
+            try view.updateRounds(round_rows);
             if (!view.open.peek()) self.child_list_parent = null;
         }
     }
@@ -7186,6 +7239,30 @@ const AiHost = struct {
         defer self.allocator.free(submitted);
         if (@import("ui/ai_skill_picker.zig").isIncomplete(submitted)) return;
         const owner = self.currentBinding() orelse return error.MissingAssistantOwner;
+        // V0.7 §10.2 Auto upgrade: signal + substance two-step decision. A
+        // hit shows a one-shot "本次并行执行" marker at task start and the
+        // reason is recorded in the task event (可解释); no hit stays silent
+        // and Auto never enters Boost.
+        var auto_parallel_note: ?[]const u8 = null;
+        defer if (auto_parallel_note) |note| self.allocator.free(note);
+        if (self.composer_controls) |controls| {
+            if (controls.swarm_mode == .auto) {
+                const swarm_mode = @import("ai/swarm_mode.zig");
+                const allowed = self.captureOwnerScope(owner) catch null;
+                defer if (allowed) |scope| if (scope.inventory) |ids| self.allocator.free(ids);
+                const targets = if (allowed) |scope| scope.memberIds().len else 0;
+                const substance: swarm_mode.SubstanceCheck = .{
+                    .independent_targets = targets >= 2,
+                    .within_grant = targets >= 1,
+                    .independently_acceptable = swarm_mode.hasSignal(submitted) and targets >= 2,
+                };
+                const decision = swarm_mode.decideAuto(submitted, targets, substance);
+                if (decision.upgrade) {
+                    auto_parallel_note = try std.fmt.allocPrint(self.allocator, "本次并行执行 · {s}", .{decision.reason});
+                    if (self.feedback) |view| view.show(auto_parallel_note.?, .completion);
+                }
+            }
+        }
         try self.syncOwner();
         const backend = try self.bindAttached(owner);
         const state = self.assistant_states.?.find(self.display_conversation orelse return error.ConversationNotFound).?;
@@ -10150,27 +10227,60 @@ const AiHost = struct {
     /// settled, summarize" wake when a parent idles with every child in a
     /// terminal state; deferring rules for board posts follow the same G8
     /// delivery pipeline inside the waiting loop. No model is consulted.
+    /// V0.7 §12.2/§12.3: deterministic stall sweep with configured
+    /// thresholds. Level 1 wakes the parent (G2 delivery); level 2 raises
+    /// the panel stall banner with the 催父/停全部 actions after the parent
+    /// stays idle past swarm_stall_parent_minutes.
     fn sweepStalls(self: *AiHost, shared_host: *@import("ai/attached_service.zig").Host) void {
-        _ = self;
+        const swarm_prompts = @import("ai/swarm_prompts.zig");
         const budget = @import("ai/task_budget.zig");
+        const runtime = self.runtime_config orelse return;
+        const config: swarm_prompts.StallConfig = .{
+            .idle_minutes = runtime.value.ai.swarm_stall_minutes,
+            .parent_minutes = runtime.value.ai.swarm_stall_parent_minutes,
+            .stuck_minutes = 10,
+        };
+        const now = @import("platform/realtime.zig").milliseconds(undefined);
         for (shared_host.service.task_roots.items) |root| {
-            // Only roots whose parent task is still active matter.
             var parent_active = false;
+            var any_running = false;
+            var any_human_wait = false;
             var all_terminal = true;
+            var undelivered = false;
+            var root_task: ?@import("host/identity.zig").TaskId = null;
             root.lock();
             defer root.mutex.unlock();
             for (root.facts[0..root.count]) |fact| {
                 if (fact.parent == null) {
+                    root_task = fact.task;
                     parent_active = !budget.terminal(fact.status);
                     continue;
                 }
-                if (!budget.terminal(fact.status)) all_terminal = false;
+                if (!budget.terminal(fact.status)) {
+                    all_terminal = false;
+                    if (fact.status == .human_wait) any_human_wait = true else any_running = true;
+                } else if (fact.reported_sequence < fact.event_sequence) undelivered = true;
             }
-            if (!parent_active or !all_terminal or root.count < 2) continue;
-            // All children settled while the parent idles. The parent's own
-            // dependency wait in turn_manager observes this on its next tick
-            // and delivers the settled reports (G2); the sweep itself stays
-            // deterministic and model-free (§12.2).
+            if (!parent_active or root_task == null) continue;
+            // Level 1: all children settled, parent has not finished — the
+            // parent's dependency wait already delivers on its next tick;
+            // track the idle window for level 2.
+            if (all_terminal and root.count >= 2) {
+                const since = now -| shared_host.stall_since_ms;
+                if (shared_host.stall_since_ms == 0) {
+                    shared_host.stall_since_ms = now;
+                } else if (@divTrunc(since, 60000) >= config.parent_minutes) {
+                    if (!shared_host.stall_escalated) {
+                        shared_host.stall_escalated = true;
+                        shared_host.stall_parent_task = root_task;
+                        self.cx.scheduleRedrawAfterNs(16 * std.time.ns_per_ms);
+                    }
+                }
+                continue;
+            }
+            // Activity resets the stall window (§12.2: any child running,
+            // waiting on the user, undelivered events or fresh board posts).
+            if (any_running or any_human_wait or undelivered or root.board_posts.items.len != 0) shared_host.stall_since_ms = 0;
         }
     }
         const PollHook = struct {
@@ -17374,7 +17484,7 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
         }.run);
     }
 
-    ai_host.children_view = try @import("ui/ai_children_view.zig").View.mount(cx, scope, ai_children, .{ .context = ai_host, .select = AiHost.childSelected });
+    ai_host.children_view = try @import("ui/ai_children_view.zig").View.mount(cx, scope, ai_children, .{ .context = ai_host, .select = AiHost.childSelected, .urge_parent = AiHost.stallUrgeParent, .stop_all = AiHost.stallStopAll });
     try ai_header.appendChild(cx.allocator, ai_host.children_view.?.root);
     ai_host.sessions_view = try @import("ui/ai_sessions_view.zig").View.mountOwned(cx, scope, ai_sessions, ai_card_box, .{ .context = ai_host, .select = AiHost.selectConversation, .request_close = AiHost.requestConversationClose, .remove = AiHost.deleteConversation, .act = AiHost.conversationAction, .confirmed = AiHost.lifecycleConfirmed });
     try ai_header.appendChild(cx.allocator, ai_host.sessions_view.?.root);

@@ -23,6 +23,24 @@ pub const Entry = struct {
     requests: u64 = 0,
     tokens: u64 = 0,
 };
+
+/// V0.7 §14.2 Board row: a board post rendered from the G8 event stream.
+pub const BoardRow = struct {
+    kind: []const u8,
+    origin: u32,
+    category: []const u8,
+    to: []const u8,
+    text: []const u8,
+};
+
+/// V0.7 §14.3 Rounds row: a boost chain round entry.
+pub const RoundRow = struct {
+    seq: u32,
+    label: []const u8,
+    status: []const u8,
+    summary: []const u8,
+    round: usize,
+};
 pub fn latest(service: *runtime.Service, agent: id.AgentId) ?budget.Fact {
     var result: ?budget.Fact = null;
     for (service.store.task_facts.items) |saved| if (saved.fact.agent.eql(agent)) {
@@ -83,5 +101,55 @@ pub fn query(a: std.mem.Allocator, service: *runtime.Service, parent: id.Convers
         try rows.append(a, entry(service, record));
     };
     std.mem.sort(Entry, rows.items, {}, less);
+    return rows.toOwnedSlice(a);
+}
+
+/// V0.7 §14.2/G8: the parent root's board posts as UI rows. Posts stay on the
+/// board for reading even after model delivery consumed them (§11.2); this
+/// projection is read-only and never mutates the delivery watermark.
+pub fn boardRows(a: std.mem.Allocator, service: *runtime.Service, parent: id.ConversationId) ![]BoardRow {
+    var rows: std.ArrayList(BoardRow) = .empty;
+    errdefer rows.deinit(a);
+    for (service.task_roots.items) |root| {
+        root.lock();
+        defer root.mutex.unlock();
+        // The parent root is the one holding the parent fact for this
+        // conversation's delegated children.
+        var owns = false;
+        for (root.facts[0..root.count]) |fact| {
+            if (fact.parent == null and fact.conversation.eql(parent)) {
+                owns = true;
+                break;
+            }
+        }
+        if (!owns) continue;
+        for (root.board_posts.items) |post| {
+            const target: []const u8 = switch (post.to) {
+                .parent => "协调者",
+                .member => "成员",
+                .all => "全体",
+            };
+            try rows.append(a, .{ .kind = post.kind, .origin = post.origin, .category = @tagName(post.category), .to = target, .text = post.text });
+        }
+    }
+    return rows.toOwnedSlice(a);
+}
+
+/// V0.7 §14.3: boost chain rounds — delegated children grouped by creation
+/// order into rounds of the implement→challenge→repair chain. This edition
+/// derives a simple ordinal round per sibling (full chain attribution lands
+/// with challenge_target linkage persistence).
+pub fn roundRows(a: std.mem.Allocator, service: *runtime.Service, parent: id.ConversationId) ![]RoundRow {
+    var rows: std.ArrayList(RoundRow) = .empty;
+    errdefer rows.deinit(a);
+    for (service.store.records.items) |record| if (record.child) |owned| if (owned.info.owning_parent_conversation.eql(parent)) {
+        const item = entry(service, record);
+        try rows.append(a, .{ .seq = item.seq, .label = if (item.name.len != 0) item.name else "", .status = item.status, .summary = item.summary, .round = @intFromBool(item.seq > 1) });
+    };
+    std.mem.sort(RoundRow, rows.items, {}, struct {
+        fn less(_: void, left: RoundRow, right: RoundRow) bool {
+            return left.seq < right.seq;
+        }
+    }.less);
     return rows.toOwnedSlice(a);
 }

@@ -39,12 +39,13 @@ test "v0.4 child list retains exact identity under updates, hides removed rows a
     const second: projection.Entry = .{ .agent = .generate(), .conversation = .generate(), .revision = 1, .name = "运行任务", .status = "运行中", .group = .active, .running = true, .reusable = true };
     view.open.set(false);
     try view.update(&.{ first, second });
+    // V0.7 §14.4: the badge counts waiting-for-user children (red-dot
+    // semantics): first is 等待用户 so the badge shows 1 even with the
+    // passed running_count; second alone (running) keeps it hidden.
     try std.testing.expectEqualStrings("1", view.badge.getText().?.content);
     try std.testing.expect(view.badge.style.display == .flex);
-    try view.updateWithCount(&.{ first, second }, 0);
+    try view.updateWithCount(&.{second}, 1);
     try std.testing.expect(view.badge.style.display == .none);
-    try view.updateWithCount(&.{first}, 2);
-    try std.testing.expectEqualStrings("2", view.badge.getText().?.content);
     view.open.set(true);
     try view.update(&.{ first, second });
     var key: [64]u8 = undefined;
@@ -124,4 +125,41 @@ test "v0.4 shared assistant header and floating shadows retain the same geometry
         const shadows = panel.style.shadowSlice();
         try std.testing.expect(shadows.len != 0 and shadows[0].color.a > 0 and shadows[0].blur >= 16);
     }
+}
+
+test "v0.7 panel pages: tabs gate on children, switch exclusively, stall banner toggles" {
+    defer theme.select(.sauber);
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(860, 480);
+    cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
+    const scope = try ui.Scope.init(a, null, cx.owner);
+    defer scope.dispose();
+    defer cx.clearFocus();
+    const button = try ui.widgets.Button(.{ .label = "子智能体" }).mount(scope, cx);
+    try cx.root.?.appendChild(a, button);
+    var selection: Selection = .{};
+    const view = try View.mount(cx, scope, button, .{ .context = &selection, .select = Selection.select });
+    try cx.root.?.appendChild(a, view.root);
+    view.open.set(true);
+    try view.update(&.{});
+    // 无子任务：Board/Graph/Rounds 页签隐藏，成员页签可见。
+    view.setPagesAvailable(0);
+    try std.testing.expect(find(cx.root.?, "ai.children.tab.members").?.style.display == .flex);
+    try std.testing.expect(find(cx.root.?, "ai.children.tab.board").?.style.display == .none);
+    try std.testing.expect(find(cx.root.?, "ai.children.tab.graph").?.style.display == .none);
+    try std.testing.expect(find(cx.root.?, "ai.children.tab.rounds").?.style.display == .none);
+    // 有子任务：页签全部可见。
+    view.setPagesAvailable(2);
+    try std.testing.expect(find(cx.root.?, "ai.children.tab.board").?.style.display == .flex);
+    try std.testing.expect(find(cx.root.?, "ai.children.tab.rounds").?.style.display == .flex);
+    // 停滞警示条：默认隐藏，升级后显示。
+    const banner = find(cx.root.?, "ai.children.stall").?;
+    try std.testing.expect(banner.style.display == .none);
+    view.setStallEscalated(true);
+    try std.testing.expect(banner.style.display == .flex);
+    try std.testing.expect(find(cx.root.?, "ai.children.stall.urge") != null);
+    try std.testing.expect(find(cx.root.?, "ai.children.stall.stop") != null);
+    view.setStallEscalated(false);
+    try std.testing.expect(banner.style.display == .none);
 }

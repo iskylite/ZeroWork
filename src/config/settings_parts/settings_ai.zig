@@ -53,7 +53,18 @@ pub fn mountContent(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
         try section.input(.{ .section = "ai", .key = "child_request_concurrency" }, "子任务预算 · 每任务并发模型请求", "1–8。默认 2。只对新根任务生效。", null);
         try section.input(.{ .section = "ai", .key = "model_slots" }, "子任务预算 · 进程级模型请求槽", "2–8。默认 4。进程启动时生效。", null);
     }
-    if (binding.matches(query, "上下文 来源 脱敏 隐私 IP 主机 用户 redact_ip")) {
+    if (binding.matches(query, "多智能体 编排 模式 停滞 催父 轮次 swarm swarm_mode_default swarm_stall_minutes swarm_stall_parent_minutes boost_max_rounds")) {
+        const section = try page.section("多智能体", "Swarm 编排默认与停滞检测", ui.icons.get("network").?, 31, "settings.ai.swarm", null);
+        try section.select(.{ .section = "ai", .key = "swarm_mode_default" }, "会话初始编排模式", "新会话的初始档位。Auto 由宿主按信号+实质自动判定；Swarm 多子并行；Boost 深度攻坚（仅手动进入）。", &[_]ui.widgets.SelectOption{
+            .{ .value = "auto", .label = "Auto 自动判定" },
+            .{ .value = "swarm", .label = "Swarm 多子并行" },
+            .{ .value = "boost", .label = "Boost 深度攻坚" },
+        }, null);
+        try section.input(.{ .section = "ai", .key = "swarm_stall_minutes" }, "停滞第一级阈值（分钟）", "1–30。默认 3。全部子空闲且板上无新帖达到阈值后唤醒父。", null);
+        try section.input(.{ .section = "ai", .key = "swarm_stall_parent_minutes" }, "停滞第二级阈值（分钟）", "1–30。默认 2。父被唤醒后仍无动作达到阈值后面板警示并桌面通知。", null);
+        try section.input(.{ .section = "ai", .key = "boost_max_rounds" }, "Boost 轮次上限", "1–8。默认 5。单条实现→挑战→修复链的轮次上限；父可声明更小值。", null);
+    }
+        if (binding.matches(query, "上下文 来源 脱敏 隐私 IP 主机 用户 redact_ip")) {
         const section = try page.section("上下文", "连接身份与敏感信息", ui.icons.file_text, 25, "settings.ai.context", null);
         try section.toggle(.{ .section = "ai", .key = "redact_ip" }, "隐藏连接身份", "隐藏 SSH 连接的 IP、主机名和用户名。终端正文与附件仍按原文发送，请检查敏感内容。", null);
     }
