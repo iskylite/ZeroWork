@@ -78,13 +78,22 @@ pub const View = struct {
             hash.update(entry.status);
             hash.update(entry.summary);
         }
+        // V0.7 §14.1 计数口径: "运行中"仅含执行中与等待用户任务；排队等
+        // 模型槽的任务单独计入徽标——徽标即待审批子任务数（§14.4 红点）。
+        var waiting_approval: usize = 0;
+        for (entries) |entry| {
+            if (entry.status.len >= 12 and std.mem.eql(u8, entry.status[0..12], "等待用户")) waiting_approval += 1;
+        }
         count = running_count orelse count;
         var count_buffer: [64]u8 = undefined;
-        const count_label = try std.fmt.bufPrint(&count_buffer, "{d} 个运行中", .{count});
+        const count_label = if (waiting_approval != 0)
+            try std.fmt.bufPrint(&count_buffer, "{d} 个运行中 · {d} 待审批", .{ count, waiting_approval })
+        else
+            try std.fmt.bufPrint(&count_buffer, "{d} 个运行中", .{count});
         if (!sameText(self.heading_count, count_label)) try self.heading_count.setTextContent(self.cx.allocator, count_label);
-        const label = try std.fmt.bufPrint(&self.a11y_label, "子智能体，{d} 个运行中", .{count});
+        const label = try std.fmt.bufPrint(&self.a11y_label, "子智能体，{d} 个运行中，{d} 个等待用户", .{ count, waiting_approval });
         if (self.button.behavior.interaction.a11y) |*a11y| a11y.label = label;
-        try Header.updateCountBadge(self.cx, self.badge, count);
+        try Header.updateCountBadge(self.cx, self.badge, waiting_approval);
         if (!self.open.peek()) {
             self.fingerprint = 0;
             return;
