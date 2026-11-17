@@ -25,6 +25,7 @@ pub const Hooks = struct {
     mount_extensions: ?*const fn (*anyopaque, *ui.Cx, *ui.Scope) anyerror!*ui.Node = null,
     mount_providers: ?*const fn (*anyopaque, *ui.Cx, *ui.Scope) anyerror!*ui.Node = null,
     mount_provider_action: ?*const fn (*anyopaque, *ui.Cx, *ui.Scope) anyerror!*ui.Node = null,
+    discovered_ai: ?*const fn (*anyopaque) config.Ai = null,
     appearance: ?*@import("appearance_ui_context.zig").Context = null,
     authorization_help: ?*const fn (*anyopaque) []const u8 = null,
     authorization_feedback: ?*const fn (*anyopaque) ?[]const u8 = null,
@@ -213,6 +214,7 @@ pub fn mountPage(cx: *ui.Cx, scope: *ui.Scope, controller: *Controller, hooks: H
     scroll.container.meta.ownership.meta.test_id = "settings.viewport";
     scroll.content.style.padding = .{ .left = 5, .right = 5, .bottom = 12 };
     scroll.content.style.gap = styles.geometry.section_gap;
+    binding.scroll = scroll;
     const page = try mountBody(cx, binding);
     try scroll.content.appendChild(cx.allocator, page);
     try root.appendChild(cx.allocator, scroll.container);
@@ -346,6 +348,7 @@ pub const Binding = struct {
     scope: *ui.Scope,
     legacy_save: ?*ui.Node = null,
     cx: *ui.Cx,
+    scroll: ?ui.widgets.ScrollAreaResult = null,
     save_disabled: *ui.Signal(bool),
     revert_disabled: *ui.Signal(bool),
     save_tint: *ui.Signal(?ui.Color),

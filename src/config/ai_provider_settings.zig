@@ -47,6 +47,7 @@ pub const ProviderView = struct {
     catalog_provider: ?usize = null,
     catalog_signature: u64 = 0,
     catalog_revision: u64 = 0,
+    catalog_import: bool = false,
     catalog_message: []const u8 = "",
     catalog_detail: [1400]u8 = undefined,
 
@@ -127,14 +128,10 @@ pub const ProviderView = struct {
         }
         if (self.discovery.busy()) {
             if (self.discovery.finishRequest()) {
-                const valid = if (self.catalog_provider) |i| i < self.controller.model.value.ai.provider_count and self.catalog_signature == connectionSignature(self.controller.model.value.ai.providers[i]) else false;
-                self.catalog_message = if (!valid) "连接配置已变化，请重新获取模型清单。" else if (self.discovery.request_error) |err| switch (err) {
-                    error.Cancelled => "已取消获取；可重新获取或手动添加模型。",
-                    error.InvalidCatalog => "接口未提供有效模型清单，可手动添加模型。",
-                    else => self.discovery.diagnostic.format(&self.catalog_detail, err),
-                } else if (self.catalogModels().len == 0) "接口未返回模型，可重新获取或手动添加。" else "模型清单已获取，添加模型时可下拉选择。";
+                self.catalog_message = self.completeCatalog();
                 if (self.model_editor) |editor| editor.updateCatalog(self.catalogFor(editor.provider), self.catalog_message, false) catch {};
                 self.pending = true;
+                self.notify();
             } else self.cx.scheduleRedrawAfterNs(33 * 1000000);
         }
         if (self.delete_dialog) |dialog| {
@@ -321,6 +318,7 @@ pub const ProviderView = struct {
         h.update(p.name);
         h.update(p.endpoint);
         h.update(p.api_key);
+        std.hash.autoHashStrat(&h, p.api_key_ref, .Deep);
         std.hash.autoHash(&h, p.kind);
         return h.final();
     }
@@ -342,7 +340,7 @@ pub const ProviderView = struct {
     }
     fn fetchEditorModels(raw: *anyopaque, provider: usize) void {
         const self: *ProviderView = @ptrCast(@alignCast(raw));
-        self.fetchModels(provider);
+        self.fetchModels(provider, false);
         if (self.model_editor) |editor| editor.updateCatalog(&.{}, self.catalog_message, self.discovery.busy()) catch {};
     }
     fn candidateMetadata(raw: *anyopaque, model_id: []const u8) ?@import("../ai/model_discovery.zig").ModelMetadata {
@@ -354,18 +352,128 @@ pub const ProviderView = struct {
         return if (ai.provider_count > 0) ai.providers[0].models[0..ai.providers[0].model_count] else &.{};
     }
     fn catalogFor(self: *const ProviderView, i: usize) []const config.AiModel {
-        if (self.catalog_provider != i or i >= self.controller.model.value.ai.provider_count or self.catalog_signature != connectionSignature(self.controller.model.value.ai.providers[i])) return &.{};
+        if (self.catalog_provider != i) return &.{};
+        const provider = self.catalogConnection(i) orelse return &.{};
+        if (self.catalog_signature != connectionSignature(provider)) return &.{};
         return self.catalogModels();
     }
-    fn fetchModels(self: *ProviderView, i: usize) void {
+    fn catalogConnection(self: *const ProviderView, i: usize) ?config.AiProvider {
+        if (i >= self.controller.model.value.ai.provider_count) return null;
+        for (self.controller.ai_fields.fields.items) |field| {
+            if (field.address.provider != i or field.problem == null) continue;
+            switch (field.address.field) {
+                .name, .endpoint, .api_key => return null,
+                else => {},
+            }
+        }
+        return self.controller.model.value.ai.providers[i];
+    }
+    fn completeCatalog(self: *ProviderView) []const u8 {
+        const i = self.catalog_provider orelse return "";
+        const changed = "连接配置已变化，请重新获取模型清单。";
+        const provider = self.catalogConnection(i) orelse return changed;
+        if (self.catalog_signature != connectionSignature(provider)) return changed;
+        if (self.discovery.request_error) |err| return switch (err) {
+            error.Cancelled => "已取消获取。",
+            error.InvalidCatalog => "接口未提供有效模型清单，可手动添加模型。",
+            else => self.discovery.diagnostic.format(&self.catalog_detail, err),
+        };
+        const models = self.catalogModels();
+        if (models.len == 0) return "接口未返回模型，可重新获取或手动添加。";
+        if (!self.catalog_import) return "模型清单已获取，可下拉选择。";
+        const count = self.importCatalog(i, models) catch |err| return switch (err) {
+            error.InvalidCatalog => "接口未返回可导入的模型。",
+            error.WriteFailed => "模型清单超过设置文件容量，无法导入。",
+            else => "无法更新模型清单，请检查当前设置后重试。",
+        };
+        return std.fmt.bufPrint(&self.catalog_detail, "已同步 {d} 个模型", .{count}) catch "模型清单已更新";
+    }
+
+    fn importCatalog(self: *ProviderView, index: usize, catalog: []const config.AiModel) !usize {
+        var owned = try runtime.Snapshot.init(self.scope.allocator, self.controller.model.value);
+        defer owned.deinit();
+        const a = owned.arena.allocator();
+        const p = &owned.value.ai.providers[index];
+        const previous = p.models[0..p.model_count];
+        var remote: std.StringHashMapUnmanaged(config.AiModel) = .empty;
+        for (catalog) |model| {
+            if (std.mem.trim(u8, model.id, " \t").len == 0 or std.mem.indexOfAny(u8, model.id, "\x00\"\\\n\r;#") != null) continue;
+            try remote.put(a, model.id, model);
+        }
+        const count = remote.count();
+        if (count == 0) return error.InvalidCatalog;
+
+        var merged: std.ArrayList(config.AiModel) = .empty;
+        var removed: std.ArrayList(usize) = .empty;
+        for (previous, 0..) |entry, j| {
+            var model = entry;
+            if (remote.fetchRemove(model.id)) |found| {
+                if (model.catalog_managed) {
+                    model = importedModel(found.value);
+                    if (model.context_window == 0) model.context_window = entry.context_window;
+                    model.default = entry.default;
+                }
+            } else if (model.catalog_managed) {
+                try removed.append(a, j);
+                continue;
+            }
+            try merged.append(a, model);
+        }
+        if (previous.len == 0 and p.model.len != 0) {
+            const found = remote.fetchRemove(p.model);
+            try merged.append(a, .{
+                .id = p.model,
+                .context_window = if (p.context_window != 0) p.context_window else if (found) |entry| entry.value.context_window else 0,
+                .default = true,
+                .efforts = @splat(false),
+            });
+        }
+        for (catalog) |candidate| {
+            if (!remote.remove(candidate.id)) continue;
+            try merged.append(a, importedModel(candidate));
+        }
+        const default = for (merged.items, 0..) |model, j| {
+            if (model.default) break j;
+        } else for (merged.items, 0..) |model, j| {
+            if (model.context_window != 0) break j;
+        } else 0;
+        merged.items[default].default = true;
+        p.models = merged.items;
+        p.model_count = merged.items.len;
+        _ = try owned.value.format(try a.alloc(u8, @import("store.zig").max_config_bytes));
+        try self.controller.editProviders(owned.value.ai);
+        var j = removed.items.len;
+        while (j > 0) {
+            j -= 1;
+            self.controller.ai_fields.removeModel(self.scope.allocator, index, removed.items[j]);
+        }
+        self.controller.refreshDirty();
+        return count;
+    }
+
+    fn importedModel(candidate: config.AiModel) config.AiModel {
+        return .{
+            .id = candidate.id,
+            .catalog_managed = true,
+            .context_window = candidate.context_window,
+            .reasoning = candidate.reasoning and std.mem.indexOfScalar(bool, &candidate.efforts, true) != null,
+            .vision = candidate.vision,
+            .efforts = candidate.efforts,
+        };
+    }
+
+    fn fetchModels(self: *ProviderView, i: usize, import_list: bool) void {
         if (self.discovery.busy()) {
             self.discovery.cancelRequest();
             self.catalog_message = "正在取消获取…";
             self.schedule();
             return;
         }
-        if (i >= self.controller.model.value.ai.provider_count) return;
-        const p = self.controller.model.value.ai.providers[i];
+        const p = self.catalogConnection(i) orelse {
+            self.error_text = "请先检查服务提供方的连接配置。";
+            self.notify();
+            return;
+        };
         if (!draft.endpointValid(p.endpoint)) {
             self.error_text = "请先填写有效的 API 地址。";
             self.notify();
@@ -373,12 +481,14 @@ pub const ProviderView = struct {
         }
         self.catalog_provider = i;
         self.catalog_signature = connectionSignature(p);
+        self.catalog_import = import_list;
         self.catalog_revision +|= 1;
         self.discovery.request(p, self.catalog_revision) catch {
             self.error_text = "无法开始获取模型清单，请重试。";
             self.notify();
             return;
         };
+        self.error_text = "";
         self.catalog_message = "正在获取模型清单…";
         self.schedule();
     }
@@ -450,7 +560,7 @@ pub const ProviderView = struct {
         const models_title = try ui.textStyled(self.cx, S.label, try controls.owned(self.render_scope.?, try std.fmt.bufPrint(&summary_buffer, "模型  {d}", .{p.model_count})));
         try models_heading.appendChild(self.cx.allocator, models_title);
         try models_heading.appendChild(self.cx.allocator, try ui.spacer(self.cx));
-        try models_heading.appendChild(self.cx.allocator, try self.textAction(.fetch_models, i, if (self.discovery.busy() and self.catalog_provider == i) "取消获取" else "获取模型清单", null, false));
+        try models_heading.appendChild(self.cx.allocator, try self.textAction(.fetch_models, i, if (self.discovery.busy() and self.catalog_provider == i) "取消获取" else "自动构建模型清单", null, false));
         try models_heading.appendChild(self.cx.allocator, try self.textAction(.add_model, i, "添加模型", ui.icons.plus, false));
         try result.body.appendChild(self.cx.allocator, models_heading);
         if (self.catalog_provider == i and self.catalog_message.len != 0) {
@@ -463,7 +573,7 @@ pub const ProviderView = struct {
             try empty.appendChild(self.cx.allocator, try ui.iconTint(self.cx, ui.icons.box, S.theme.current().fg_2, .{ .width = .{ .px = 16 }, .height = .{ .px = 16 } }));
             const message = try ui.box(self.cx, .{ .width = .fill(), .flex = 1, .direction = .column, .gap = 3 }, .{});
             try message.appendChild(self.cx.allocator, try ui.textStyled(self.cx, S.label, "尚未添加模型"));
-            const hint = if (p.enabled and p.model.len == 0 and draft.connectionValid(p)) "助手会自动获取模型清单。" else "获取模型清单后选择，也可手动输入模型。";
+            const hint = if (p.enabled and p.model.len == 0 and draft.connectionValid(p)) "助手会自动获取模型清单。" else "可自动构建清单，也可手动添加模型。";
             try message.appendChild(self.cx.allocator, try ui.textStyled(self.cx, S.note, hint));
             try empty.appendChild(self.cx.allocator, message);
             const first = try self.textAction(.add_model, i, "添加第一个模型 →", null, false);
@@ -573,7 +683,7 @@ pub const ProviderView = struct {
         metadata.meta.ownership.meta.test_id = try self.id(i, j, "metadata");
         try info.appendChild(self.cx.allocator, metadata);
         var buffer: [32]u8 = undefined;
-        const context_tip = try self.tooltip(try numberText(model.context_window, &buffer));
+        const context_tip = try self.tooltip(if (model.context_window == 0) "请编辑模型并填写上下文窗口。" else try numberText(model.context_window, &buffer));
         const window = try ui.text(self.cx, try controls.owned(self.render_scope.?, try contextText(model.context_window, &buffer)), .{ .font_size = 10.5, .line_height = 16.0 / 10.5, .color = S.theme.current().fg_2, .text_overflow = .ellipsis });
         window.setStyleInline(self.cx.allocator, .{ .height = .{ .px = 16 }, .flex_shrink = 0 });
         context_tip.wrapper.setStyleInline(self.cx.allocator, .{ .width = .{ .fit = .{} }, .min_width = 0 });
@@ -607,7 +717,10 @@ pub const ProviderView = struct {
             next[j] = model;
             p.models = next;
             p.model_count += 1;
-        } else p.models[j] = model;
+        } else {
+            p.models[j] = model;
+            p.models[j].catalog_managed = false;
+        }
         try draft.assign(&owned.value.ai, .{ .provider = i, .model = j, .field = .model_id }, model.id);
         if (model.context_window == 0) return error.InvalidContextWindow;
         if (!draft.modelValid(model)) return error.LastEffortRequired;
@@ -650,7 +763,7 @@ pub const ProviderView = struct {
         const ai = self.controller.model.value.ai;
         if (i >= ai.provider_count) return false;
         const p = ai.providers[i];
-        if (j) |index| return index < p.model_count and draft.modelValid(p.models[index]);
+        if (j) |index| return index < p.model_count and p.models[index].context_window != 0 and draft.modelValid(p.models[index]);
         return p.enabled and draft.eligible(p);
     }
     fn input(self: *ProviderView, address: draft.Address, placeholder: []const u8, width: f32, height: f32) !*ui.Node {
@@ -992,9 +1105,11 @@ const Click = struct {
         const v = self.view;
         if (v.disabled.peek()) return;
         if (self.action == .fetch_models) {
-            v.fetchModels(self.provider);
+            v.fetchModels(self.provider, true);
             return;
         }
+        if (v.discovery.busy() and v.catalog_import and v.catalog_provider == self.provider and
+            (self.action == .add_model or self.action == .edit_model or self.action == .delete_model)) return;
         if ((self.action == .delete_provider or self.action == .delete_model) and !self.confirmed) {
             if (v.hasModelEditor()) return;
             v.delete_request = .{ .provider = self.provider, .model = if (self.action == .delete_model) self.model else null };
@@ -1194,6 +1309,7 @@ fn numberText(value: u32, buffer: []u8) ![]const u8 {
 }
 
 fn contextText(value: u32, buffer: []u8) ![]const u8 {
+    if (value == 0) return "上下文未知";
     if (value >= 1_000_000) return std.fmt.bufPrint(buffer, "{d:.1}M 上下文", .{@as(f64, @floatFromInt(value)) / 1_000_000});
     if (value >= 1000) return std.fmt.bufPrint(buffer, "{d:.0}K 上下文", .{@as(f64, @floatFromInt(value)) / 1000});
     return std.fmt.bufPrint(buffer, "{d} 上下文", .{value});

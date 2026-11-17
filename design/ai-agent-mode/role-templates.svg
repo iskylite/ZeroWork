@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="492" height="338" viewBox="0 0 492 338" xml:lang="zh-CN">
+<svg xmlns="http://www.w3.org/2000/svg" width="492" height="314" viewBox="0 0 492 314" xml:lang="zh-CN">
   <title>角色模板设置</title>
   <style>
     text { font: 12px Inter, "PingFang SC", sans-serif; fill: #eeeef2; dominant-baseline: central; }
@@ -7,14 +7,17 @@
     .icon { fill: none; stroke: #b7b8c2; stroke-width: 1.3; stroke-linecap: round; stroke-linejoin: round; }
   </style>
   <defs><path id="chevron" d="m0 0 3 3 3-3"/></defs>
-  <rect width="492" height="338" rx="12" fill="#26262d"/>
+  <rect width="492" height="314" rx="12" fill="#26262d"/>
   <path d="m20 18 7 4-7 4-7-4zm-7 8 7 4 7-4m-14 4 7 4 7-4" fill="none" stroke="#a099fc" stroke-width="1.3"/>
   <text x="38" y="26" font-weight="700">角色模板</text><use href="#chevron" class="icon" x="459" y="24"/>
-  <text x="16" y="56">均衡</text><rect class="field" x="401" y="44" width="75" height="24" rx="7"/><text x="414" y="56">设为默认</text>
-  <text x="16" y="88">巡检</text><text x="312" y="88" class="secondary">默认</text>
-  <rect class="field" x="352" y="76" width="38" height="24" rx="7"/><text x="359" y="88">编辑</text>
-  <rect class="field" x="395" y="76" width="38" height="24" rx="7"/><text x="402" y="88">复制</text>
-  <rect class="field" x="438" y="76" width="38" height="24" rx="7"/><text x="445" y="88">删除</text>
+  <text x="16" y="56" class="secondary">1 个模板 · 1 个启用</text>
+  <g id="add-template" aria-label="新建模板">
+    <path class="icon" d="M464 51v10m-5-5h10"/>
+  </g>
+  <g id="template-header" aria-label="巡检">
+    <text x="24" y="88">巡检</text>
+    <use href="#chevron" class="icon" transform="translate(465 89.5) rotate(180)"/>
+  </g>
   <g id="editor" transform="translate(16 105)">
     <rect width="460" height="193" rx="8" fill="#222229"/>
     <rect class="field" x="8" y="8" width="444" height="25" rx="6"/>
@@ -39,8 +42,17 @@
       <rect class="field" x="52" width="216" height="24" rx="6"/><text x="62" y="12">继承会话模型</text><use href="#chevron" class="icon" x="251" y="10"/>
       <rect class="field" x="274" width="128" height="24" rx="6"/><text x="284" y="12">自动推理强度</text><use href="#chevron" class="icon" x="385" y="10"/>
     </g>
+    <g id="template-activation" aria-label="停用模板" transform="translate(23 173)">
+      <path class="icon" style="stroke:#a099fc" d="M0-7v6m-4-4a6 6 0 1 0 8 0"/>
+    </g>
+    <g id="template-copy" aria-label="复制模板" transform="translate(59 173)">
+      <rect class="icon" x="-2" y="-2" width="8" height="8" rx="1.3"/>
+      <path class="icon" d="M2-5a1 1 0 0 0-1-1h-6a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1"/>
+    </g>
+    <g id="template-remove" aria-label="删除模板" transform="translate(95 173)">
+      <path class="icon" style="stroke:#eda4a9" d="M-6-4H6m-8 0v-2h4v2m-6 0 .7 10h6.6L4-4M-1 0v3m2-3v3"/>
+    </g>
     <rect class="field" x="359" y="161" width="42" height="24" rx="6"/><text x="368" y="173">取消</text>
     <rect class="field" x="407" y="161" width="45" height="24" rx="6"/><text x="417" y="173">应用</text>
   </g>
-  <rect class="field" x="16" y="306" width="82" height="24" rx="7"/><text x="33" y="318">新建模板</text>
 </svg>

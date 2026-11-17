@@ -376,22 +376,26 @@ const Job = struct {
             const plan: http.RequestPlan = .{ .method = .GET, .endpoint = url, .accept = "application/json", .auth_style = auth, .api_key = if (key.len == 0) null else key, .timeout_ms = 10000, .cancel = &self.cancel };
             const body = if (key.len == 0 and p.api_key_ref != null) null else self.fetch(t, plan, "") catch |err| if (self.require_list) return err else null;
             var remote: ?catalog.Catalog = if (body) |bytes| catalog.Catalog.parse(std.heap.c_allocator, bytes, if (p.kind == .ollama) .ollama else .endpoint) catch null else null;
+            defer if (remote) |*c| c.deinit();
             if (self.require_list and remote == null) return error.InvalidCatalog;
             if (p.kind == .anthropic and remote != null and body != null) {
                 var page_body = body.?;
                 var last_cursor: []const u8 = "";
-                for (0..49) |_| {
+                for (0..50) |page_index| {
                     const parsed = try std.json.parseFromSlice(std.json.Value, a, page_body, .{});
                     const more = catalog.field(parsed.value, "has_more") orelse break;
                     if (more != .bool or !more.bool) break;
-                    const cursor = catalog.field(parsed.value, "last_id") orelse break;
-                    if (cursor != .string or cursor.string.len == 0 or cursor.string.len > 512 or std.mem.eql(u8, cursor.string, last_cursor)) break;
+                    const cursor = catalog.field(parsed.value, "last_id") orelse if (self.require_list) return error.InvalidCatalog else break;
+                    if (page_index == 49 or cursor != .string or cursor.string.len == 0 or cursor.string.len > 512 or std.mem.eql(u8, cursor.string, last_cursor)) {
+                        if (self.require_list) return error.InvalidCatalog;
+                        break;
+                    }
                     last_cursor = cursor.string;
                     const escaped = try escapeCursor(a, cursor.string);
                     var next_plan = plan;
                     next_plan.endpoint = try std.fmt.allocPrint(a, "{s}{s}limit=1000&after_id={s}", .{ url, if (std.mem.indexOfScalar(u8, url, '?') == null) "?" else "&", escaped });
-                    page_body = self.fetch(t, next_plan, "") catch break;
-                    var page = catalog.Catalog.parse(std.heap.c_allocator, page_body, .endpoint) catch break;
+                    page_body = self.fetch(t, next_plan, "") catch |err| if (self.require_list) return err else break;
+                    var page = catalog.Catalog.parse(std.heap.c_allocator, page_body, .endpoint) catch if (self.require_list) return error.InvalidCatalog else break;
                     defer page.deinit();
                     const ra = remote.?.arena.allocator();
                     const previous = remote.?.entries;
@@ -411,7 +415,6 @@ const Job = struct {
                 self.success = true;
                 if (std.mem.eql(u8, provider_config.providerId(p.*), self.ai.default_provider)) self.default_catalog = true;
             }
-            defer if (remote) |*c| c.deinit();
             if (self.only_automatic_lists and remote == null) continue;
             var models: std.ArrayList(config.AiModel) = .empty;
             // A valid automatic catalog replaces the current list. Keep the
@@ -508,6 +511,7 @@ const Job = struct {
             p.models = try models.toOwnedSlice(a);
             p.model_count = p.models.len;
         }
+        if (self.cancel.isCancelled()) return error.Cancelled;
     }
 };
 

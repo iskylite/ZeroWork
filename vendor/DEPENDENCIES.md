@@ -5,11 +5,11 @@
 - Upstream: https://github.com/version-next/zenit
 - Revision: `9c1ba9bfea58210404e447b04b6ff25b6442f0ff`
 - Package: `zenit` (`dev/zig-0.17.0`, complete source snapshot tracked by ZeroWork)
-- Local patch revision: `2026-11-13-notes-live-markdown-ime-embedded-press-overlay-stack` (upstream revision and license unchanged)
+- Local patch revision: `2026-11-17-select-placement-boundary` (upstream revision and license unchanged)
 - Minimum Zig: `0.17.0`
 - License: GPL-3.0-only (commercial alternative documented upstream)
 - Canonical source files: `3508` (tracked sources plus declared working-tree additions)
-- Canonical tracked-tree SHA-256: `408fd55de75be67ff130168202214a5d2a7a26582542a298f260c7ab23ed56a7`
+- Canonical tracked-tree SHA-256: `66cabdb315835611918e6d7c953fd8af03f08f3b8a9f4cc83bdd32d2ad77aaf2`
 - Hash algorithm: sort and deduplicate `git ls-files --cached --others --exclude-standard vendor/zenit`; for each path hash big-endian u64 path length, path relative to `vendor/zenit`, big-endian u64 content length, then raw content bytes
 - Project decision: GPL-3.0-only use authorized for current development; distribution obligations remain active.
 
@@ -48,6 +48,8 @@ The latest local patch adds an explicit macOS window hide API and restores those
 The preceding local patch preserves an active IME composition when AppKit publishes the changed input-source identifier after its first marked-text callback. A native input-pump regression covers retaining the first letter and input context across the next key. Upstream revision, license and toolchain are unchanged.
 
 The preceding local patch adds an explicit `SelectProps.virtualize` option, allowing the font picker to use a scrollable virtual viewport below the automatic 200-option threshold. Upstream revision, license and toolchain are unchanged.
+
+Select and Popover accept an optional placement boundary intersected with the window safe area. Bounded virtual Select menus size their scroll viewport to the space available inside that boundary.
 
 Streaming texture uploads now advance a content revision used by retained layer and damage fingerprints; unversioned external textures conservatively disable enclosing retained caches. This keeps KVM frames current without changing the upstream revision, toolchain or license.
 

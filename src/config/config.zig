@@ -188,6 +188,7 @@ pub const Config = struct {
                     first = false;
                 };
                 try writer.writeAll("]\n");
+                if (m.catalog_managed) try writer.writeAll("catalog_managed = true\n");
                 if (m.image_token_reservation) |reservation| try writer.print("image_token_reservation = {d}\n", .{reservation});
                 if (m.image_token_max_width) |value| try writer.print("image_token_max_width = {d}\n", .{value});
                 if (m.image_token_max_height) |value| try writer.print("image_token_max_height = {d}\n", .{value});
@@ -330,7 +331,7 @@ pub const Config = struct {
             }
             const field = fields[split + 1 ..];
             const m = &p.models[j];
-            if (eq(field, "id")) m.id = try parseString(value) else if (eq(field, "context_window")) m.context_window = try parseInt(u32, value) else if (eq(field, "default")) m.default = try parseBool(value) else if (eq(field, "reasoning")) m.reasoning = try parseBool(value) else if (eq(field, "vision")) m.vision = try parseBool(value) else if (eq(field, "image_token_reservation")) {
+            if (eq(field, "id")) m.id = try parseString(value) else if (eq(field, "context_window")) m.context_window = try parseInt(u32, value) else if (eq(field, "default")) m.default = try parseBool(value) else if (eq(field, "catalog_managed")) m.catalog_managed = try parseBool(value) else if (eq(field, "reasoning")) m.reasoning = try parseBool(value) else if (eq(field, "vision")) m.vision = try parseBool(value) else if (eq(field, "image_token_reservation")) {
                 const reservation = try parseInt(u32, value);
                 if (reservation == 0 or reservation > 131072) return error.OutOfRange;
                 m.image_token_reservation = reservation;
@@ -379,7 +380,7 @@ pub const Config = struct {
                 if (m.image_token_reservation) |reservation| if (reservation == 0 or reservation > 131072) return error.OutOfRange;
                 if ((m.image_token_max_width == null) != (m.image_token_max_height == null) or (m.image_token_max_width != null and m.image_token_reservation == null)) return error.OutOfRange;
                 if (!p.enabled) continue;
-                if (m.id.len == 0 or m.context_window == 0) return error.InvalidValue;
+                if (m.id.len == 0 or (m.context_window == 0 and !m.catalog_managed)) return error.InvalidValue;
                 if (m.reasoning and !m.reasoning_toggle and !m.efforts[0] and !m.efforts[1] and !m.efforts[2] and !m.efforts[3] and !m.efforts[4] and !m.efforts[5] and !m.efforts[6]) return error.InvalidValue;
             }
         }
@@ -482,6 +483,8 @@ pub const AiProvider = struct {
 };
 pub const AiModel = struct {
     id: []const u8 = "",
+    /// Imported from the provider catalog and eligible for automatic replacement.
+    catalog_managed: bool = false,
     context_window: u32 = 0,
     default: bool = false,
     reasoning: bool = false,
@@ -796,6 +799,24 @@ test "new configuration starts with no provider and flat legacy providers retain
     const loaded = try Config.parseWithAllocator(arena.allocator(), written);
     try std.testing.expectEqual(@as(usize, 1), loaded.ai.provider_count);
     try std.testing.expectEqualStrings(old.ai.providers[0].endpoint, loaded.ai.providers[0].endpoint);
+}
+
+test "automatic catalog models round trip while missing context stays unknown" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const source =
+        "[ai]\ndefault_provider=\"catalog\"\n[[ai.providers]]\nid=\"catalog\"\n" ++
+        "endpoint=\"http://127.0.0.1:9/v1\"\nenabled=true\n" ++
+        "[[ai.providers.models]]\nname=\"remote-model\"\ncontext_window=0\ndefault=true\n";
+    try std.testing.expectError(error.InvalidValue, Config.parseWithAllocator(a, source));
+    const value = try Config.parseWithAllocator(a, source ++ "catalog_managed=true\n");
+    var buffer: [8192]u8 = undefined;
+    const restored = try Config.parseWithAllocator(a, try value.format(&buffer));
+    const model = restored.ai.providers[0].models[0];
+    try std.testing.expect(model.catalog_managed);
+    try std.testing.expectEqual(@as(u32, 0), model.context_window);
+    try std.testing.expectError(error.InvalidContextWindow, @import("../ai/provider_config.zig").fromSettings(restored.ai));
 }
 
 test "none and ultra effort configuration roundtrips without enabling undeclared steps" {

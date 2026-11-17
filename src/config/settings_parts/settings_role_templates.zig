@@ -4,13 +4,14 @@ const binding = @import("../settings_content_view.zig");
 const controls = @import("settings_controls.zig");
 const templates = @import("../ai_role_templates.zig");
 const providers = @import("../../ai/provider_config.zig");
+const config = @import("../config.zig");
 const Effort = @import("../../ai/provider.zig").Effort;
 
 const RowAction = struct {
     bound: *binding.Binding,
     index: ?usize,
     error_label: *ui.Node,
-    kind: enum { create, edit, copy, remove, make_default, close },
+    kind: enum { create, toggle, copy, remove, make_default, close },
     fn run(self: *RowAction) void {
         self.apply() catch |err| setError(self.bound, self.error_label, err);
     }
@@ -26,7 +27,7 @@ const RowAction = struct {
         var editor: ?usize = null;
         switch (self.kind) {
             .close => {},
-            .edit => editor = self.index,
+            .toggle => editor = if (controller.role_template_editor == self.index) null else self.index,
             .create, .copy => {
                 try next.appendSlice(a, current);
                 var item: templates.Stored = if (self.index) |index| current[index] else .{ .name = "" };
@@ -79,6 +80,22 @@ const Editor = struct {
     efforts: [5]?*ui.Signal(?[]const u8) = @splat(null),
     choices: []const providers.ModelSelection,
     error_label: *ui.Node,
+    dropdowns: [8]*ui.Signal(bool) = undefined,
+    scroll_y: f32 = 0,
+
+    fn afterLayout(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
+        const self: *Editor = @ptrCast(@alignCast(raw));
+        const scroll = self.bound.scroll orelse return .done;
+        const y = scroll.content.style.translate_y;
+        if (y == self.scroll_y) return .done;
+        self.scroll_y = y;
+        for (self.dropdowns) |open| if (open.peek()) open.set(false);
+        return .done;
+    }
+
+    fn cleanup(self: *Editor) void {
+        self.bound.cx.removeAfterLayoutHook(self);
+    }
 
     fn apply(self: *Editor) void {
         self.save() catch |err| setError(self.bound, self.error_label, err);
@@ -118,10 +135,38 @@ fn button(bound: *binding.Binding, parent: *ui.Node, label: []const u8, id: []co
     node.meta.ownership.meta.test_id = id;
     try parent.appendChild(bound.cx.allocator, node);
 }
-fn action(bound: *binding.Binding, parent: *ui.Node, error_label: *ui.Node, index: ?usize, kind: @FieldType(RowAction, "kind"), label: []const u8) !void {
+fn action(bound: *binding.Binding, parent: *ui.Node, error_label: *ui.Node, index: ?usize, kind: @FieldType(RowAction, "kind"), label: []const u8, icon: ?ui.SvgAsset) !void {
     const state = try bound.scope.createState(RowAction, .{ .bound = bound, .index = index, .kind = kind, .error_label = error_label });
-    const id = if (index) |i| try std.fmt.allocPrint(bound.scope.allocator, "settings.template.{s}.{d}", .{ @tagName(kind), i }) else try std.fmt.allocPrint(bound.scope.allocator, "settings.template.{s}", .{@tagName(kind)});
-    try button(bound, parent, label, id, bound.cx.on(RowAction, state, RowAction.run));
+    var buffer: [64]u8 = undefined;
+    const key = if (index) |i| try std.fmt.bufPrint(&buffer, "settings.template.{s}.{d}", .{ @tagName(kind), i }) else try std.fmt.bufPrint(&buffer, "settings.template.{s}", .{@tagName(kind)});
+    const id = try controls.owned(bound.scope, key);
+    const on_click = bound.cx.on(RowAction, state, RowAction.run);
+    const asset = icon orelse return button(bound, parent, label, id, on_click);
+    const tint = if (kind == .remove) controls.S.theme.current().danger_ink else if (kind == .make_default and index == null) controls.S.theme.current().accent_ink else controls.S.theme.current().fg_2;
+    const node = try ui.widgets.Button(.{ .variant = .secondary, .icon_asset = asset, .icon_only = true, .icon_size = @as(f32, 15), .icon_tint = tint, .a11y_label = label, .on_click = on_click }).mount(bound.scope, bound.cx);
+    node.meta.ownership.meta.test_id = id;
+    node.setStyleInline(bound.cx.allocator, .{ .width = .{ .px = 30 }, .height = .{ .px = 30 }, .padding = .ZERO, .flex_shrink = 0 });
+    if (kind == .make_default) node.behavior.interaction.a11y.?.pressed = index == null;
+    const hint = try @import("../../ui/control_hint.zig").mount(bound.cx, bound.scope, node, label, .{ .id = try controls.stableId(bound.scope, id, ".hint") });
+    try parent.appendChild(bound.cx.allocator, hint.wrapper);
+}
+
+fn templateHeader(bound: *binding.Binding, item: templates.Stored, index: usize, expanded: bool, error_label: *ui.Node) !*ui.Node {
+    const cx = bound.cx;
+    const toggle = try bound.scope.createState(RowAction, .{ .bound = bound, .index = index, .kind = .toggle, .error_label = error_label });
+    const name = try controls.owned(bound.scope, item.name);
+    const header = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = name, .hover_style = controls.S.buttonHover(), .on_click = cx.on(RowAction, toggle, RowAction.run) }).mount(bound.scope, cx);
+    var buffer: [64]u8 = undefined;
+    header.meta.ownership.meta.test_id = try controls.owned(bound.scope, try std.fmt.bufPrint(&buffer, "settings.template.toggle.{d}", .{index}));
+    header.behavior.interaction.a11y.?.expanded = expanded;
+    header.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0, .height = .{ .px = 32 }, .padding = .{ .left = 8, .right = 8 }, .gap = 8, .flex_shrink = 0 });
+    for (header.children.items) |child| child.setDisplay(.none);
+    const title = try ui.text(cx, name, .{ .font_size = 12, .font_weight = 500, .color = controls.S.theme.current().fg_1, .text_overflow = .ellipsis });
+    title.setStyleInline(cx.allocator, .{ .width = .fill(), .flex = 1, .min_width = 0 });
+    try header.appendChild(cx.allocator, title);
+    const chevron = try ui.iconTintStyled(cx, if (expanded) ui.icons.chevron_up else ui.icons.chevron_down, controls.S.theme.current().fg_2, controls.S.sectionChevron(undefined));
+    try header.appendChild(cx.allocator, chevron);
+    return header;
 }
 
 pub fn mount(section: *controls.Section) !void {
@@ -132,49 +177,88 @@ pub fn mount(section: *controls.Section) !void {
     const error_label = try ui.textStyled(cx, controls.S.note, "");
     error_label.setDisplay(.none);
     try section.body.appendChild(cx.allocator, error_label);
-    const built_in = try row(cx);
-    try built_in.appendChild(cx.allocator, try ui.textStyled(cx, controls.S.note, "均衡"));
-    try built_in.appendChild(cx.allocator, try ui.spacer(cx));
-    if (active == null) {
-        try built_in.appendChild(cx.allocator, try ui.textStyled(cx, controls.S.note, "默认"));
-    } else try action(bound, built_in, error_label, null, .make_default, "设为默认");
-    try section.body.appendChild(cx.allocator, built_in);
-    for (current, 0..) |item, index| {
-        const line = try row(cx);
-        const title = try ui.textStyled(cx, controls.S.note, "");
-        try title.setTextContent(cx.allocator, item.name);
-        title.setStyleInline(cx.allocator, .{ .width = .fill(), .flex = 1, .min_width = 0, .overflow_hidden = true });
-        try line.appendChild(cx.allocator, title);
-        if (item.is_default) {
-            try line.appendChild(cx.allocator, try ui.textStyled(cx, controls.S.note, "默认"));
-        } else try action(bound, line, error_label, index, .make_default, "设为默认");
-        try action(bound, line, error_label, index, .edit, "编辑");
-        try action(bound, line, error_label, index, .copy, "复制");
-        try action(bound, line, error_label, index, .remove, "删除");
-        try section.body.appendChild(cx.allocator, line);
-        if (bound.controller.role_template_editor == index) try mountEditor(bound, section.body, item, index, error_label);
-    }
     const actions = try row(cx);
-    try action(bound, actions, error_label, null, .create, "新建模板");
+    var buffer: [96]u8 = undefined;
+    const summary = try std.fmt.bufPrint(&buffer, "{d} 个模板 · {d} 个启用", .{ current.len, @intFromBool(active != null) });
+    const count = try ui.textStyled(cx, controls.S.note, "");
+    try count.setTextContent(cx.allocator, summary);
+    try actions.appendChild(cx.allocator, count);
+    try actions.appendChild(cx.allocator, try ui.spacer(cx));
+    const create = try bound.scope.createState(RowAction, .{ .bound = bound, .index = null, .kind = .create, .error_label = error_label });
+    const add = try ui.widgets.Button(.{ .variant = .secondary, .icon_only = true, .icon_asset = ui.icons.plus, .icon_size = @as(f32, 16), .a11y_label = "新建模板", .on_click = cx.on(RowAction, create, RowAction.run) }).mount(bound.scope, cx);
+    add.meta.ownership.meta.test_id = "settings.template.create";
+    try actions.appendChild(cx.allocator, add);
     try section.body.appendChild(cx.allocator, actions);
+    for (current, 0..) |item, index| {
+        const expanded = bound.controller.role_template_editor == index;
+        try section.body.appendChild(cx.allocator, try templateHeader(bound, item, index, expanded, error_label));
+        if (expanded) try mountEditor(bound, section.body, item, index, error_label);
+    }
+}
+
+fn availableAi(bound: *binding.Binding, a: std.mem.Allocator) !config.Ai {
+    var ai = bound.controller.model.value.ai;
+    const query = bound.hooks.discovered_ai orelse return ai;
+    const live = query(bound.hooks.context);
+    const saved = bound.controller.original.value.ai;
+    ai.providers = try a.dupe(config.AiProvider, ai.providers[0..ai.provider_count]);
+    for (ai.providers) |*provider| {
+        if (!provider.enabled or provider.model.len != 0) continue;
+        // A draft that deletes a configured list must not revive it from the live snapshot.
+        const was_configured = for (saved.providers[0..saved.provider_count]) |original| {
+            if (std.mem.eql(u8, providers.providerId(original), providers.providerId(provider.*)))
+                break original.model_count != 0 or original.model.len != 0;
+        } else false;
+        if (provider.model_count == 0 and was_configured) continue;
+        for (live.providers[0..live.provider_count]) |candidate| {
+            if (!candidate.enabled or candidate.kind != provider.kind or
+                !std.mem.eql(u8, candidate.name, provider.name) or !std.mem.eql(u8, candidate.endpoint, provider.endpoint) or
+                !std.mem.eql(u8, candidate.api_key, provider.api_key) or
+                !@import("../settings_schema.zig").same(candidate.api_key_ref, provider.api_key_ref)) continue;
+            if (provider.model_count == 0) {
+                provider.models = candidate.models;
+                provider.model_count = candidate.model_count;
+            } else {
+                const models = try a.dupe(config.AiModel, provider.models[0..provider.model_count]);
+                for (models) |*model| {
+                    if (!model.catalog_managed or model.context_window != 0) continue;
+                    for (candidate.models[0..candidate.model_count]) |entry| {
+                        if (std.mem.eql(u8, model.id, entry.id)) {
+                            model.context_window = entry.context_window;
+                            break;
+                        }
+                    }
+                }
+                provider.models = models;
+            }
+            break;
+        }
+    }
+    return ai;
 }
 
 fn mountEditor(bound: *binding.Binding, parent: *ui.Node, item: templates.Stored, index: usize, error_label: *ui.Node) !void {
     const cx = bound.cx;
-    const a = bound.scope.allocator;
-    const ai = bound.controller.model.value.ai;
+    const arena = try bound.scope.createState(std.heap.ArenaAllocator, .init(bound.scope.allocator));
+    try bound.scope.onCleanup(std.heap.ArenaAllocator, arena, struct {
+        fn release(storage: *std.heap.ArenaAllocator) void {
+            storage.deinit();
+        }
+    }.release);
+    const a = arena.allocator();
+    const ai = try availableAi(bound, a);
     var models: std.ArrayList(providers.ModelSelection) = .empty;
     var options: std.ArrayList(ui.widgets.SelectOption) = .empty;
     try options.append(a, .{ .value = "inherit", .label = "继承会话模型" });
     for (ai.providers[0..@min(ai.provider_count, ai.providers.len)]) |provider| {
         if (!provider.enabled) continue;
         const provider_id = providers.providerId(provider);
-        const legacy = [_]@import("../config.zig").AiModel{.{ .id = provider.model }};
+        const legacy = [_]config.AiModel{.{ .id = provider.model, .context_window = provider.context_window }};
         const configured = provider.models[0..@min(provider.model_count, provider.models.len)];
         const entries = if (configured.len == 0 and provider.model.len != 0) &legacy else configured;
         for (entries) |model| {
             const model_id = model.id;
-            if (model_id.len == 0) continue;
+            if (model_id.len == 0 or model.context_window == 0) continue;
             const value = try std.fmt.allocPrint(a, "{d}", .{models.items.len});
             const label = try std.fmt.allocPrint(a, "{s} · {s}", .{ model_id, provider_id });
             try models.append(a, .{ .provider_id = try a.dupe(u8, provider_id), .model_id = try a.dupe(u8, model_id) });
@@ -221,18 +305,28 @@ fn mountEditor(bound: *binding.Binding, parent: *ui.Node, item: templates.Stored
         }
         editor.models[slot] = try bound.scope.createSignal(?[]const u8, model_value);
         editor.efforts[slot] = try bound.scope.createSignal(?[]const u8, if (item.efforts[slot]) |value| @tagName(value) else "inherit");
-        const model = try ui.widgets.Select(.{ .options = choices.items, .width = 216, .value = editor.models[slot].? }).mount(bound.scope, cx);
+        const viewport = if (bound.scroll) |scroll| scroll.container else null;
+        const model = try ui.widgets.Select(.{ .options = choices.items, .width = 216, .value = editor.models[slot].?, .dropdown_boundary = viewport, .virtualize = true }).mount(bound.scope, cx);
         model.trigger.meta.ownership.meta.test_id = try std.fmt.allocPrint(a, "settings.template.model.{d}", .{slot});
-        const effort = try ui.widgets.Select(.{ .options = efforts, .width = 128, .value = editor.efforts[slot].? }).mount(bound.scope, cx);
+        const effort = try ui.widgets.Select(.{ .options = efforts, .width = 128, .value = editor.efforts[slot].?, .dropdown_boundary = viewport, .virtualize = true }).mount(bound.scope, cx);
         effort.trigger.meta.ownership.meta.test_id = try std.fmt.allocPrint(a, "settings.template.effort.{d}", .{slot});
+        editor.dropdowns[(slot - 1) * 2] = model.open.?;
+        editor.dropdowns[(slot - 1) * 2 + 1] = effort.open.?;
+        try bound.registerTooltip(model.open.?);
+        try bound.registerTooltip(effort.open.?);
         try line.appendChild(cx.allocator, model.wrapper);
         try line.appendChild(cx.allocator, effort.wrapper);
         try card.appendChild(cx.allocator, line);
     }
     const footer = try row(cx);
+    try action(bound, footer, error_label, if (item.is_default) null else index, .make_default, if (item.is_default) "停用模板" else "启用模板", ui.icons.power);
+    try action(bound, footer, error_label, index, .copy, "复制模板", ui.icons.copy);
+    try action(bound, footer, error_label, index, .remove, "删除模板", ui.icons.trash_2);
     try footer.appendChild(cx.allocator, try ui.spacer(cx));
-    try action(bound, footer, error_label, null, .close, "取消");
+    try action(bound, footer, error_label, null, .close, "取消", null);
     try button(bound, footer, "应用", "settings.template.apply", cx.on(Editor, editor, Editor.apply));
     try card.appendChild(cx.allocator, footer);
     try parent.appendChild(cx.allocator, card);
+    try bound.scope.onCleanup(Editor, editor, Editor.cleanup);
+    try cx.addAfterLayoutHook(editor, Editor.afterLayout);
 }

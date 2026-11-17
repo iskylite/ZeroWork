@@ -153,6 +153,8 @@ pub const PopoverProps = struct {
     max_height: ?f32 = null,
     /// Viewport constraint safety margin
     viewport_padding: f32 = 8,
+    /// Optional additional boundary for placement, intersected with the window safe area.
+    boundary: ?*Node = null,
     /// Auto-flip: when preferred placement overflows, pick best position (see
     /// floating-ui flip).
     flip: bool = true,
@@ -626,6 +628,7 @@ pub const PopoverBuilder = struct {
             .match_trigger_width = p.match_trigger_width,
             .constrain_width_to_viewport = p.constrain_width_to_viewport,
             .viewport_padding = p.viewport_padding,
+            .boundary = p.boundary,
             .active_position = p.position,
             .entry_ready = false,
             .prewarmed_ready = false,
@@ -759,6 +762,7 @@ pub const PopoverPositionCtx = struct {
     match_trigger_width: bool,
     constrain_width_to_viewport: bool,
     viewport_padding: f32,
+    boundary: ?*Node = null,
     active_position: PopoverPosition,
     entry_ready: bool,
     prewarmed_ready: bool,
@@ -1277,10 +1281,19 @@ pub fn popoverBeforeRender(node: *Node) void {
     // auto-avoid title bar/tab bar/status bar.
     const safe_top = ctx.cx.safe_area_top;
     const safe_left = ctx.cx.safe_area_left;
-    const vp_x: f32 = safe_left;
-    const vp_y: f32 = safe_top;
-    const vp_w = @max(@as(f32, 0), ctx.cx.viewport.width - safe_left - ctx.cx.safe_area_right);
-    const vp_h = @max(@as(f32, 0), ctx.cx.viewport.height - safe_top - ctx.cx.safe_area_bottom);
+    var vp_x: f32 = safe_left;
+    var vp_y: f32 = safe_top;
+    var vp_right = ctx.cx.viewport.width - ctx.cx.safe_area_right;
+    var vp_bottom = ctx.cx.viewport.height - ctx.cx.safe_area_bottom;
+    if (ctx.boundary) |boundary| {
+        const rect = boundary.globalRect();
+        vp_x = @max(vp_x, rect.x);
+        vp_y = @max(vp_y, rect.y);
+        vp_right = @min(vp_right, rect.x + rect.w);
+        vp_bottom = @min(vp_bottom, rect.y + rect.h);
+    }
+    const vp_w = @max(@as(f32, 0), vp_right - vp_x);
+    const vp_h = @max(@as(f32, 0), vp_bottom - vp_y);
 
     var middleware_buf: [5]floating.Middleware = undefined;
     var middleware_count: usize = 0;

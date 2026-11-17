@@ -63,6 +63,7 @@ pub const SelectProps = struct {
     /// Independent floating menu width; null follows the trigger.
     dropdown_width: ?f32 = null,
     dropdown_position: popover_mod.PopoverPosition = .bottom_start,
+    dropdown_boundary: ?*Node = null,
     size: SelectSize = .md,
     mode: SelectMode = .single,
     searchable: bool = false,
@@ -284,6 +285,7 @@ pub const SelectState = struct {
     virtual_update_pending: bool = false,
     virtual_viewport_height: f32 = -1,
     max_dropdown_height: f32,
+    bounded_dropdown: bool = false,
     option_style: Source(?core.BoxStyle),
     shown_option_style: ?core.BoxStyle = null,
     options_container: ?*Node = null,
@@ -678,10 +680,16 @@ pub const SelectState = struct {
             // Filtering can be requested by a row event. Recycle only after
             // that event handler returns, never in its synchronous effect.
             virtual_list.updateItemCount(list, self.filtered_count);
-            const height = @min(@max(1, self.max_dropdown_height - 2 * self.metrics.panel_padding), self.rowStride() * @as(f32, @floatFromInt(self.filtered_count)));
-            list.container_node.setStyle(self.cx.allocator, .height, .{ .px = height });
             if (self.highlighted_index) |i| if (self.filtered_positions[i]) |position| virtual_list.scrollIndexIntoView(list, position, .nearest);
             list.updateVisibleItems();
+            changed = true;
+        }
+        const panel_max = if (self.bounded_dropdown) self.panel.style.ext.?.max_height else self.max_dropdown_height;
+        const max_height = @min(self.max_dropdown_height, panel_max);
+        const height = @min(@max(1, max_height - 2 * self.metrics.panel_padding), self.rowStride() * @as(f32, @floatFromInt(self.filtered_count)));
+        const current_height: core.Sizing = .{ .px = height };
+        if (!std.meta.eql(list.container_node.style.height, current_height)) {
+            list.container_node.setStyle(self.cx.allocator, .height, current_height);
             changed = true;
         }
         // A filter can grow the viewport after this layout pass. Rebind again
@@ -1318,6 +1326,7 @@ fn mountSelect(props: SelectProps, scope: *Scope, cx: *Cx) !SelectResult {
         .width = props.dropdown_width orelse props.width,
         .match_trigger_width = props.dropdown_width == null,
         .constrain_width_to_viewport = true,
+        .boundary = props.dropdown_boundary,
         .max_height = props.max_dropdown_height,
         // Anchor dropdown: 160ms fade + 0.98 scale + 6px slide-in to anchor (follows direction on
         // flip).
@@ -1376,6 +1385,7 @@ fn mountSelect(props: SelectProps, scope: *Scope, cx: *Cx) !SelectResult {
         .tags_row = null,
         .tags_parent_scope = my_scope,
         .max_dropdown_height = props.max_dropdown_height,
+        .bounded_dropdown = props.dropdown_boundary != null,
         .option_style = props.option_style,
     };
     pop.wrapper.addDebugState(@ptrCast(state));

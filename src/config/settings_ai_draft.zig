@@ -200,7 +200,7 @@ pub fn setEnabled(ai: *config.Ai, index: usize, enabled: bool) !void {
     p.enabled = false;
 }
 pub fn modelValid(model: config.AiModel) bool {
-    if (std.mem.trim(u8, model.id, " \t\r\n").len == 0 or model.context_window == 0) return false;
+    if (std.mem.trim(u8, model.id, " \t\r\n").len == 0 or (model.context_window == 0 and !model.catalog_managed)) return false;
     if (model.reasoning and !model.reasoning_toggle) {
         for (model.efforts) |enabled| if (enabled) return true;
         return false;
@@ -232,7 +232,7 @@ pub fn firstProblem(ai: config.Ai) ?Problem {
         for (p.models[0..p.model_count], 0..) |model, j| {
             const address: Address = .{ .provider = i, .model = j, .field = .model_id };
             if (std.mem.trim(u8, model.id, " \t\r\n").len == 0) return .{ .address = address, .err = error.EmptyModelId };
-            if (model.context_window == 0) return .{ .address = .{ .provider = i, .model = j, .field = .context_window }, .err = error.InvalidContextWindow };
+            if (model.context_window == 0 and !model.catalog_managed) return .{ .address = .{ .provider = i, .model = j, .field = .context_window }, .err = error.InvalidContextWindow };
             if (!modelValid(model)) return .{ .address = address, .err = error.LastEffortRequired };
             for (p.models[0..j]) |other| if (std.mem.eql(u8, model.id, other.id)) return .{ .address = address, .err = error.DuplicateModelId };
             if (model.default) defaults += 1;

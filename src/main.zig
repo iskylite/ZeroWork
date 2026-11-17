@@ -12542,6 +12542,7 @@ const SettingsHost = struct {
     pending_ai_problem: ?@import("config/settings_ai_draft.zig").Address = null,
     pending_rebuild: bool = false,
     workspace: ?*ws.Workspace = null,
+    ai_host: ?*AiHost = null,
     mounted_page: ?settings_content_view.Mounted = null,
     mounted_page_index: usize = 0,
     mounted_filtered: bool = false,
@@ -13671,6 +13672,7 @@ const SettingsHost = struct {
             .mount_providers = mountProviders,
             .mount_extensions = mountExtensions,
             .mount_provider_action = mountProviderAction,
+            .discovered_ai = discoveredSettingsAi,
             .read = readContentValue,
             .edit = editContentValue,
             .authorization_help = notificationAuthorizationHelp,
@@ -14338,6 +14340,11 @@ const SettingsHost = struct {
         if (self.controller.validationProblem() == null) if (process_notifications) |notifications| if (self.notification_window) |window| notifications.resolveOperationErrors(window, "偏好设置");
         if (self.mounted_page) |page| page.refreshFooter();
         self.cx.requestRedraw();
+    }
+
+    fn discoveredSettingsAi(raw: *anyopaque) @import("config/config.zig").Ai {
+        const self: *SettingsHost = @ptrCast(@alignCast(raw));
+        return if (self.ai_host) |host| host.effectiveAi() else self.runtime.value.ai;
     }
 
     fn mountProviderAction(raw: *anyopaque, cx: *ui.Cx, scope: *ui.Scope) !*ui.Node {
@@ -17235,16 +17242,19 @@ fn openGlobalHistory(history: *HistoryHost) void {
 const WindowPin = struct {
     cx: *ui.Cx,
     button: *ui.Node = undefined,
-    tint: *ui.Signal(?ui.Color),
+    icon: *ui.Node,
     pinned: bool = false,
+
+    const unpinned_angle: f32 = std.math.pi / 4.0;
 
     extern fn zw_window_set_pinned(window_number: u32, pinned: bool) bool;
 
     fn mount(cx: *ui.Cx, scope: *ui.Scope) !*WindowPin {
-        const self = try scope.createState(WindowPin, .{ .cx = cx, .tint = try scope.createSignal(?ui.Color, app_theme.current().fg_2) });
-        // V0.7 §3.10: unpinned starts as the tilted pin_off glyph.
-        self.button = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.pin_off, .icon_size = @as(f32, 16), .icon_tint = self.tint, .a11y_label = "窗口置顶", .on_click = cx.on(WindowPin, self, toggle) }).mount(scope, cx);
-        shell_styles.titleToolbarButton(cx.allocator, self.button);
+        const icon = try ui.iconTintStyled(cx, ui.icons.pin, app_theme.current().fg_2, .{ .width = .{ .px = 16 }, .height = .{ .px = 16 }, .rotate = unpinned_angle });
+        const self = try scope.createState(WindowPin, .{ .cx = cx, .icon = icon });
+        self.button = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .a11y_label = "窗口置顶", .on_click = cx.on(WindowPin, self, toggle) }).mount(scope, cx);
+        try self.button.appendChild(cx.allocator, icon);
+        MistChrome.iconOnly(cx, self.button, icon, null);
         self.button.meta.ownership.meta.test_id = "toolbar.window_pin";
         return self;
     }
@@ -17257,16 +17267,14 @@ const WindowPin = struct {
             attrs.pressed = pinned;
             attrs.label = if (pinned) "取消窗口置顶" else "窗口置顶";
         }
+        self.icon.setStyle(self.cx.allocator, .rotate, if (pinned) @as(f32, 0) else unpinned_angle);
         self.retheme();
         self.cx.requestRedraw();
     }
 
     fn retheme(self: *WindowPin) void {
         const palette = app_theme.current();
-        // V0.7 §3.10: shape encodes state—tilted pin means unpinned, upright
-        // pin means pinned. Color only reinforces; the glyph differs.
-        self.tint.set(if (self.pinned) palette.accent else palette.fg_2);
-        self.button.setIcon(.{ .icon_id = (if (self.pinned) ui.icons.pin else ui.icons.pin_off).icon_id.?, .rep = (if (self.pinned) ui.icons.pin else ui.icons.pin_off).pickRep(16).?, .tint = if (self.pinned) palette.accent else palette.fg_2 });
+        _ = self.icon.setTint(if (self.pinned) palette.accent else palette.fg_2);
     }
 };
 
@@ -17775,6 +17783,7 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     const settings_host = try cx.allocator.create(SettingsHost);
     settings_host.* = .{ .allocator = cx.allocator, .cx = cx, .scope = scope, .controller = try SettingsController.init(cx.allocator, app_config.value), .runtime = app_config, .io = cx.io, .panel = settings_panel, .status = undefined };
     ai_host.settings_host = settings_host;
+    settings_host.ai_host = ai_host;
     settings_host.nav_list = settings_nav_list;
     settings_host.navigation = settings_nav;
     settings_host.header_title = settings_header_title;
