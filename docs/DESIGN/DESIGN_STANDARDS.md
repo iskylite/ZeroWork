@@ -406,7 +406,7 @@ Figma节点`bounds`相对直接父级；画板在canvas上的x/y不进入应用�
 
 ## 5. 动效与控件状态
 
-主界面的交互状态与动效以 [V4 风格指南](../UI_V4/STYLE_GUIDE.md)和对应原生组件为准。
+主界面的交互状态与动效以 [V4 风格指南](../UI_V4/standards/STYLE_GUIDE.md)和对应原生组件为准。
 
 ---
 
@@ -577,7 +577,7 @@ UI/Cx/Node/Signal只在主线程访问，worker处理IO与计算，以不可变�
 
 0.2 插件接入：公共侧栏、顶栏/Tab、底栏、AI 和设置自动消费标准贡献，不由插件复制。配置界面由插件 ConnectionEditor 在宿主创建/编辑槽内组织公共控件，流程由 ConnectionController 决定，schema 是可选辅助；内容槽是完全定制工作区。连接只复用保存配置，新运行会话/转发独立创建，见 [插件宿主§2–6](V0.2_PLUGIN_HOST.md)。
 
-KVM 工具栏与视频布局见 [V4 KVM 工具栏](../UI_V4/README.md)和[主界面规范](../UI_V4/mist-design.md)。电源/启动设备使用Select后点击执行，持续生效使用Switch，无更改禁用；显示入口内区分缩放选择与全屏动作。业务结果调用[插件宿主§6.1统一通知](V0.2_PLUGIN_HOST.md#61-全局统一通知)，常规动作不增加Modal确认，真实固件二次认证仍走宿主challenge。创建/测试/连接由插件editor/controller接线，见[V0.3§3.3](V0.3_BMC_IKVM.md#33-用户操作与宿主接线)。
+KVM 工具栏与视频布局见 [V4 KVM 工具栏](../UI_V4/kvm/kvm-toolbar-responsive.svg)和[主界面规范](../UI_V4/workspace/mist-design.md)。电源/启动设备使用Select后点击执行，持续生效使用Switch，无更改禁用；显示入口内区分缩放选择与全屏动作。业务结果调用[插件宿主§6.1统一通知](V0.2_PLUGIN_HOST.md#61-全局统一通知)，常规动作不增加Modal确认，真实固件二次认证仍走宿主challenge。创建/测试/连接由插件editor/controller接线，见[V0.3§3.3](V0.3_BMC_IKVM.md#33-用户操作与宿主接线)。
 
 ### 2026-10-26 补充：反馈、浮层与内容密度
 

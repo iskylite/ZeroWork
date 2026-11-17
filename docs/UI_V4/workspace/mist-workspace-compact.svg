@@ -10,9 +10,9 @@
   "preview_scale": 2,
   "theme": "reference-light",
   "specification": "mist-design.md",
-  "measurements": "../../artifacts/ui-v4/spacing-measurements.json",
-  "requirements": "DESIGN_REQUIREMENTS.md",
-  "style_guide": "STYLE_GUIDE.md",
+  "measurements": "../../../artifacts/ui-v4/spacing-measurements.json",
+  "requirements": "../standards/DESIGN_REQUIREMENTS.md",
+  "style_guide": "../standards/STYLE_GUIDE.md",
   "native_implementation_changed": true,
   "visible_annotations": false,
   "window": {
@@ -55,7 +55,7 @@
     },
     "tab_close": "always_visible",
     "tab_width": "fit_actual_tabs_and_new_button_never_stretch",
-    "compact_state": "expanded_left",
+    "compact_state": "collapsed",
     "compact_behavior": "default_show_all_tools; compact_width_or_tabs_exceed_available_width_collapses_to_ellipsis; hover_ellipsis_reveals_all_nine_buttons_left_over_220ms_and_retains_ellipsis; shrink_tab_budget_to_reserve_expanded_tools_and_16px_gap; pointer_leaves_whole_function_region_including_group_gaps_returns_to_ellipsis; opening_click_is_not_forwarded_to_new_buttons; terminal_and_ai_do_not_move",
     "groups": [
       [
@@ -332,67 +332,6 @@ text{font-family:-apple-system,BlinkMacSystemFont,'PingFang SC','Helvetica Neue'
 <title>新建会话</title>
 <rect id="tabs.new.hit" x="428" y="16" width="28" height="28" rx="14" fill="transparent" data-role="hit-area"/>
 <use id="tabs.new.icon" href="#plus" x="434" y="22" width="16" height="16" color="#676771"/>
-</g>
-</g>
-<g id="toolbar.expanded.overlay" >
-<rect id="toolbar.expanded.hover-region" x="488" y="12" width="360" height="36" rx="0" fill="transparent" data-role="hit-area"/>
-<g id="toolbar.connections-transfer" >
-<rect id="toolbar.connections-transfer.surface" x="488" y="12" width="100" height="36" rx="18" fill="#FFFFFF" filter="url(#mist-raised)"/>
-<g id="session.route" >
-<title>当前会话连接链路</title>
-<rect id="session.route.hit" x="492" y="16" width="28" height="28" rx="14" fill="transparent" data-role="hit-area"/>
-<use id="session.route.icon" href="#network" x="498" y="22" width="16" height="16" color="#676771"/>
-</g>
-<g id="session.forward" >
-<title>当前会话端口转发</title>
-<rect id="session.forward.hit" x="524" y="16" width="28" height="28" rx="14" fill="transparent" data-role="hit-area"/>
-<use id="session.forward.icon" href="#plug" x="530" y="22" width="16" height="16" color="#4352C7"/>
-<circle id="session.forward.badge" cx="546" cy="20" r="2.5" fill="#4F5ED9" />
-</g>
-<g id="global.transfer" >
-<title>打开全局传输列表 · 68%</title>
-<rect id="global.transfer.hit" x="556" y="16" width="28" height="28" rx="14" fill="transparent" data-role="hit-area"/>
-<circle id="global.transfer.track" cx="570" cy="30" r="11" fill="none" stroke="#E4E4E7" stroke-width="2"/>
-<circle id="global.transfer.ring" cx="570" cy="30" r="11" fill="none" stroke="#4F5ED9" stroke-width="2" stroke-linecap="round" stroke-dasharray="46.9982260977033 69.11503837897544" transform="rotate(-90 570 30)"/>
-<text x="570" y="33" font-size="8" fill="#4352C7" font-weight="550" text-anchor="middle">68%</text>
-</g>
-</g>
-<g id="toolbar.history-notifications" >
-<rect id="toolbar.history-notifications.surface" x="596" y="12" width="100" height="36" rx="18" fill="#FFFFFF" filter="url(#mist-raised)"/>
-<g id="session.command-history" >
-<title>当前终端的命令历史</title>
-<rect id="session.command-history.hit" x="600" y="16" width="28" height="28" rx="14" fill="transparent" data-role="hit-area"/>
-<use id="session.command-history.icon" href="#list-restart" x="606" y="22" width="16" height="16" color="#676771"/>
-</g>
-<g id="global.logs" >
-<title>回看会话日志</title>
-<rect id="global.logs.hit" x="632" y="16" width="28" height="28" rx="14" fill="transparent" data-role="hit-area"/>
-<use id="global.logs.icon" href="#history" x="638" y="22" width="16" height="16" color="#676771"/>
-</g>
-<g id="global.notifications" >
-<title>通知</title>
-<rect id="global.notifications.hit" x="664" y="16" width="28" height="28" rx="14" fill="transparent" data-role="hit-area"/>
-<use id="global.notifications.icon" href="#bell" x="670" y="22" width="16" height="16" color="#676771"/>
-<circle id="global.notifications.badge" cx="686" cy="20" r="2.5" fill="#4F5ED9" />
-</g>
-</g>
-<g id="toolbar.assistance-preferences" >
-<rect id="toolbar.assistance-preferences.surface" x="704" y="12" width="100" height="36" rx="18" fill="#FFFFFF" filter="url(#mist-raised)"/>
-<g id="global.theme" >
-<title>全局主题 · 晴霜</title>
-<rect id="global.theme.hit" x="708" y="16" width="28" height="28" rx="14" fill="transparent" data-role="hit-area"/>
-<use id="global.theme.icon" href="#palette" x="714" y="22" width="16" height="16" color="#676771"/>
-</g>
-<g id="assistant.open" >
-<title>AI 助手</title>
-<rect id="assistant.open.hit" x="740" y="16" width="28" height="28" rx="14" fill="transparent" data-role="hit-area"/>
-<use id="assistant.open.icon" href="#sparkles" x="746" y="22" width="16" height="16" color="#676771"/>
-</g>
-<g id="global.settings" >
-<title>偏好设置</title>
-<rect id="global.settings.hit" x="772" y="16" width="28" height="28" rx="14" fill="transparent" data-role="hit-area"/>
-<use id="global.settings.icon" href="#settings" x="778" y="22" width="16" height="16" color="#676771"/>
-</g>
 </g>
 </g>
 <g id="toolbar.compact-toggle" >

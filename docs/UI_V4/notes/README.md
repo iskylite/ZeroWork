@@ -1,6 +1,6 @@
 # V0.5 笔记 · SVG 界面契约
 
-对应[完整方案](../../DESIGN/V0.5_NOTES_PLUGIN.md)，2026-11-11 修订，原生实现纳入 0.6.0。沿用 [V4 风格](../STYLE_GUIDE.md)与[主界面规范](../mist-design.md)。连接会话中的右侧浮窗和标准笔记页共用笔记能力。
+对应[完整方案](../../DESIGN/V0.5_NOTES_PLUGIN.md)，2026-11-11 修订，原生实现纳入 0.6.0。沿用 [V4 风格](../standards/STYLE_GUIDE.md)与[主界面规范](../workspace/mist-design.md)。连接会话中的右侧浮窗和标准笔记页共用笔记能力。
 
 ## 1. 设计稿与状态
 
@@ -22,7 +22,7 @@
 | [floating-compact.svg](floating-compact.svg) | 860×480 | 573.333点浮窗中编辑，打开当前文档搜索气泡 |
 | [floating-closed.svg](floating-closed.svg) | 1440×900 | 浮窗已收起，完整原连接内容恢复可见 |
 
-15张 SVG 中的文字、控件和正文拓扑插图保持可编辑。浮窗背景直接复用当前 `mist-workspace*.svg` 的连接界面矢量。插图表达导入的静态图片，不代表绘图功能。知识库 depth=0 → 一级子目录 depth=1 → 二级子目录 depth=2，文档可放三种容器。
+15张 SVG 中的文字、控件和正文拓扑插图保持可编辑。浮窗背景直接复用当前 [主工作区](../workspace/mist-workspace.svg) 的连接界面矢量。插图表达导入的静态图片，不代表绘图功能。知识库 depth=0 → 一级子目录 depth=1 → 二级子目录 depth=2，文档可放三种容器。
 
 ## 2. 几何与资源
 

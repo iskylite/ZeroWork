@@ -1,4 +1,4 @@
-//! Shared extension list geometry from docs/UI_V4/mcp-services*.svg and skills*.svg.
+//! Shared extension list geometry from docs/UI_V4/ai/mcp-services*.svg and docs/UI_V4/ai/skills*.svg.
 const ui = @import("ui");
 const S = @import("settings_styles.zig");
 pub fn skillsToolbar(_: *const ui.ThemeTokens) ui.BoxStyle {

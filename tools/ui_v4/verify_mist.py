@@ -3,6 +3,7 @@ from pathlib import Path
 import subprocess,tempfile,re,json,html,xml.etree.ElementTree as ET
 REPO=Path(__file__).resolve().parents[2]
 BASE=REPO/"docs/UI_V4"
+WORKSPACE=BASE/"workspace"
 CHROME='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
 JS='''document.fonts.ready.then(()=>{
  const rect=e=>{if(!e)return null;const b=e.getBoundingClientRect();return {x:b.x,y:b.y,w:b.width,h:b.height,right:b.right,bottom:b.bottom}};
@@ -27,7 +28,7 @@ def inside(a,b,margin=0):
  assert a['x']>=b['x']+margin-.5 and a['y']>=b['y']+margin-.5 and a['right']<=b['right']-margin+.5 and a['bottom']<=b['bottom']-margin+.5,(a,b,margin)
 
 def audit(name):
- raw=(BASE/(name+'.svg')).read_text();root=ET.fromstring(raw);ns={'s':'http://www.w3.org/2000/svg'}
+ raw=(WORKSPACE/(name+'.svg')).read_text();root=ET.fromstring(raw);ns={'s':'http://www.w3.org/2000/svg'}
  ids=[e.get('id') for e in root.iter() if e.get('id')];assert len(ids)==len(set(ids)), 'duplicate IDs'
  header_icon=next(e for e in root.iter() if e.get('id')=='sidebar.header.icon')
  group_icon=next(e for e in root.iter() if e.get('id')=='host-group.生产环境.chevron')

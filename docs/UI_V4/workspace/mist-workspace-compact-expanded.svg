@@ -1,23 +1,23 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="900" viewBox="0 0 1440 900" fill="none"><title>ZeroWork 工作区</title><desc>主机分组、活动终端、会话工具与三点 AI 状态浮条。</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="860" height="480" viewBox="0 0 860 480" fill="none"><title>ZeroWork 工作区</title><desc>主机分组、活动终端、会话工具与三点 AI 状态浮条。</desc>
 <!-- 设计契约仅存于源码 metadata 与注释，不渲染到产品画布。完整规范见 mist-design.md。 -->
 <metadata id="design.contract">{
   "status": "final_design",
   "units": "logical_px",
   "canvas": [
-    1440,
-    900
+    860,
+    480
   ],
   "preview_scale": 2,
   "theme": "reference-light",
   "specification": "mist-design.md",
-  "measurements": "../../artifacts/ui-v4/spacing-measurements.json",
-  "requirements": "DESIGN_REQUIREMENTS.md",
-  "style_guide": "STYLE_GUIDE.md",
+  "measurements": "../../../artifacts/ui-v4/spacing-measurements.json",
+  "requirements": "../standards/DESIGN_REQUIREMENTS.md",
+  "style_guide": "../standards/STYLE_GUIDE.md",
   "native_implementation_changed": true,
   "visible_annotations": false,
   "window": {
     "outer_margin": 12,
-    "sidebar_width": 238,
+    "sidebar_width": 220,
     "sidebar_to_workspace": 24
   },
   "toolbar": {
@@ -55,7 +55,7 @@
     },
     "tab_close": "always_visible",
     "tab_width": "fit_actual_tabs_and_new_button_never_stretch",
-    "compact_state": "full",
+    "compact_state": "expanded_left",
     "compact_behavior": "default_show_all_tools; compact_width_or_tabs_exceed_available_width_collapses_to_ellipsis; hover_ellipsis_reveals_all_nine_buttons_left_over_220ms_and_retains_ellipsis; shrink_tab_budget_to_reserve_expanded_tools_and_16px_gap; pointer_leaves_whole_function_region_including_group_gaps_returns_to_ellipsis; opening_click_is_not_forwarded_to_new_buttons; terminal_and_ai_do_not_move",
     "groups": [
       [
@@ -77,16 +77,16 @@
   },
   "terminal": {
     "viewport": [
-      274,
+      256,
       60,
-      1154,
-      828
+      592,
+      408
     ],
     "text_bounds": [
-      290,
+      272,
       76,
-      1122,
-      796
+      560,
+      376
     ],
     "padding": [
       16,
@@ -106,7 +106,7 @@
     ],
     "dot_diameter": 3,
     "dot_gap": 4,
-    "center_x": 851.0,
+    "center_x": 552.0,
     "center_y": 62.0,
     "placement": "center_between_visible_toolbar_bottom_and_first_terminal_glyph_top",
     "flow": "absolute_overlay_no_reserved_row",
@@ -200,12 +200,12 @@ text{font-family:-apple-system,BlinkMacSystemFont,'PingFang SC','Helvetica Neue'
   <path d="m6 9 6 6 6-6" />
 </g></symbol><symbol id="sidebar-chevron" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
   <path d="m9 18 6-6-6-6" />
-</g></symbol><filter id="mist-raised" x="-50%" y="-60%" width="200%" height="240%"><feDropShadow dx="0" dy="3" stdDeviation="4" flood-color="#18181B" flood-opacity=".07"/></filter><filter id="mist-sidebar-shadow" x="-12%" y="-3%" width="130%" height="108%"><feDropShadow dx="1" dy="2" stdDeviation="5" flood-color="#18181B" flood-opacity=".055"/></filter><clipPath id="window.clip"><rect width="1440" height="900" rx="18"/></clipPath><clipPath id="sidebar.list.clip"><rect x="22" y="114" width="218" height="706"/></clipPath><clipPath id="terminal.text.clip"><rect x="290" y="76" width="1122" height="796"/></clipPath></defs><g clip-path="url(#window.clip)">
-<rect id="window.background" x="0" y="0" width="1440" height="900" rx="0" fill="#FFFFFF" />
-<!-- workspace.sidebar：x12 y12 w238 h876；搜索/新建沿用已有行为，协议文字 Tag 不显示。 -->
+</g></symbol><filter id="mist-raised" x="-50%" y="-60%" width="200%" height="240%"><feDropShadow dx="0" dy="3" stdDeviation="4" flood-color="#18181B" flood-opacity=".07"/></filter><filter id="mist-sidebar-shadow" x="-12%" y="-3%" width="130%" height="108%"><feDropShadow dx="1" dy="2" stdDeviation="5" flood-color="#18181B" flood-opacity=".055"/></filter><clipPath id="window.clip"><rect width="860" height="480" rx="18"/></clipPath><clipPath id="sidebar.list.clip"><rect x="22" y="114" width="200" height="286"/></clipPath><clipPath id="terminal.text.clip"><rect x="272" y="76" width="560" height="376"/></clipPath></defs><g clip-path="url(#window.clip)">
+<rect id="window.background" x="0" y="0" width="860" height="480" rx="0" fill="#FFFFFF" />
+<!-- workspace.sidebar：x12 y12 w220 h456；搜索/新建沿用已有行为，协议文字 Tag 不显示。 -->
 <g id="workspace.sidebar" >
-<rect id="sidebar.surface" x="12" y="12" width="238" height="876" rx="16" fill="#F6F6F7" filter="url(#mist-sidebar-shadow)"/>
-<rect x="12.5" y="12.5" width="237" height="875" rx="15.5" fill="none" stroke="#FFFFFF" stroke-width="1"/>
+<rect id="sidebar.surface" x="12" y="12" width="220" height="456" rx="16" fill="#F6F6F7" filter="url(#mist-sidebar-shadow)"/>
+<rect x="12.5" y="12.5" width="219" height="455" rx="15.5" fill="none" stroke="#FFFFFF" stroke-width="1"/>
 <g id="window.native-controls" >
 <circle cx="40" cy="30" r="6" fill="#FF5F57" />
 <circle cx="60" cy="30" r="6" fill="#FEBC2E" />
@@ -213,265 +213,224 @@ text{font-family:-apple-system,BlinkMacSystemFont,'PingFang SC','Helvetica Neue'
 </g>
 <g id="sidebar.collapse" >
 <title>隐藏侧栏 ⌘B</title>
-<rect id="sidebar.collapse.hit" x="216" y="18" width="24" height="24" rx="0" fill="transparent" data-role="hit-area"/>
-<use href="#sidebar" x="218.5" y="20.5" width="19" height="19" color="#5B5B65"/>
+<rect id="sidebar.collapse.hit" x="198" y="18" width="24" height="24" rx="0" fill="transparent" data-role="hit-area"/>
+<use href="#sidebar" x="200.5" y="20.5" width="19" height="19" color="#5B5B65"/>
 </g>
 <g id="sidebar.header" >
 <use id="sidebar.header.icon" href="#sidebar-server" x="22" y="81.5" width="17" height="17" color="#4F5ED9"/>
 <text x="45" y="95" font-size="13" fill="#18181B" font-weight="700" >主机与连接</text>
 <g id="sidebar.search.toggle" >
 <title>搜索主机</title>
-<rect id="sidebar.search.toggle.hit" x="186" y="78" width="24" height="24" rx="0" fill="transparent" data-role="hit-area"/>
-<use href="#sidebar-search" x="190" y="82" width="16" height="16" color="#5B5B65"/>
+<rect id="sidebar.search.toggle.hit" x="168" y="78" width="24" height="24" rx="0" fill="transparent" data-role="hit-area"/>
+<use href="#sidebar-search" x="172" y="82" width="16" height="16" color="#5B5B65"/>
 </g>
 <g id="sidebar.new" >
 <title>新建主机或分组</title>
-<rect id="sidebar.new.hit" x="216" y="78" width="24" height="24" rx="0" fill="transparent" data-role="hit-area"/>
-<use href="#sidebar-plus" x="220" y="82" width="16" height="16" color="#5B5B65"/>
+<rect id="sidebar.new.hit" x="198" y="78" width="24" height="24" rx="0" fill="transparent" data-role="hit-area"/>
+<use href="#sidebar-plus" x="202" y="82" width="16" height="16" color="#5B5B65"/>
 </g>
 </g>
 <g id="sidebar.hosts" clip-path="url(#sidebar.list.clip)">
 <g id="host-group.生产环境" >
-<rect id="host-group.生产环境.hit" x="22" y="114" width="218" height="28" rx="0" fill="transparent" data-role="hit-area"/>
+<rect id="host-group.生产环境.hit" x="22" y="114" width="200" height="28" rx="0" fill="transparent" data-role="hit-area"/>
 <use id="host-group.生产环境.chevron" href="#sidebar-down" x="22" y="122" width="12" height="12" color="#5B5B65"/>
 <circle cx="42.5" cy="128" r="2.5" fill="#8C7CC5" />
 <text x="51" y="132" font-size="11.5" fill="#5B5B65" font-weight="600" >生产环境</text>
-<text id="host-group.生产环境.count" x="235" y="132" font-size="10" fill="#5B5B65" font-weight="400" text-anchor="end">4</text>
+<text id="host-group.生产环境.count" x="217" y="132" font-size="10" fill="#5B5B65" font-weight="400" text-anchor="end">4</text>
 <path id="host-group.生产环境.guide" d="M28 151 V277" stroke="#D9D9DD" stroke-width="1" stroke-linecap="round"/>
 </g>
 <g id="host.prod-web-01" >
-<rect id="host.prod-web-01.hit" x="34" y="148" width="206" height="36" rx="8" fill="#EAEDFD" data-role="hit-area"/>
+<rect id="host.prod-web-01.hit" x="34" y="148" width="188" height="36" rx="8" fill="#EAEDFD" data-role="hit-area"/>
 <use href="#os-ubuntu" x="43" y="157" width="18" height="18" color="#676771"/>
 <circle cx="61" cy="157" r="3" fill="#15B8A6" stroke="#F6F6F7" stroke-width="1.2"/>
 <text id="host.prod-web-01.name" x="70" y="171" font-size="12" fill="#18181B" font-weight="600" >prod-web-01</text>
-<use id="host.prod-web-01.route-icon" href="#sidebar-route" x="211" y="158" width="16" height="16" color="#5B5B65"/>
-<text id="host.prod-web-01.hops" x="229" y="163" font-size="8.5" fill="#5B5B65" font-weight="600" text-anchor="middle" style="font-family:Menlo,monospace">0</text>
+<use id="host.prod-web-01.route-icon" href="#sidebar-route" x="193" y="158" width="16" height="16" color="#5B5B65"/>
+<text id="host.prod-web-01.hops" x="211" y="163" font-size="8.5" fill="#5B5B65" font-weight="600" text-anchor="middle" style="font-family:Menlo,monospace">0</text>
 </g>
 <g id="host.prod-web-02" >
-<rect id="host.prod-web-02.hit" x="34" y="185" width="206" height="36" rx="8" fill="transparent" data-role="hit-area"/>
+<rect id="host.prod-web-02.hit" x="34" y="185" width="188" height="36" rx="8" fill="transparent" data-role="hit-area"/>
 <use href="#os-ubuntu" x="43" y="194" width="18" height="18" color="#676771"/>
 <text id="host.prod-web-02.name" x="70" y="208" font-size="12" fill="#18181B" font-weight="500" >prod-web-02</text>
-<use id="host.prod-web-02.route-icon" href="#sidebar-route" x="211" y="195" width="16" height="16" color="#5B5B65"/>
-<text id="host.prod-web-02.hops" x="229" y="200" font-size="8.5" fill="#5B5B65" font-weight="600" text-anchor="middle" style="font-family:Menlo,monospace">0</text>
+<use id="host.prod-web-02.route-icon" href="#sidebar-route" x="193" y="195" width="16" height="16" color="#5B5B65"/>
+<text id="host.prod-web-02.hops" x="211" y="200" font-size="8.5" fill="#5B5B65" font-weight="600" text-anchor="middle" style="font-family:Menlo,monospace">0</text>
 </g>
 <g id="host.prod-db-01" >
-<rect id="host.prod-db-01.hit" x="34" y="222" width="206" height="36" rx="8" fill="transparent" data-role="hit-area"/>
+<rect id="host.prod-db-01.hit" x="34" y="222" width="188" height="36" rx="8" fill="transparent" data-role="hit-area"/>
 <use href="#os-debian" x="43" y="231" width="18" height="18" color="#676771"/>
 <text id="host.prod-db-01.name" x="70" y="245" font-size="12" fill="#18181B" font-weight="500" >prod-db-01</text>
-<use id="host.prod-db-01.route-icon" href="#sidebar-route" x="211" y="232" width="16" height="16" color="#5B5B65"/>
-<text id="host.prod-db-01.hops" x="229" y="237" font-size="8.5" fill="#5B5B65" font-weight="600" text-anchor="middle" style="font-family:Menlo,monospace">1</text>
+<use id="host.prod-db-01.route-icon" href="#sidebar-route" x="193" y="232" width="16" height="16" color="#5B5B65"/>
+<text id="host.prod-db-01.hops" x="211" y="237" font-size="8.5" fill="#5B5B65" font-weight="600" text-anchor="middle" style="font-family:Menlo,monospace">1</text>
 </g>
 <g id="host.prod-bastion" >
-<rect id="host.prod-bastion.hit" x="34" y="259" width="206" height="36" rx="8" fill="transparent" data-role="hit-area"/>
+<rect id="host.prod-bastion.hit" x="34" y="259" width="188" height="36" rx="8" fill="transparent" data-role="hit-area"/>
 <use href="#os-debian" x="43" y="268" width="18" height="18" color="#676771"/>
 <text id="host.prod-bastion.name" x="70" y="282" font-size="12" fill="#18181B" font-weight="500" >prod-bastion</text>
-<use id="host.prod-bastion.route-icon" href="#sidebar-route" x="211" y="269" width="16" height="16" color="#5B5B65"/>
-<text id="host.prod-bastion.hops" x="229" y="274" font-size="8.5" fill="#5B5B65" font-weight="600" text-anchor="middle" style="font-family:Menlo,monospace">0</text>
+<use id="host.prod-bastion.route-icon" href="#sidebar-route" x="193" y="269" width="16" height="16" color="#5B5B65"/>
+<text id="host.prod-bastion.hops" x="211" y="274" font-size="8.5" fill="#5B5B65" font-weight="600" text-anchor="middle" style="font-family:Menlo,monospace">0</text>
 </g>
 <g id="host-group.开发环境" >
-<rect id="host-group.开发环境.hit" x="22" y="310" width="218" height="28" rx="0" fill="transparent" data-role="hit-area"/>
+<rect id="host-group.开发环境.hit" x="22" y="310" width="200" height="28" rx="0" fill="transparent" data-role="hit-area"/>
 <use id="host-group.开发环境.chevron" href="#sidebar-down" x="22" y="318" width="12" height="12" color="#5B5B65"/>
 <circle cx="42.5" cy="324" r="2.5" fill="#75A99A" />
 <text x="51" y="328" font-size="11.5" fill="#5B5B65" font-weight="600" >开发环境</text>
-<text id="host-group.开发环境.count" x="235" y="328" font-size="10" fill="#5B5B65" font-weight="400" text-anchor="end">3</text>
+<text id="host-group.开发环境.count" x="217" y="328" font-size="10" fill="#5B5B65" font-weight="400" text-anchor="end">3</text>
 <path id="host-group.开发环境.guide" d="M28 347 V436" stroke="#D9D9DD" stroke-width="1" stroke-linecap="round"/>
 </g>
 <g id="host.dev-api-01" >
-<rect id="host.dev-api-01.hit" x="34" y="344" width="206" height="36" rx="8" fill="transparent" data-role="hit-area"/>
+<rect id="host.dev-api-01.hit" x="34" y="344" width="188" height="36" rx="8" fill="transparent" data-role="hit-area"/>
 <use href="#os-fedora" x="43" y="353" width="18" height="18" color="#676771"/>
 <circle cx="61" cy="353" r="3" fill="#15B8A6" stroke="#F6F6F7" stroke-width="1.2"/>
 <text id="host.dev-api-01.name" x="70" y="367" font-size="12" fill="#18181B" font-weight="500" >dev-api-01</text>
-<use id="host.dev-api-01.route-icon" href="#sidebar-route" x="211" y="354" width="16" height="16" color="#5B5B65"/>
-<text id="host.dev-api-01.hops" x="229" y="359" font-size="8.5" fill="#5B5B65" font-weight="600" text-anchor="middle" style="font-family:Menlo,monospace">0</text>
+<use id="host.dev-api-01.route-icon" href="#sidebar-route" x="193" y="354" width="16" height="16" color="#5B5B65"/>
+<text id="host.dev-api-01.hops" x="211" y="359" font-size="8.5" fill="#5B5B65" font-weight="600" text-anchor="middle" style="font-family:Menlo,monospace">0</text>
 </g>
 <g id="host.项目文件" >
-<rect id="host.项目文件.hit" x="34" y="381" width="206" height="36" rx="8" fill="transparent" data-role="hit-area"/>
+<rect id="host.项目文件.hit" x="34" y="381" width="188" height="36" rx="8" fill="transparent" data-role="hit-area"/>
 <use href="#folder" x="43" y="390" width="18" height="18" color="#676771"/>
 <text id="host.项目文件.name" x="70" y="404" font-size="12" fill="#18181B" font-weight="500" >项目文件</text>
-<use id="host.项目文件.route-icon" href="#sidebar-route" x="211" y="391" width="16" height="16" color="#5B5B65"/>
-<text id="host.项目文件.hops" x="229" y="396" font-size="8.5" fill="#5B5B65" font-weight="600" text-anchor="middle" style="font-family:Menlo,monospace">0</text>
+<use id="host.项目文件.route-icon" href="#sidebar-route" x="193" y="391" width="16" height="16" color="#5B5B65"/>
+<text id="host.项目文件.hops" x="211" y="396" font-size="8.5" fill="#5B5B65" font-weight="600" text-anchor="middle" style="font-family:Menlo,monospace">0</text>
 </g>
 <g id="host.dev-cache-01" >
-<rect id="host.dev-cache-01.hit" x="34" y="418" width="206" height="36" rx="8" fill="transparent" data-role="hit-area"/>
+<rect id="host.dev-cache-01.hit" x="34" y="418" width="188" height="36" rx="8" fill="transparent" data-role="hit-area"/>
 <use href="#os-debian" x="43" y="427" width="18" height="18" color="#676771"/>
 <text id="host.dev-cache-01.name" x="70" y="441" font-size="12" fill="#18181B" font-weight="500" >dev-cache-01</text>
-<use id="host.dev-cache-01.route-icon" href="#sidebar-route" x="211" y="428" width="16" height="16" color="#5B5B65"/>
-<text id="host.dev-cache-01.hops" x="229" y="433" font-size="8.5" fill="#5B5B65" font-weight="600" text-anchor="middle" style="font-family:Menlo,monospace">0</text>
+<use id="host.dev-cache-01.route-icon" href="#sidebar-route" x="193" y="428" width="16" height="16" color="#5B5B65"/>
+<text id="host.dev-cache-01.hops" x="211" y="433" font-size="8.5" fill="#5B5B65" font-weight="600" text-anchor="middle" style="font-family:Menlo,monospace">0</text>
 </g>
 <g id="host-group.硬件管理" >
-<rect id="host-group.硬件管理.hit" x="22" y="469" width="218" height="28" rx="0" fill="transparent" data-role="hit-area"/>
+<rect id="host-group.硬件管理.hit" x="22" y="469" width="200" height="28" rx="0" fill="transparent" data-role="hit-area"/>
 <use id="host-group.硬件管理.chevron" href="#sidebar-chevron" x="22" y="477" width="12" height="12" color="#5B5B65"/>
 <circle cx="42.5" cy="483" r="2.5" fill="#BEA06B" />
 <text x="51" y="487" font-size="11.5" fill="#5B5B65" font-weight="600" >硬件管理</text>
-<text id="host-group.硬件管理.count" x="235" y="487" font-size="10" fill="#5B5B65" font-weight="400" text-anchor="end">2</text>
+<text id="host-group.硬件管理.count" x="217" y="487" font-size="10" fill="#5B5B65" font-weight="400" text-anchor="end">2</text>
 </g>
 </g>
+<rect x="220" y="151" width="2" height="102" rx="1" fill="#C4C4CC" />
 <g id="sidebar.footer.new" >
-<rect id="sidebar.footer.surface" x="22" y="844" width="218" height="34" rx="8" fill="transparent" data-role="hit-area"/>
+<rect id="sidebar.footer.surface" x="22" y="424" width="200" height="34" rx="8" fill="transparent" data-role="hit-area"/>
 <g id="sidebar.footer.content" >
-<use href="#sidebar-plus" x="97.0" y="854" width="14" height="14" color="#5B5B65"/>
-<text x="117.0" y="865" font-size="12" fill="#5B5B65" font-weight="500" >新建连接</text>
+<use href="#sidebar-plus" x="88.0" y="434" width="14" height="14" color="#5B5B65"/>
+<text x="108.0" y="445" font-size="12" fill="#5B5B65" font-weight="500" >新建连接</text>
 </g>
 </g>
 </g>
 <!-- workspace.toolbar：y12 h36；默认显示全部工具，窄窗或Tab过多收为三点，悬停220ms向左展开并保留三点，展开时Tab按实际剩余空间收缩并留16点间距，移出收回并恢复Tab宽度；不推移终端或AI条。 -->
 <g id="workspace.toolbar" >
 <g id="toolbar.tabs" >
-<rect id="toolbar.tabs.surface" x="274" y="12" width="732" height="36" rx="18" fill="#FFFFFF" filter="url(#mist-raised)"/>
+<rect id="toolbar.tabs.surface" x="256" y="12" width="204" height="36" rx="18" fill="#FFFFFF" filter="url(#mist-raised)"/>
 <g id="tab.prod-web-01" >
-<path id="tab.prod-web-01.hit" d="M 292 16 H 435 A 7 7 0 0 1 442 23 V 37 A 7 7 0 0 1 435 44 H 292 A 14 14 0 0 1 278 30 A 14 14 0 0 1 292 16 Z" fill="#EAEDFD" data-role="hit-area"/>
-<rect x="286" y="23" width="2.5" height="14" rx="1.25" fill="#4F5ED9" />
-<use href="#terminal" x="297" y="22" width="16" height="16" color="#4352C7"/>
-<circle cx="311" cy="22" r="3.7" fill="#15B8A6" stroke="#FFFFFF" stroke-width="1.2"/>
-<text id="tab.prod-web-01.name" x="321" y="34" font-size="12.5" fill="#18181B" font-weight="550" >prod-web-01</text>
-<rect id="tab.prod-web-01.close.hit" x="414" y="20" width="20" height="20" rx="0" fill="transparent" data-role="hit-area"/>
-<use href="#close" x="418" y="24" width="12" height="12" color="#676771"/>
-</g>
-<g id="tab.本地" >
-<rect id="tab.本地.hit" x="446" y="16" width="100" height="28" rx="7" fill="transparent" data-role="hit-area"/>
-<rect x="454" y="23" width="2.5" height="14" rx="1.25" fill="#98909F" />
-<use href="#terminal" x="465" y="22" width="16" height="16" color="#676771"/>
-<text id="tab.本地.name" x="489" y="34" font-size="12.5" fill="#676771" font-weight="400" >本地</text>
-<rect id="tab.本地.close.hit" x="518" y="20" width="20" height="20" rx="0" fill="transparent" data-role="hit-area"/>
-<use href="#close" x="522" y="24" width="12" height="12" color="#676771"/>
-</g>
-<g id="tab.项目文件" >
-<rect id="tab.项目文件.hit" x="550" y="16" width="128" height="28" rx="7" fill="transparent" data-role="hit-area"/>
-<rect x="558" y="23" width="2.5" height="14" rx="1.25" fill="#5D9F8E" />
-<use href="#folder" x="569" y="22" width="16" height="16" color="#676771"/>
-<text id="tab.项目文件.name" x="593" y="34" font-size="12.5" fill="#676771" font-weight="400" >项目文件</text>
-<rect id="tab.项目文件.close.hit" x="650" y="20" width="20" height="20" rx="0" fill="transparent" data-role="hit-area"/>
-<use href="#close" x="654" y="24" width="12" height="12" color="#676771"/>
-</g>
-<g id="tab.BMC 控制台" >
-<rect id="tab.BMC 控制台.hit" x="682" y="16" width="144" height="28" rx="7" fill="transparent" data-role="hit-area"/>
-<rect x="690" y="23" width="2.5" height="14" rx="1.25" fill="#B0925D" />
-<use href="#monitor" x="701" y="22" width="16" height="16" color="#676771"/>
-<text id="tab.BMC 控制台.name" x="725" y="34" font-size="12.5" fill="#676771" font-weight="400" >BMC 控制台</text>
-<rect id="tab.BMC 控制台.close.hit" x="798" y="20" width="20" height="20" rx="0" fill="transparent" data-role="hit-area"/>
-<use href="#close" x="802" y="24" width="12" height="12" color="#676771"/>
-</g>
-<g id="tab.部署会话组" >
-<rect id="tab.部署会话组.hit" x="830" y="16" width="140" height="28" rx="7" fill="transparent" data-role="hit-area"/>
-<rect x="838" y="23" width="2.5" height="14" rx="1.25" fill="#A586B6" />
-<use href="#layers" x="849" y="22" width="16" height="16" color="#676771"/>
-<text id="tab.部署会话组.name" x="873" y="34" font-size="12.5" fill="#676771" font-weight="400" >部署会话组</text>
-<rect id="tab.部署会话组.close.hit" x="942" y="20" width="20" height="20" rx="0" fill="transparent" data-role="hit-area"/>
-<use href="#close" x="946" y="24" width="12" height="12" color="#676771"/>
+<path id="tab.prod-web-01.hit" d="M 274 16 H 417 A 7 7 0 0 1 424 23 V 37 A 7 7 0 0 1 417 44 H 274 A 14 14 0 0 1 260 30 A 14 14 0 0 1 274 16 Z" fill="#EAEDFD" data-role="hit-area"/>
+<rect x="268" y="23" width="2.5" height="14" rx="1.25" fill="#4F5ED9" />
+<use href="#terminal" x="279" y="22" width="16" height="16" color="#4352C7"/>
+<circle cx="293" cy="22" r="3.7" fill="#15B8A6" stroke="#FFFFFF" stroke-width="1.2"/>
+<text id="tab.prod-web-01.name" x="303" y="34" font-size="12.5" fill="#18181B" font-weight="550" >prod-web-01</text>
+<rect id="tab.prod-web-01.close.hit" x="396" y="20" width="20" height="20" rx="0" fill="transparent" data-role="hit-area"/>
+<use href="#close" x="400" y="24" width="12" height="12" color="#676771"/>
 </g>
 <g id="tabs.new" >
 <title>新建会话</title>
-<rect id="tabs.new.hit" x="974" y="16" width="28" height="28" rx="14" fill="transparent" data-role="hit-area"/>
-<use id="tabs.new.icon" href="#plus" x="980" y="22" width="16" height="16" color="#676771"/>
+<rect id="tabs.new.hit" x="428" y="16" width="28" height="28" rx="14" fill="transparent" data-role="hit-area"/>
+<use id="tabs.new.icon" href="#plus" x="434" y="22" width="16" height="16" color="#676771"/>
 </g>
 </g>
+<g id="toolbar.expanded.overlay" >
+<rect id="toolbar.expanded.hover-region" x="488" y="12" width="360" height="36" rx="0" fill="transparent" data-role="hit-area"/>
 <g id="toolbar.connections-transfer" >
-<rect id="toolbar.connections-transfer.surface" x="1112" y="12" width="100" height="36" rx="18" fill="#FFFFFF" filter="url(#mist-raised)"/>
+<rect id="toolbar.connections-transfer.surface" x="488" y="12" width="100" height="36" rx="18" fill="#FFFFFF" filter="url(#mist-raised)"/>
 <g id="session.route" >
 <title>当前会话连接链路</title>
-<rect id="session.route.hit" x="1116" y="16" width="28" height="28" rx="14" fill="transparent" data-role="hit-area"/>
-<use id="session.route.icon" href="#network" x="1122" y="22" width="16" height="16" color="#676771"/>
+<rect id="session.route.hit" x="492" y="16" width="28" height="28" rx="14" fill="transparent" data-role="hit-area"/>
+<use id="session.route.icon" href="#network" x="498" y="22" width="16" height="16" color="#676771"/>
 </g>
 <g id="session.forward" >
 <title>当前会话端口转发</title>
-<rect id="session.forward.hit" x="1148" y="16" width="28" height="28" rx="14" fill="transparent" data-role="hit-area"/>
-<use id="session.forward.icon" href="#plug" x="1154" y="22" width="16" height="16" color="#4352C7"/>
-<circle id="session.forward.badge" cx="1170" cy="20" r="2.5" fill="#4F5ED9" />
+<rect id="session.forward.hit" x="524" y="16" width="28" height="28" rx="14" fill="transparent" data-role="hit-area"/>
+<use id="session.forward.icon" href="#plug" x="530" y="22" width="16" height="16" color="#4352C7"/>
+<circle id="session.forward.badge" cx="546" cy="20" r="2.5" fill="#4F5ED9" />
 </g>
 <g id="global.transfer" >
 <title>打开全局传输列表 · 68%</title>
-<rect id="global.transfer.hit" x="1180" y="16" width="28" height="28" rx="14" fill="transparent" data-role="hit-area"/>
-<circle id="global.transfer.track" cx="1194" cy="30" r="11" fill="none" stroke="#E4E4E7" stroke-width="2"/>
-<circle id="global.transfer.ring" cx="1194" cy="30" r="11" fill="none" stroke="#4F5ED9" stroke-width="2" stroke-linecap="round" stroke-dasharray="46.9982260977033 69.11503837897544" transform="rotate(-90 1194 30)"/>
-<text x="1194" y="33" font-size="8" fill="#4352C7" font-weight="550" text-anchor="middle">68%</text>
+<rect id="global.transfer.hit" x="556" y="16" width="28" height="28" rx="14" fill="transparent" data-role="hit-area"/>
+<circle id="global.transfer.track" cx="570" cy="30" r="11" fill="none" stroke="#E4E4E7" stroke-width="2"/>
+<circle id="global.transfer.ring" cx="570" cy="30" r="11" fill="none" stroke="#4F5ED9" stroke-width="2" stroke-linecap="round" stroke-dasharray="46.9982260977033 69.11503837897544" transform="rotate(-90 570 30)"/>
+<text x="570" y="33" font-size="8" fill="#4352C7" font-weight="550" text-anchor="middle">68%</text>
 </g>
 </g>
 <g id="toolbar.history-notifications" >
-<rect id="toolbar.history-notifications.surface" x="1220" y="12" width="100" height="36" rx="18" fill="#FFFFFF" filter="url(#mist-raised)"/>
+<rect id="toolbar.history-notifications.surface" x="596" y="12" width="100" height="36" rx="18" fill="#FFFFFF" filter="url(#mist-raised)"/>
 <g id="session.command-history" >
 <title>当前终端的命令历史</title>
-<rect id="session.command-history.hit" x="1224" y="16" width="28" height="28" rx="14" fill="transparent" data-role="hit-area"/>
-<use id="session.command-history.icon" href="#list-restart" x="1230" y="22" width="16" height="16" color="#676771"/>
+<rect id="session.command-history.hit" x="600" y="16" width="28" height="28" rx="14" fill="transparent" data-role="hit-area"/>
+<use id="session.command-history.icon" href="#list-restart" x="606" y="22" width="16" height="16" color="#676771"/>
 </g>
 <g id="global.logs" >
 <title>回看会话日志</title>
-<rect id="global.logs.hit" x="1256" y="16" width="28" height="28" rx="14" fill="transparent" data-role="hit-area"/>
-<use id="global.logs.icon" href="#history" x="1262" y="22" width="16" height="16" color="#676771"/>
+<rect id="global.logs.hit" x="632" y="16" width="28" height="28" rx="14" fill="transparent" data-role="hit-area"/>
+<use id="global.logs.icon" href="#history" x="638" y="22" width="16" height="16" color="#676771"/>
 </g>
 <g id="global.notifications" >
 <title>通知</title>
-<rect id="global.notifications.hit" x="1288" y="16" width="28" height="28" rx="14" fill="transparent" data-role="hit-area"/>
-<use id="global.notifications.icon" href="#bell" x="1294" y="22" width="16" height="16" color="#676771"/>
-<circle id="global.notifications.badge" cx="1310" cy="20" r="2.5" fill="#4F5ED9" />
+<rect id="global.notifications.hit" x="664" y="16" width="28" height="28" rx="14" fill="transparent" data-role="hit-area"/>
+<use id="global.notifications.icon" href="#bell" x="670" y="22" width="16" height="16" color="#676771"/>
+<circle id="global.notifications.badge" cx="686" cy="20" r="2.5" fill="#4F5ED9" />
 </g>
 </g>
 <g id="toolbar.assistance-preferences" >
-<rect id="toolbar.assistance-preferences.surface" x="1328" y="12" width="100" height="36" rx="18" fill="#FFFFFF" filter="url(#mist-raised)"/>
+<rect id="toolbar.assistance-preferences.surface" x="704" y="12" width="100" height="36" rx="18" fill="#FFFFFF" filter="url(#mist-raised)"/>
 <g id="global.theme" >
 <title>全局主题 · 晴霜</title>
-<rect id="global.theme.hit" x="1332" y="16" width="28" height="28" rx="14" fill="transparent" data-role="hit-area"/>
-<use id="global.theme.icon" href="#palette" x="1338" y="22" width="16" height="16" color="#676771"/>
+<rect id="global.theme.hit" x="708" y="16" width="28" height="28" rx="14" fill="transparent" data-role="hit-area"/>
+<use id="global.theme.icon" href="#palette" x="714" y="22" width="16" height="16" color="#676771"/>
 </g>
 <g id="assistant.open" >
 <title>AI 助手</title>
-<rect id="assistant.open.hit" x="1364" y="16" width="28" height="28" rx="14" fill="transparent" data-role="hit-area"/>
-<use id="assistant.open.icon" href="#sparkles" x="1370" y="22" width="16" height="16" color="#676771"/>
+<rect id="assistant.open.hit" x="740" y="16" width="28" height="28" rx="14" fill="transparent" data-role="hit-area"/>
+<use id="assistant.open.icon" href="#sparkles" x="746" y="22" width="16" height="16" color="#676771"/>
 </g>
 <g id="global.settings" >
 <title>偏好设置</title>
-<rect id="global.settings.hit" x="1396" y="16" width="28" height="28" rx="14" fill="transparent" data-role="hit-area"/>
-<use id="global.settings.icon" href="#settings" x="1402" y="22" width="16" height="16" color="#676771"/>
+<rect id="global.settings.hit" x="772" y="16" width="28" height="28" rx="14" fill="transparent" data-role="hit-area"/>
+<use id="global.settings.icon" href="#settings" x="778" y="22" width="16" height="16" color="#676771"/>
+</g>
+</g>
+</g>
+<g id="toolbar.compact-toggle" >
+<rect id="toolbar.compact-toggle.surface" x="812" y="12" width="36" height="36" rx="18" fill="#FFFFFF" filter="url(#mist-raised)"/>
+<g id="toolbar.compact-toggle.button" >
+<title>悬停向左展开全部功能按钮</title>
+<rect id="toolbar.compact-toggle.button.hit" x="816" y="16" width="28" height="28" rx="14" fill="transparent" data-role="hit-area"/>
+<use id="toolbar.compact-toggle.button.icon" href="#more" x="822" y="22" width="16" height="16" color="#676771"/>
 </g>
 </g>
 </g>
 <!-- ai.status-strip：绝对悬浮，不占布局；中心y=(组件真实下沿48+首行字形上沿76)/2=62，上沿59。三点及原交互不变。 -->
 <g id="ai.status-strip" data-owner="active-ai-binding">
 <title>打开 AI 助手</title>
-<rect id="ai.status-strip.hit" x="791.0" y="59.0" width="120" height="6" rx="0" fill="transparent" data-role="hit-area"/>
-<rect id="ai.status-strip.surface" x="791.0" y="59.0" width="120" height="6" rx="3" fill="url(#ai-strip-glass)" filter="url(#ai-strip-shadow)" stroke="#FFFFFF" stroke-opacity=".65" stroke-width=".6"/>
-<circle id="ai.status-strip.dot.0" cx="844.0" cy="62.0" r="1.5" fill="#4F5ED9" opacity=".37255"/>
-<circle id="ai.status-strip.dot.1" cx="851.0" cy="62.0" r="1.5" fill="#4F5ED9" />
-<circle id="ai.status-strip.dot.2" cx="858.0" cy="62.0" r="1.5" fill="#4F5ED9" opacity=".37255"/>
+<rect id="ai.status-strip.hit" x="492.0" y="59.0" width="120" height="6" rx="0" fill="transparent" data-role="hit-area"/>
+<rect id="ai.status-strip.surface" x="492.0" y="59.0" width="120" height="6" rx="3" fill="url(#ai-strip-glass)" filter="url(#ai-strip-shadow)" stroke="#FFFFFF" stroke-opacity=".65" stroke-width=".6"/>
+<circle id="ai.status-strip.dot.0" cx="545.0" cy="62.0" r="1.5" fill="#D98A00" opacity=".37255"/>
+<circle id="ai.status-strip.dot.1" cx="552.0" cy="62.0" r="1.5" fill="#D98A00" />
+<circle id="ai.status-strip.dot.2" cx="559.0" cy="62.0" r="1.5" fill="#D98A00" opacity=".37255"/>
 </g>
-<!-- workspace.terminal：视口x274 y60；文字x290 y76，四边内距16，窗口右/下留白12。浮条不参与间距计算。 -->
+<!-- workspace.terminal：视口x256 y60；文字x272 y76，四边内距16，窗口右/下留白12。浮条不参与间距计算。 -->
 <g id="workspace.terminal" >
-<rect id="terminal.viewport" x="274" y="60" width="1154" height="828" rx="0" fill="transparent" data-role="viewport-bounds"/>
-<rect id="terminal.text.bounds" x="290" y="76" width="1122" height="796" rx="0" fill="transparent" data-role="text-bounds"/>
+<rect id="terminal.viewport" x="256" y="60" width="592" height="408" rx="0" fill="transparent" data-role="viewport-bounds"/>
+<rect id="terminal.text.bounds" x="272" y="76" width="560" height="376" rx="0" fill="transparent" data-role="text-bounds"/>
 <g id="terminal.content" clip-path="url(#terminal.text.clip)">
-<text id="terminal.first-line" x="290" y="89" font-size="13" fill="#676771" font-weight="400" class="mono">Last login: Fri Nov  6 09:41:22 2026 from 10.0.1.8</text>
-<text x="290" y="129" font-size="13" class="mono"><tspan fill="#146D58">admin@prod-web-01</tspan><tspan fill="#676771">:</tspan><tspan fill="#4352C7">/srv/zerowork</tspan><tspan fill="#18181B">$ systemctl status nginx --no-pager</tspan></text>
-<text x="290" y="149" font-size="13" fill="#18181B" font-weight="400" class="mono">● nginx.service - A high performance web server</text>
-<text x="290" y="169" font-size="13" fill="#5B5B65" font-weight="400" class="mono">     Loaded: loaded (/usr/lib/systemd/system/nginx.service; enabled)</text>
-<text x="290" y="189" class="mono" font-size="13"><tspan fill="#5B5B65">     Active: </tspan><tspan fill="#146D58">active (running)</tspan><tspan fill="#5B5B65"> since Fri 2026-11-06 09:12:04 CST</tspan></text>
-<text x="290" y="209" font-size="13" fill="#5B5B65" font-weight="400" class="mono">       Docs: man:nginx(8)</text>
-<text x="290" y="229" font-size="13" fill="#5B5B65" font-weight="400" class="mono">   Main PID: 1428 (nginx)</text>
-<text x="290" y="249" font-size="13" fill="#5B5B65" font-weight="400" class="mono">      Tasks: 5 (limit: 9387)</text>
-<text x="290" y="269" font-size="13" fill="#5B5B65" font-weight="400" class="mono">     Memory: 12.4M (peak: 14.8M)</text>
-<text x="290" y="289" font-size="13" fill="#5B5B65" font-weight="400" class="mono">        CPU: 1.284s</text>
-<text x="290" y="309" font-size="13" fill="#5B5B65" font-weight="400" class="mono">     CGroup: /system.slice/nginx.service</text>
-<text x="290" y="329" font-size="13" fill="#676771" font-weight="400" class="mono">             ├─1428 &quot;nginx: master process /usr/sbin/nginx&quot;</text>
-<text x="290" y="349" font-size="13" fill="#676771" font-weight="400" class="mono">             ├─1429 &quot;nginx: worker process&quot;</text>
-<text x="290" y="369" font-size="13" fill="#676771" font-weight="400" class="mono">             ├─1430 &quot;nginx: worker process&quot;</text>
-<text x="290" y="389" font-size="13" fill="#676771" font-weight="400" class="mono">             ├─1431 &quot;nginx: worker process&quot;</text>
-<text x="290" y="409" font-size="13" fill="#676771" font-weight="400" class="mono">             └─1432 &quot;nginx: worker process&quot;</text>
-<text x="290" y="449" font-size="13" fill="#676771" font-weight="400" class="mono">Nov 06 09:12:04 prod-web-01 systemd[1]: Starting nginx.service...</text>
-<text x="290" y="469" font-size="13" fill="#676771" font-weight="400" class="mono">Nov 06 09:12:04 prod-web-01 systemd[1]: Started nginx.service.</text>
-<text x="290" y="509" font-size="13" class="mono"><tspan fill="#146D58">admin@prod-web-01</tspan><tspan fill="#676771">:</tspan><tspan fill="#4352C7">/srv/zerowork</tspan><tspan fill="#18181B">$ nginx -t</tspan></text>
-<text x="290" y="529" font-size="13" fill="#5B5B65" font-weight="400" class="mono">nginx: the configuration file /etc/nginx/nginx.conf syntax is ok</text>
-<text x="290" y="549" font-size="13" fill="#146D58" font-weight="400" class="mono">nginx: configuration file /etc/nginx/nginx.conf test is successful</text>
-<text x="290" y="589" font-size="13" class="mono"><tspan fill="#146D58">admin@prod-web-01</tspan><tspan fill="#676771">:</tspan><tspan fill="#4352C7">/srv/zerowork</tspan><tspan fill="#18181B">$ curl -I https://localhost</tspan></text>
-<text x="290" y="609" font-size="13" fill="#146D58" font-weight="400" class="mono">HTTP/2 200</text>
-<text x="290" y="629" font-size="13" fill="#5B5B65" font-weight="400" class="mono">server: nginx/1.24.0</text>
-<text x="290" y="649" font-size="13" fill="#5B5B65" font-weight="400" class="mono">content-type: text/html</text>
-<text x="290" y="669" font-size="13" fill="#5B5B65" font-weight="400" class="mono">content-length: 1248</text>
-<text x="290" y="709" font-size="13" class="mono"><tspan fill="#146D58">admin@prod-web-01</tspan><tspan fill="#676771">:</tspan><tspan fill="#4352C7">/srv/zerowork</tspan><tspan fill="#18181B">$ tail -n 3 /var/log/nginx/access.log</tspan></text>
-<text x="290" y="729" font-size="13" fill="#676771" font-weight="400" class="mono">10.0.1.8 - - [06/Nov/2026:10:02:11 +0800] &quot;GET /health HTTP/1.1&quot; 200 2</text>
-<text x="290" y="749" font-size="13" fill="#676771" font-weight="400" class="mono">10.0.1.8 - - [06/Nov/2026:10:02:21 +0800] &quot;GET /health HTTP/1.1&quot; 200 2</text>
-<text x="290" y="769" font-size="13" fill="#676771" font-weight="400" class="mono">10.0.1.8 - - [06/Nov/2026:10:02:31 +0800] &quot;GET /health HTTP/1.1&quot; 200 2</text>
-<text id="terminal.current-prompt" x="290" y="829" font-size="13" class="mono"><tspan fill="#146D58">admin@prod-web-01</tspan><tspan fill="#676771">:</tspan><tspan fill="#4352C7">/srv/zerowork</tspan><tspan fill="#18181B">$ </tspan></text>
-<rect id="terminal.cursor" x="547.4" y="816" width="7.8" height="18" rx="1" fill="#4F5ED9" />
+<text id="terminal.first-line" x="272" y="89" font-size="13" fill="#676771" font-weight="400" class="mono">Last login: Fri Nov  6 09:41:22 2026</text>
+<text x="272" y="129" font-size="13" class="mono"><tspan fill="#146D58">admin@prod-web-01</tspan><tspan fill="#676771">:</tspan><tspan fill="#4352C7">/srv/zerowork</tspan><tspan fill="#18181B">$ nginx -t</tspan></text>
+<text x="272" y="169" font-size="13" fill="#5B5B65" font-weight="400" class="mono">nginx: the configuration file</text>
+<text x="272" y="189" font-size="13" fill="#5B5B65" font-weight="400" class="mono">/etc/nginx/nginx.conf syntax is ok</text>
+<text x="272" y="209" font-size="13" fill="#146D58" font-weight="400" class="mono">nginx: configuration test is successful</text>
+<text x="272" y="269" font-size="13" class="mono"><tspan fill="#146D58">admin@prod-web-01</tspan><tspan fill="#676771">:</tspan><tspan fill="#4352C7">/srv/zerowork</tspan><tspan fill="#18181B">$ curl -I https://localhost</tspan></text>
+<text x="272" y="309" font-size="13" fill="#146D58" font-weight="400" class="mono">HTTP/2 200</text>
+<text x="272" y="329" font-size="13" fill="#5B5B65" font-weight="400" class="mono">server: nginx/1.24.0</text>
+<text x="272" y="349" font-size="13" fill="#5B5B65" font-weight="400" class="mono">content-type: text/html</text>
+<text id="terminal.current-prompt" x="272" y="409" font-size="13" class="mono"><tspan fill="#146D58">admin@prod-web-01</tspan><tspan fill="#676771">:</tspan><tspan fill="#4352C7">/srv/zerowork</tspan><tspan fill="#18181B">$ </tspan></text>
+<rect id="terminal.cursor" x="529.4" y="396" width="7.8" height="18" rx="1" fill="#4F5ED9" />
 </g>
 </g>
 </g>
-<rect id="window.frame" x="0.5" y="0.5" width="1439" height="899" rx="17.5" fill="none" stroke="#D4D4D8" stroke-width="1"/>
+<rect id="window.frame" x="0.5" y="0.5" width="859" height="479" rx="17.5" fill="none" stroke="#D4D4D8" stroke-width="1"/>
 </svg>

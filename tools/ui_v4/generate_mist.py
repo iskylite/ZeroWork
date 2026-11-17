@@ -5,8 +5,9 @@ import re, math, json
 
 REPO = Path(__file__).resolve().parents[2]
 BASE = REPO / "docs/UI_V4"
+WORKSPACE = BASE / "workspace"
 # Reuse the reviewed icon/font resources. Strip obsolete clips and replace shadows.
-DEFS = (BASE/'mist-workspace.svg').read_text().split('<defs>',1)[1].split('</defs>',1)[0]
+DEFS = (WORKSPACE/'mist-workspace.svg').read_text().split('<defs>',1)[1].split('</defs>',1)[0]
 DEFS = re.sub(r'<clipPath.*?</clipPath>', '', DEFS, flags=re.S)
 DEFS = re.sub(r'<filter id="(?:raised|sidebar-shadow|mist-raised|mist-sidebar-shadow)".*?</filter>', '', DEFS, flags=re.S)
 DEFS = re.sub(r'<symbol id="sidebar-(?:server|route|monitor|plus|search|down|chevron)".*?</symbol>', '', DEFS, flags=re.S)
@@ -258,7 +259,7 @@ class Screen:
  def save(self,name):
   self.sidebar();self.toolbar();self.ai_strip();self.terminal();self.end()
   self.rect(.5,.5,self.w-1,self.h-1,'none',17.5,id='window.frame',extra='stroke="#D4D4D8" stroke-width="1"')
-  self.add('</svg>');(BASE/name).write_text('\n'.join(self.parts));print(BASE/name)
+  self.add('</svg>');(WORKSPACE/name).write_text('\n'.join(self.parts));print(WORKSPACE/name)
 
 if __name__=='__main__':
  Screen(1440,900).save('mist-workspace.svg')
