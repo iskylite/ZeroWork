@@ -287,3 +287,41 @@ test "v0.7 resumeAnswer 不再因未收齐子任务硬阻塞并返回未收齐�
     try std.testing.expectEqualStrings("等待审批", outstanding[0].label);
     try std.testing.expectEqual(@as(u32, 1), outstanding[0].seq);
 }
+
+test "v0.7 Boost verification waits for settlement and survives journal replay" {
+    var service = Runtime.Service.init(a);
+    defer service.deinit();
+    var root = budget.Root.init(a);
+    defer root.deinit();
+    const parent = try service.store.attach(.{ .session = 11 });
+    const fence = try service.store.create(parent.id);
+    const root_id = id.TaskId.generate();
+    try root.add(.{ .root = root_id, .task = root_id, .conversation = fence.conversation, .agent = parent.id, .generation = 1 });
+    try root.configureBoost(root_id, 5);
+    const initial = try root.factForTask(root_id);
+    const child = try service.store.registerChild(fence, .{ .name = "实现", .request_key = "implement" }, null);
+    const child_task = id.TaskId.generate();
+    try root.add(.{
+        .root = root_id, .task = child_task, .parent = root_id, .conversation = child.id,
+        .agent = child.child.?.info.agent, .generation = 1, .request_key = "implement",
+        .boost_round = .{ .number = 1, .phase = .implementation },
+    });
+    const checks = [_]budget.VerificationItem{
+        .{ .requirement = "检查输入", .passed = true, .detail = "用例通过" },
+        .{ .requirement = "检查空值", .passed = false, .detail = "缺少回执" },
+    };
+    try std.testing.expectError(error.BoostChildrenPending, root.verifyBoost(root_id, &checks));
+    try root.state(child_task, .succeeded, "实现已交付");
+    try root.verifyBoost(root_id, &checks);
+    try root.verifyBoost(root_id, &checks);
+    try std.testing.expectError(error.BoostAlreadyVerified, root.verifyBoost(root_id, checks[0..1]));
+    for ([_]budget.Fact{ initial, try root.factForTask(child_task), try root.factForTask(root_id) }) |fact| {
+        try service.store.replay(.{ .kind = .task_fact, .conversation = fact.conversation, .revision = fact.sequence, .task_fact = fact });
+    }
+    const replayed = try @import("ai/child_projection.zig").boostView(a, &service, fence.conversation);
+    defer a.free(replayed.rows);
+    try std.testing.expectEqual(@as(usize, 1), replayed.rows.len);
+    try std.testing.expectEqual(@as(u8, 1), replayed.rows[0].round.number);
+    try std.testing.expect(replayed.parent.?.verification.?[0].passed);
+    try std.testing.expect(!replayed.parent.?.verification.?[1].passed);
+}

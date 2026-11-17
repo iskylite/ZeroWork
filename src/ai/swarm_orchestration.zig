@@ -18,8 +18,7 @@ pub const max_boost_rounds: u8 = 8;
 
 /// 解析 depends_on 引用列表（@seq 形态；宿主解析裸 label/agent_id 同
 /// child_gateway 的 G1 规则）。0 与非正数拒绝。
-pub fn parseDependencies(items: []const []const u8) error{ InvalidArguments, DependencyCycle }![]const u32 {
-    var seen: [32]u32 = undefined;
+pub fn parseDependencies(items: []const []const u8, seen: []u32) error{InvalidArguments}![]const u32 {
     if (items.len > seen.len) return error.InvalidArguments;
     for (items, 0..) |item, i| {
         if (item.len < 2 or item[0] != '@') return error.InvalidArguments;
@@ -77,16 +76,17 @@ pub fn allowsRound(current: u8, declared_max: u8) bool {
 }
 
 test "v0.7 depends_on parsing rejects zero duplicates and malformed refs" {
-    const ok = try parseDependencies(&.{ "@1", "@3" });
+    var buffer: [16]u32 = undefined;
+    const ok = try parseDependencies(&.{ "@1", "@3" }, &buffer);
     try std.testing.expectEqual(@as(usize, 2), ok.len);
     try std.testing.expectEqual(@as(u32, 1), ok[0]);
-    try std.testing.expectError(error.InvalidArguments, parseDependencies(&.{"@0"}));
-    try std.testing.expectError(error.InvalidArguments, parseDependencies(&.{ "@1", "@1" }));
-    try std.testing.expectError(error.InvalidArguments, parseDependencies(&.{"3"}));
-    try std.testing.expectError(error.InvalidArguments, parseDependencies(&.{"@x"}));
+    try std.testing.expectError(error.InvalidArguments, parseDependencies(&.{"@0"}, &buffer));
+    try std.testing.expectError(error.InvalidArguments, parseDependencies(&.{ "@1", "@1" }, &buffer));
+    try std.testing.expectError(error.InvalidArguments, parseDependencies(&.{"3"}, &buffer));
+    try std.testing.expectError(error.InvalidArguments, parseDependencies(&.{"@x"}, &buffer));
     // 闭包含自身 → DependencyCycle。
-    try std.testing.expectError(error.DependencyCycle, containsSelf(&.{1, 2}, 2));
-    try containsSelf(&.{1, 3}, 2);
+    try std.testing.expectError(error.DependencyCycle, containsSelf(&.{ 1, 2 }, 2));
+    try containsSelf(&.{ 1, 3 }, 2);
 }
 
 test "v0.7 dependency terminal semantics decide start blocked waiting" {
@@ -98,7 +98,7 @@ test "v0.7 dependency terminal semantics decide start blocked waiting" {
     // 仍有未终态依赖 → waiting。
     try std.testing.expect(decide(&.{ .{ .seq = 1, .terminal = true, .succeeded = true }, .{ .seq = 2, .terminal = false, .succeeded = false } }) == .waiting);
     // cancelled/interrupted 同样不自动启动。
-    const cancelled = decide(&.{ .{ .seq = 1, .terminal = true, .succeeded = false } });
+    const cancelled = decide(&.{.{ .seq = 1, .terminal = true, .succeeded = false }});
     try std.testing.expect(cancelled == .blocked);
     try std.testing.expect(decide(&.{}) == .start);
 }

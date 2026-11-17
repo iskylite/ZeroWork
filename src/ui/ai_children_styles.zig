@@ -4,6 +4,46 @@ const theme = @import("app_theme.zig");
 pub fn popup(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .background = theme.current().overlay, .glass = theme.overlayGlass(), .border = .{ .radius = 12 }, .padding = ui.Padding.all(8), .shadows = ui.ShadowList.of(&.{theme.floatingShadow()}) };
 }
+pub fn panelWidth(viewport: ui.Size) f32 {
+    return if (viewport.width < 1000) 360 else 560;
+}
+
+pub fn panel(tokens: *const ui.ThemeTokens, viewport: ui.Size) ui.BoxStyle {
+    var result = popup(tokens);
+    const width = panelWidth(viewport);
+    result.width = .{ .px = width };
+    result.min_width = width;
+    result.max_width = width;
+    return result;
+}
+
+pub fn panelBody(viewport: ui.Size, has_stall: bool, has_footer: bool) ui.BoxStyle {
+    const banner_space: f32 = if (has_stall) 38 else 0;
+    const footer_space: f32 = if (has_footer) 34 else 0;
+    const limit = @min(352, @max(96, viewport.height - 210 - banner_space - footer_space));
+    return .{ .width = .fill(), .height = .{ .fit = .{ .max = limit } }, .max_height = limit, .min_height = 0 };
+}
+
+pub fn verificationFooter() ui.BoxStyle {
+    return .{ .width = .fill(), .height = .{ .px = 32 }, .flex_shrink = 0, .direction = .row, .align_items = .center, .padding = .{ .left = 8, .right = 8 }, .background = theme.popupSelection(), .border = .{ .radius = 8 } };
+}
+
+pub fn page(gap: f32) ui.BoxStyle {
+    return .{ .width = .fill(), .direction = .column, .gap = gap, .flex_shrink = 0 };
+}
+
+pub fn timelineCard(summary: bool) ui.BoxStyle {
+    var result = page(2);
+    result.padding = ui.Padding.all(8);
+    result.border = .{ .radius = 8 };
+    result.background = if (summary) theme.popupSelection() else theme.popupAction();
+    return result;
+}
+
+pub fn graphNode(x: f32, y: f32, width: f32, tint: ui.Color) ui.BoxStyle {
+    return .{ .position = .absolute, .inset = .{ .left = .{ .px = x - width / 2 }, .top = .{ .px = y - 14 } }, .width = .{ .px = width }, .height = .{ .px = 28 }, .padding = .{}, .direction = .row, .justify = .center, .align_items = .center, .background = theme.current().overlay, .border = .{ .width = 1, .radius = 14, .color = tint } };
+}
+
 pub fn name(_: *const ui.ThemeTokens) ui.TextStyle {
     return .{ .font_size = 12, .font_weight = 600, .color = theme.current().fg_1, .text_overflow = .ellipsis };
 }

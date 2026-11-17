@@ -2,76 +2,6 @@ const std = @import("std");
 const ui = @import("ui");
 const binding = @import("../settings_content_view.zig");
 
-/// V0.7 §3.7 template actions: create/copy/delete write through
-/// Controller.setRoleTemplates (validated, dirty-tracked, persisted on save).
-const TemplateAction = struct {
-    bound: *binding.Binding,
-    index: usize,
-    copy: bool = false,
-    create: bool = false,
-    edit: bool = false,
-    /// Inline slot editor node (edit mode only). Toggle display on run.
-    editor: ?*ui.Node = null,
-    /// Slot effort selects (edit mode only), slot order parent..batch.
-    effort_signals: ?[5]*ui.Signal(?[]const u8) = null,
-    fn run(self: *TemplateAction) void {
-        const a = self.bound.controller.allocator;
-        const current = self.bound.controller.model.value.ai.child_role_templates;
-        // 编辑：切换行内编辑器显示（首次点击由挂载时预建并隐藏）。
-        if (self.edit) {
-            if (self.editor) |node| {
-                node.setDisplay(if (node.style.display == .flex) .none else .flex);
-                self.bound.cx.requestRedraw();
-            }
-            return;
-        }
-        var next: std.ArrayList(@import("../ai_role_templates.zig").Stored) = .empty;
-        if (self.create) {
-            next.append(a, .{ .name = "新模板" }) catch return;
-        } else if (self.copy) {
-            if (self.index >= current.len) return;
-            const source = current[self.index];
-            const cloned = @import("../ai_role_templates.zig").Stored{ .name = std.fmt.allocPrint(a, "{s} 副本", .{source.name}) catch return, .models = source.models, .efforts = source.efforts };
-            next.append(a, cloned) catch return;
-        }
-        for (current, 0..) |template, position| {
-            if (!self.create and !self.copy and position == self.index) continue;
-            next.append(a, template) catch return;
-        }
-        self.bound.controller.setRoleTemplates(next.items) catch {
-            next.deinit(a);
-            return;
-        };
-        next.deinit(a);
-        // The controller dirty-tracks the edit; 保存 persists it.
-    }
-    /// 编辑器槽位值写回：读取 effort select 信号并持久化。
-    fn commitSlots(self: *TemplateAction) void {
-        const a = self.bound.controller.allocator;
-        const current = self.bound.controller.model.value.ai.child_role_templates;
-        if (self.index >= current.len) return;
-        const signals = self.effort_signals orelse return;
-        var updated = current[self.index];
-        const names = [_][]const u8{ "none", "low", "medium", "high", "xhigh", "max", "ultra" };
-        for (signals, 0..) |signal, slot| {
-            const text = signal.peek() orelse continue;
-            // "inherit"（继承）清除该槽 effort；具名档位写入。
-            if (std.mem.eql(u8, text, "inherit")) {
-                updated.efforts[slot] = null;
-                continue;
-            }
-            for (names) |name| if (std.mem.eql(u8, text, name)) {
-                updated.efforts[slot] = std.meta.stringToEnum(@import("../../ai/provider.zig").Effort, name);
-            };
-        }
-        var next: std.ArrayList(@import("../ai_role_templates.zig").Stored) = .empty;
-        defer next.deinit(a);
-        for (current, 0..) |template, position| {
-            next.append(a, if (position == self.index) updated else template) catch return;
-        }
-        self.bound.controller.setRoleTemplates(next.items) catch return;
-    }
-};
 const draft = @import("../settings_ai_draft.zig");
 const controls = @import("settings_controls.zig");
 
@@ -137,82 +67,10 @@ pub fn mountContent(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
         try section.input(.{ .section = "ai", .key = "swarm_stall_minutes" }, "停滞第一级阈值（分钟）", "1–30。默认 3。全部子空闲且板上无新帖达到阈值后唤醒父。", null);
         try section.input(.{ .section = "ai", .key = "swarm_stall_parent_minutes" }, "停滞第二级阈值（分钟）", "1–30。默认 2。父被唤醒后仍无动作达到阈值后面板警示并桌面通知。", null);
         try section.input(.{ .section = "ai", .key = "boost_max_rounds" }, "Boost 轮次上限", "1–8。默认 5。单条实现→挑战→修复链的轮次上限；父可声明更小值。", null);
-        // V0.7 §3.7: custom role-template management — interactive rows with
-        // copy/delete actions plus a create button. The editor dialog writes
-        // through Controller.setRoleTemplates; the built-in 均衡 template is
-        // implicit (never listed, never removable).
-        const templates = bound.controller.model.value.ai.child_role_templates;
-        var title_buffer: [96]u8 = undefined;
-        for (templates, 0..) |template, index| {
-            const title = try std.fmt.bufPrint(&title_buffer, "模板 {d} · {s}", .{ index + 1, template.name });
-            try section.readonly(title, "自定义角色模板；模式菜单中可选择。复制/删除按钮在同一行右侧。");
-            const actions = try ui.box(cx, .{ .direction = .row, .gap = 6, .flex_shrink = 0 }, .{});
-            actions.meta.ownership.meta.test_id = try std.fmt.bufPrint(&title_buffer, "settings.template.row.{d}", .{index});
-            const edit = try ui.widgets.Button(.{ .variant = .ghost, .label = "编辑", .on_click = cx.on(TemplateAction, try bound.scope.createState(TemplateAction, .{ .bound = bound, .index = index, .edit = true }), TemplateAction.run) }).mount(bound.scope, cx);
-            edit.meta.ownership.meta.test_id = try std.fmt.bufPrint(&title_buffer, "settings.template.edit.{d}", .{index});
-            try actions.appendChild(cx.allocator, edit);
-            const copy = try ui.widgets.Button(.{ .variant = .ghost, .label = "复制", .on_click = cx.on(TemplateAction, try bound.scope.createState(TemplateAction, .{ .bound = bound, .index = index, .copy = true }), TemplateAction.run) }).mount(bound.scope, cx);
-            copy.meta.ownership.meta.test_id = try std.fmt.bufPrint(&title_buffer, "settings.template.copy.{d}", .{index});
-            try actions.appendChild(cx.allocator, copy);
-            const del = try ui.widgets.Button(.{ .variant = .ghost, .label = "删除", .on_click = cx.on(TemplateAction, try bound.scope.createState(TemplateAction, .{ .bound = bound, .index = index, .copy = false }), TemplateAction.run) }).mount(bound.scope, cx);
-            del.meta.ownership.meta.test_id = try std.fmt.bufPrint(&title_buffer, "settings.template.delete.{d}", .{index});
-            try actions.appendChild(cx.allocator, del);
-            try section.body.appendChild(cx.allocator, actions);
-            // V0.7 §3.7 slot editor: per-slot effort select (planner/
-            // verifier/worker/batch; parent 槽仅展示，不可选)。默认"继承"
-            // （null）；选择后经 commitSlots 持久化到该模板槽位。
-            const edit_state = try bound.scope.createState(TemplateAction, .{ .bound = bound, .index = index, .edit = true });
-            const editor = try ui.box(cx, .{ .direction = .column, .gap = 6, .padding = ui.Padding.all(8), .border = .{ .width = 1, .radius = 8 }, .flex_shrink = 0 }, .{});
-            editor.meta.ownership.meta.test_id = try std.fmt.bufPrint(&title_buffer, "settings.template.editor.{d}", .{index});
-            editor.setDisplay(.none);
-            var signals: [5]*ui.Signal(?[]const u8) = undefined;
-            const slot_names = [_][]const u8{ "父（继承）", "planner", "verifier", "worker", "batch" };
-            for (0..5) |slot| {
-                if (slot == 0) {
-                    try editor.appendChild(cx.allocator, try ui.textStyled(cx, @import("settings_controls.zig").S.note, "父槽：始终继承当前会话模型"));
-                    signals[0] = try bound.scope.createSignal(?[]const u8, null);
-                    continue;
-                }
-                const line = try ui.box(cx, .{ .direction = .row, .align_items = .center, .gap = 8, .flex_shrink = 0 }, .{});
-                try line.appendChild(cx.allocator, try ui.textStyled(cx, @import("settings_controls.zig").S.note, slot_names[slot]));
-                signals[slot] = try bound.scope.createSignal(?[]const u8, null);
-                const select = try ui.widgets.Select(.{
-                    .options = &[_]ui.widgets.SelectOption{
-                        .{ .value = "inherit", .label = "继承" },
-                        .{ .value = "none", .label = "关闭" },
-                        .{ .value = "low", .label = "低" },
-                        .{ .value = "medium", .label = "中" },
-                        .{ .value = "high", .label = "高" },
-                        .{ .value = "xhigh", .label = "较高" },
-                        .{ .value = "max", .label = "最高" },
-                    },
-                    .placeholder = "继承",
-                    .value = ui.Model(?[]const u8){ .controlled = .{ .signal = signals[slot] } },
-                    .width = 120,
-                }).mount(bound.scope, cx);
-                select.trigger.meta.ownership.meta.test_id = try std.fmt.bufPrint(&title_buffer, "settings.template.editor.effort.{d}", .{slot});
-                try line.appendChild(cx.allocator, select.wrapper);
-                try editor.appendChild(cx.allocator, line);
-            }
-            edit_state.editor = editor;
-            edit_state.effort_signals = signals;
-            // 选择即写回（无独立保存按钮——脏标由 controller 管理）：
-            // 每个 effort select 变化立即经 commitSlots 持久化。
-            for (signals, 0..) |signal, slot| {
-                try bound.scope.createEffect(.{ .action = edit_state, .selected = signal }, struct {
-                    fn paint(state: anytype) void {
-                        _ = state.selected.get();
-                        state.action.commitSlots();
-                    }
-                }.paint);
-                _ = slot;
-            }
-            try section.body.appendChild(cx.allocator, editor);
-        }
-        if (templates.len == 0) try section.readonly("角色模板", "仅内置「均衡」模板（全部槽继承）。");
-        const create = try ui.widgets.Button(.{ .variant = .secondary, .label = "新建模板", .on_click = cx.on(TemplateAction, try bound.scope.createState(TemplateAction, .{ .bound = bound, .index = templates.len, .copy = false, .create = true }), TemplateAction.run) }).mount(bound.scope, cx);
-        create.meta.ownership.meta.test_id = "settings.template.create";
-        try section.body.appendChild(cx.allocator, create);
+    }
+    if (binding.matches(query, "角色模板 编排 多智能体 模型 推理强度")) {
+        const section = try page.section("角色模板", "", ui.icons.get("layers").?, 32, "settings.ai.role_templates", null);
+        try @import("settings_role_templates.zig").mount(section);
     }
         if (binding.matches(query, "上下文 来源 脱敏 隐私 IP 主机 用户 redact_ip")) {
         const section = try page.section("上下文", "连接身份与敏感信息", ui.icons.file_text, 25, "settings.ai.context", null);

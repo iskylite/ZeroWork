@@ -39,9 +39,11 @@ test "v0.4 child list retains exact identity under updates, hides removed rows a
     const second: projection.Entry = .{ .agent = .generate(), .conversation = .generate(), .revision = 1, .name = "运行任务", .status = "运行中", .group = .active, .running = true, .reusable = true };
     view.open.set(false);
     try view.update(&.{ first, second });
-    // V0.7 §14.4: the badge counts waiting-for-user children (red-dot
-    // semantics): first is 等待用户 so the badge shows 1 even with the
-    // passed running_count; second alone (running) keeps it hidden.
+    try std.testing.expect(view.badge.style.display == .none);
+    var approval = first;
+    approval.awaiting_approval = true;
+    approval.group = .approval;
+    try view.updateWithCount(&.{ approval, second }, 1);
     try std.testing.expectEqualStrings("1", view.badge.getText().?.content);
     try std.testing.expect(view.badge.style.display == .flex);
     try view.updateWithCount(&.{second}, 1);
@@ -58,7 +60,7 @@ test "v0.4 child list retains exact identity under updates, hides removed rows a
     const status = find(row, "ai.child.row.status").?.globalRect();
     try std.testing.expectApproxEqAbs(@as(f32, 32), logo.w, 0.1);
     try std.testing.expectApproxEqAbs(name.x, find(second_row, "ai.child.row.name").?.globalRect().x, 0.1);
-    try std.testing.expectApproxEqAbs(name.x, find(cx.root.?, "ai.children.title").?.globalRect().x, 0.1);
+    try std.testing.expect(find(cx.root.?, "ai.children.title").?.globalRect().x < name.x);
     try std.testing.expectApproxEqAbs(status.x, find(second_row, "ai.child.row.status").?.globalRect().x, 0.1);
     try std.testing.expectApproxEqAbs(logo.y + logo.h / 2, status.y + status.h / 2, 0.1);
     try std.testing.expect(name.x + name.w <= status.x);
@@ -143,23 +145,37 @@ test "v0.7 panel pages: tabs gate on children, switch exclusively, stall banner 
     try cx.root.?.appendChild(a, view.root);
     view.open.set(true);
     try view.update(&.{});
-    // 无子任务：Board/Graph/Rounds 页签隐藏，成员页签可见。
-    view.setPagesAvailable(0);
-    try std.testing.expect(find(cx.root.?, "ai.children.tab.members").?.style.display == .flex);
-    try std.testing.expect(find(cx.root.?, "ai.children.tab.board").?.style.display == .none);
-    try std.testing.expect(find(cx.root.?, "ai.children.tab.graph").?.style.display == .none);
-    try std.testing.expect(find(cx.root.?, "ai.children.tab.rounds").?.style.display == .none);
-    // 有子任务：页签全部可见。
-    view.setPagesAvailable(2);
-    try std.testing.expect(find(cx.root.?, "ai.children.tab.board").?.style.display == .flex);
-    try std.testing.expect(find(cx.root.?, "ai.children.tab.rounds").?.style.display == .flex);
+    view.setPagesAvailable(.auto, 2, 2);
+    try std.testing.expect(find(cx.root.?, "ai.children.tabs").?.style.display == .none);
+    view.setPagesAvailable(.swarm, 2, 1);
+    const board = find(cx.root.?, "ai.children.tab.board").?;
+    const graph = find(cx.root.?, "ai.children.tab.graph").?;
+    const rounds = find(cx.root.?, "ai.children.tab.rounds").?;
+    try std.testing.expect(board.style.display == .flex and graph.style.display == .none and rounds.style.display == .none);
+    view.setPagesAvailable(.swarm, 2, 2);
+    try std.testing.expect(graph.style.display == .flex);
+    for (0..8) |_| cx.layout();
+    cx.setFocus(board);
+    cx.handleKeyDown(.@"return", .{});
+    try std.testing.expect(view.content.style.display == .none and view.board_list.?.style.display == .flex);
+    try view.updateDecisions(&.{.{ .at_ms = 1, .reason = "parallel" }});
+    try view.updateBoard(&.{.{ .kind = "post", .origin = 1, .category = "note", .to = "全体", .text = "message" }});
+    try std.testing.expect(find(view.board_list.?, "ai.children.decision") != null);
+    view.setPagesAvailable(.boost, 2, 2);
+    try std.testing.expect(graph.style.display == .none and rounds.style.display == .flex);
+    cx.setFocus(rounds);
+    cx.handleKeyDown(.@"return", .{});
+    try std.testing.expect(view.content.style.display == .none and view.board_list.?.style.display == .none and view.rounds_list.?.style.display == .flex);
+    view.setPagesAvailable(.auto, 2, 2);
+    try std.testing.expect(view.content.style.display == .flex and view.rounds_list.?.style.display == .none);
     // 停滞警示条：默认隐藏，升级后显示。
     const banner = find(cx.root.?, "ai.children.stall").?;
     try std.testing.expect(banner.style.display == .none);
-    view.setStallEscalated(true);
+    view.setStallTask(.generate());
     try std.testing.expect(banner.style.display == .flex);
+    try std.testing.expectEqual(@as(f32, 232), view.scroll.container.style.height.fit.max);
     try std.testing.expect(find(cx.root.?, "ai.children.stall.urge") != null);
     try std.testing.expect(find(cx.root.?, "ai.children.stall.stop") != null);
-    view.setStallEscalated(false);
+    view.setStallTask(null);
     try std.testing.expect(banner.style.display == .none);
 }

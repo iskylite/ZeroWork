@@ -68,8 +68,7 @@ pub const Snapshot = struct {
     workspace: ?WorkspaceTicket = null,
     usage: ?Usage = null,
     editable: bool = true,
-    /// V0.7 §3.7: persisted custom role templates for the mode menu.
-    custom_templates: []const @import("../config/ai_role_templates.zig").Stored = &.{},
+    swarm_mode: ?@import("../ai/swarm_mode.zig").Mode = null,
     inventory_authorized: bool = false,
     inventory_conversation_id: ?identity.ConversationId = null,
 };
@@ -108,7 +107,7 @@ pub fn effortLabel(value: Effort) []const u8 {
     };
 }
 const Model = struct { key: ModelKey, enabled: bool, context_window: u32, context_discovered: bool, reasoning: bool, toggle: bool, thinking_default: ?bool, vision: bool, efforts: [7]bool };
-const Projection = struct { owner: Owner, revision: u64, models: []const Model, current: ?ModelKey, model_selection_required: bool, default_model_status: DefaultStatus, permission: PermissionMode, allow_auto_permission: bool, global_execution_mode: ExecutionMode, global_session_retention: SessionRetention, execution_mode_override: ?ExecutionMode, session_retention_override: ?SessionRetention, effort: ?Effort, effort_fallback_from: ?Effort, thinking: ?bool, attachments: AttachmentState, workspace: ?WorkspaceTicket, usage: ?Usage, editable: bool, custom_templates: []const @import("../config/ai_role_templates.zig").Stored = &.{}, inventory_authorized: bool, inventory_conversation_id: ?identity.ConversationId, config_hash: u64 };
+const Projection = struct { owner: Owner, revision: u64, models: []const Model, current: ?ModelKey, model_selection_required: bool, default_model_status: DefaultStatus, permission: PermissionMode, allow_auto_permission: bool, global_execution_mode: ExecutionMode, global_session_retention: SessionRetention, execution_mode_override: ?ExecutionMode, session_retention_override: ?SessionRetention, effort: ?Effort, effort_fallback_from: ?Effort, thinking: ?bool, attachments: AttachmentState, workspace: ?WorkspaceTicket, usage: ?Usage, editable: bool, swarm_mode: ?@import("../ai/swarm_mode.zig").Mode, inventory_authorized: bool, inventory_conversation_id: ?identity.ConversationId, config_hash: u64 };
 // Discovery provenance changes authority/configuration, but does not change a
 // model row when all resolved capabilities and displayed values are identical.
 fn modelRowsEql(a: Projection, b: Projection) bool {
@@ -149,7 +148,7 @@ const Owned = struct {
             value.parts = parts;
         }
         const current = if (snapshot.current) |key| try cloneKey(a, key) else null;
-        return .{ .arena = arena, .value = .{ .owner = snapshot.owner, .revision = snapshot.revision, .models = try models.toOwnedSlice(a), .current = current, .model_selection_required = snapshot.model_selection_required, .default_model_status = snapshot.default_model_status, .permission = snapshot.permission, .allow_auto_permission = snapshot.allow_auto_permission, .global_execution_mode = snapshot.global_execution_mode, .global_session_retention = snapshot.global_session_retention, .execution_mode_override = snapshot.execution_mode_override, .session_retention_override = snapshot.session_retention_override, .effort = snapshot.effort, .effort_fallback_from = snapshot.effort_fallback_from, .thinking = snapshot.thinking, .attachments = snapshot.attachments, .workspace = snapshot.workspace, .usage = usage, .editable = snapshot.editable, .custom_templates = if (snapshot.custom_templates.len != 0) try a.dupe(@import("../config/ai_role_templates.zig").Stored, snapshot.custom_templates) else &.{}, .inventory_authorized = snapshot.inventory_authorized, .inventory_conversation_id = snapshot.inventory_conversation_id, .config_hash = hash.final() } };
+        return .{ .arena = arena, .value = .{ .owner = snapshot.owner, .revision = snapshot.revision, .models = try models.toOwnedSlice(a), .current = current, .model_selection_required = snapshot.model_selection_required, .default_model_status = snapshot.default_model_status, .permission = snapshot.permission, .allow_auto_permission = snapshot.allow_auto_permission, .global_execution_mode = snapshot.global_execution_mode, .global_session_retention = snapshot.global_session_retention, .execution_mode_override = snapshot.execution_mode_override, .session_retention_override = snapshot.session_retention_override, .effort = snapshot.effort, .effort_fallback_from = snapshot.effort_fallback_from, .thinking = snapshot.thinking, .attachments = snapshot.attachments, .workspace = snapshot.workspace, .usage = usage, .editable = snapshot.editable, .swarm_mode = snapshot.swarm_mode, .inventory_authorized = snapshot.inventory_authorized, .inventory_conversation_id = snapshot.inventory_conversation_id, .config_hash = hash.final() } };
     }
     fn appendModel(a: std.mem.Allocator, models: *std.ArrayList(Model), hash: *std.hash.Wyhash, id: []const u8, kind: config.ProviderKind, endpoint: []const u8, enabled: bool, value: config.AiModel) !void {
         const key: ModelKey = .{ .provider_id = id, .model_id = value.id };
@@ -259,6 +258,11 @@ pub const View = struct {
     /// V0.7 §10.1: mode chip state. Session-level mode; switching applies to
     /// the next user request. The label tracks the active mode.
     swarm_mode: @import("../ai/swarm_mode.zig").Mode = .auto,
+    mode_compact: bool = false,
+    mode_chevron: *ui.Node = undefined,
+    mode_hint: *ui.Signal([]const u8) = undefined,
+    mode_wrapper: *ui.Node = undefined,
+    mode_glyphs: [3]*ui.Node = undefined,
     mode_rows: [3]*ui.Node = undefined,
     mode_styles: [3]*ui.Signal(ui.BoxStyle) = undefined,
     mode_checks: [3]*ui.Node = undefined,
@@ -317,7 +321,7 @@ pub const View = struct {
                 2 => S.chip(190, 8),
                 3 => S.chip(80, 7),
                 4 => S.chip(48, 8),
-                6 => S.chip(56, 8),
+                6 => S.modeChip(false, false),
                 else => S.executionChip(),
             };
             self.button_styles[index] = try scope.createSignal(ui.BoxStyle, base);
@@ -336,8 +340,8 @@ pub const View = struct {
             self.buttons[index] = button;
             const size: f32 = switch (index) {
                 0, 4 => 14,
-                1, 5, 6 => 12,
-                3 => 14,
+                1, 5 => 12,
+                3, 6 => 14,
                 2 => 10,
                 else => 16,
             };
@@ -350,7 +354,7 @@ pub const View = struct {
                 try button.appendChild(cx.allocator, self.model_brand);
             }
             if (index == 1 or index == 2 or index == 3 or index == 4 or index == 5) {
-                const text = try self.label(button, if (index == 1) "执行权限" else if (index == 2) "选择模型" else if (index == 3) "推理设置" else if (index == 4) "—" else if (index == 6) "Auto" else "自行判断", S.text(10, 400, 14, true), if (index == 5) S.executionLabel() else if (index == 6) S.chipLabel(.permission) else S.chipLabel(@fromBackingInt(@intCast(index))));
+                const text = try self.label(button, if (index == 1) "执行权限" else if (index == 2) "选择模型" else if (index == 3) "推理设置" else if (index == 4) "—" else "自行判断", S.text(10, 400, 14, true), if (index == 5) S.executionLabel() else S.chipLabel(@fromBackingInt(@intCast(index))));
                 self.labels[index] = text;
             }
             if (index == 1 or index == 2 or index == 3) {
@@ -359,24 +363,29 @@ pub const View = struct {
                 chevron.setStyleInline(cx.allocator, S.chipChevron(@fromBackingInt(@intCast(index))));
                 try button.appendChild(cx.allocator, chevron);
             }
-            if (index == 5 or index == 6) try button.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.chevron_down, S.theme.current().fg_3, S.icon(12)));
+            if (index == 5) try button.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.chevron_down, S.theme.current().fg_3, S.icon(12)));
+            if (index == 6) {
+                self.labels[6] = try self.label(button, "Auto", S.text(11, 500, 16, false), S.flexibleLabel(16));
+                self.mode_chevron = try ui.iconTint(cx, ui.icons.chevron_down, S.theme.current().fg_2, S.icon(10));
+                try button.appendChild(cx.allocator, self.mode_chevron);
+            }
             if (index == 4) {
                 self.ring = self.icons[index];
                 self.ring.setCustomDraw(drawRing, self);
             }
-            // V0.7 §10.1: the mode chip rides the trailing send slot (it
-            // never participates in the root flex row, so narrow rows keep
-            // the V0.4 layout math).
             if (index != 6) try self.root.appendChild(cx.allocator, button);
         }
         self.buttons[3].setDisplay(.none);
         cx.detachChild(self.buttons[3], self.labels[3].?);
         self.labels[3].?.setStyleInline(cx.allocator, S.combinedEffortLabel());
         try self.buttons[2].insertChildBefore(cx.allocator, self.labels[3].?, self.chevrons[1]);
-        // Left: attachment, permission, execution, mode. Right: usage,
-        // model/reasoning, then the original send/stop slot. The mode chip
-        // stays in the left group so the spacer keeps absorbing free width
-        // (V0.7 §10.1: 当前对话运行方式芯片右侧).
+        self.mode_hint = try scope.createText("编排模式 · Auto", .{});
+        const mode_hint = try ui.widgets.Tooltip(.{ .text = self.mode_hint, .width = 144 }).mount(scope, cx);
+        self.mode_wrapper = mode_hint.wrapper;
+        self.mode_wrapper.setStyleInline(cx.allocator, .{ .width = .{ .fit = .{} }, .height = .{ .px = 24 }, .flex_shrink = 0 });
+        mode_hint.trigger.setStyleInline(cx.allocator, .{ .width = .{ .fit = .{} }, .height = .{ .px = 24 }, .flex_shrink = 0 });
+        try mode_hint.trigger.appendChild(cx.allocator, self.buttons[6]);
+        try self.root.appendChild(cx.allocator, self.mode_wrapper);
         cx.detachChild(self.root, self.buttons[4]);
         cx.detachChild(self.root, self.buttons[2]);
         self.ordinary_spacer = try ui.spacer(cx);
@@ -388,7 +397,7 @@ pub const View = struct {
         self.trailing = try ui.box(cx, S.trailing(), .{});
         self.trailing.meta.ownership.meta.test_id = "ai.composer.trailing";
         try self.root.appendChild(cx.allocator, self.trailing);
-        try self.trailing.appendChild(cx.allocator, self.buttons[6]);
+
         for (0..7) |index| {
             self.popups[index] = try self.mountPopup(@fromBackingInt(@intCast(index)));
             self.popup_count += 1;
@@ -591,32 +600,20 @@ pub const View = struct {
                 .boost => "ai.mode.boost",
             };
             self.mode_rows[index] = button;
-            self.mode_checks[index] = try ui.iconTint(self.cx, ui.icons.get(swarm_mode.modeIcon(mode)).?, S.theme.current().accent, S.icon(14));
-            try button.appendChild(self.cx.allocator, self.mode_checks[index]);
+            self.mode_glyphs[index] = try ui.iconTint(self.cx, ui.icons.get(swarm_mode.modeIcon(mode)).?, S.theme.current().fg_2, S.icon(14));
+            try button.appendChild(self.cx.allocator, self.mode_glyphs[index]);
             _ = try self.label(button, name, S.text(11.5, 400, 18, false), S.flexibleLabel(18));
             _ = try self.label(button, switch (mode) {
-                .auto => "宿主按信号+实质自动判定",
-                .swarm => "多子并行编排",
-                .boost => "实现→挑战→修复深度攻坚",
+                .auto => "按任务自动判断",
+                .swarm => "并行协作",
+                .boost => "实现、复审、修复",
             }, S.text(10, 400, 16, false), S.flexibleLabel(16));
+            self.mode_checks[index] = try ui.iconTint(self.cx, ui.icons.get("check").?, S.theme.current().accent_ink, S.icon(14));
+            try button.appendChild(self.cx.allocator, self.mode_checks[index]);
             try scroll.content.appendChild(self.cx.allocator, button);
         }
-        // §10.1.4: template section inside the mode menu. The built-in 均衡
-        // template plus the persisted custom templates; the active template
-        // carries a selection state (per-session; full activation wiring
-        // rides the create-time slot resolution).
-        const templates = try ui.box(self.cx, S.policySection(), .{});
-        _ = try self.label(templates, "角色模板", S.text(11.5, 400, 18, false), S.flexibleLabel(18));
-        _ = try self.label(templates, "均衡（默认）· 全部槽继承父会话模型", S.text(10, 400, 16, false), S.flexibleLabel(16));
-        const source_value = if (self.source) |src| &src.value else if (self.pending) |*pend| &pend.value else null;
-        if (source_value) |value| for (value.custom_templates) |template| {
-            const entry = try std.fmt.allocPrint(self.cx.allocator, "{s} · 自定义模板", .{template.name});
-            defer self.cx.allocator.free(entry);
-            _ = try self.label(templates, entry, S.text(10, 400, 16, false), S.flexibleLabel(16));
-        };
-        try scroll.content.appendChild(self.cx.allocator, templates);
     }
-        fn retentionChanged(self: *View, value: ?[]const u8) void {
+    fn retentionChanged(self: *View, value: ?[]const u8) void {
         const text = value orelse return;
         const retention: ?SessionRetention = if (std.mem.eql(u8, text, "inherit")) null else std.meta.stringToEnum(SessionRetention, text) orelse return;
         self.emit(.execution, .{ .session_retention = retention });
@@ -868,16 +865,44 @@ pub const View = struct {
         }
         self.cx.requestRedraw();
     }
-    /// V0.7 §10: set the session swarm mode from the mode menu. Updates the
-    /// chip label/icon and the menu selection state.
-    pub fn setSwarmMode(self: *View, mode: @import("../ai/swarm_mode.zig").Mode) void {
-        self.swarm_mode = mode;
-        if (self.labels[6]) |chip_label| {
-            const name = @import("../ai/swarm_mode.zig").modeLabel(mode);
-            chip_label.setTextContent(self.cx.allocator, name) catch {};
+    fn refreshMode(self: *View, mode: ?@import("../ai/swarm_mode.zig").Mode, editable: bool) !void {
+        const swarm = @import("../ai/swarm_mode.zig");
+        self.swarm_mode = mode orelse .auto;
+        self.mode_wrapper.setDisplay(if (mode != null and !self.interaction_active) .flex else .none);
+        self.disabled[6].set(!editable or mode == null);
+        if (self.disabled[6].peek()) self.close(.mode, false);
+        try self.labels[6].?.setTextContent(self.cx.allocator, swarm.modeLabel(self.swarm_mode));
+        const accessible = switch (self.swarm_mode) {
+            .auto => "编排模式 · Auto",
+            .swarm => "编排模式 · Swarm",
+            .boost => "编排模式 · Boost",
+        };
+        self.mode_hint.set(accessible);
+        if (self.buttons[6].behavior.interaction.a11y) |*attrs| attrs.label = accessible;
+        self.paintModeChip();
+        const colors = S.theme.current();
+        for (self.mode_styles, 0..) |style, index| {
+            const active = index == @intFromEnum(self.swarm_mode);
+            style.set(S.executionOption(active));
+            _ = self.mode_glyphs[index].setTint(if (active) colors.accent_ink else colors.fg_2);
+            _ = self.mode_checks[index].setTint(colors.accent_ink);
+            self.mode_checks[index].setOpacityRaw(if (active) 1 else 0);
+            if (self.mode_rows[index].behavior.interaction.a11y) |*attrs| attrs.selected = active;
         }
-        self.cx.requestRedraw();
     }
+
+    fn paintModeChip(self: *View) void {
+        const colors = S.theme.current();
+        const active = self.swarm_mode != .auto;
+        self.button_styles[6].set(S.modeChip(self.mode_compact, active));
+        const ink = if (active) colors.accent_ink else colors.fg_2;
+        setAsset(self.icons[6], @import("../ai/swarm_mode.zig").modeIcon(self.swarm_mode), 14, ink);
+        _ = self.mode_chevron.setTint(ink);
+        self.labels[6].?.setTextColor(colors.fg_1);
+        self.labels[6].?.setDisplay(if (self.mode_compact) .none else .flex);
+        self.mode_chevron.setDisplay(if (self.mode_compact) .none else .flex);
+    }
+
         /// Discovery changes the control revision, but the model picker can rebind
     /// to the new catalog at flush's safe point without closing under the user.
     pub fn preserveModelPopup(self: *View) void {
@@ -892,6 +917,7 @@ pub const View = struct {
         if (active and !self.interaction_active) self.dismiss();
         self.interaction_active = active;
         self.trailing.setDisplay(if (active) .none else .flex);
+        self.mode_wrapper.setDisplay(if (active or self.source == null or self.source.?.value.swarm_mode == null) .none else .flex);
         for (self.buttons, 0..) |button, index| button.setDisplay(if (active or index == 3) .none else .flex);
         self.ordinary_spacer.setDisplay(if (active) .none else .flex);
     }
@@ -920,10 +946,13 @@ pub const View = struct {
             models_changed = if (self.source) |old| !modelRowsEql(old.value, next.value) else true;
             if (self.source) |*old| {
                 if (!old.value.owner.eql(next.value.owner) or old.value.revision != next.value.revision) {
-                    const keep_model = self.keep_model_popup_on_update and old.value.owner.eql(next.value.owner) and self.popups[@backingInt(S.Kind.model)].widget.open.?.peek();
+                    const same_owner = old.value.owner.eql(next.value.owner);
+                    const keep_model = self.keep_model_popup_on_update and same_owner and self.popups[@backingInt(S.Kind.model)].widget.open.?.peek();
+                    const keep_mode = same_owner and next.value.swarm_mode != null and next.value.editable and self.popups[@backingInt(S.Kind.mode)].widget.open.?.peek();
                     self.dismiss();
-                    if (keep_model) {
-                        const popup = &self.popups[@backingInt(S.Kind.model)];
+                    for ([_]S.Kind{ .model, .mode }, [_]bool{ keep_model, keep_mode }) |kind, keep| {
+                        if (!keep) continue;
+                        const popup = &self.popups[@backingInt(kind)];
                         popup.widget.open.?.set(true);
                         popup.capture = .{ .owner = next.value.owner, .revision = next.value.revision, .inventory_conversation_id = next.value.inventory_conversation_id, .workspace = next.value.workspace };
                     }
@@ -958,7 +987,7 @@ pub const View = struct {
         }
         self.colors = colors;
         if (controls_changed or themed or self.popup_layout_dirty or !std.meta.eql(self.viewport, self.cx.viewport)) {
-            for (0..6) |index| {
+            for (0..7) |index| {
                 const kind: S.Kind = @fromBackingInt(@intCast(index));
                 var style = S.panel(kind, self.cx.viewport);
                 if (kind == .attachment and self.source != null and self.source.?.value.workspace != null) {
@@ -1307,6 +1336,7 @@ pub const View = struct {
         }
         for (self.chevrons) |icon_node| _ = icon_node.setTint(colors.fg_2);
         try self.refreshExecution(source);
+        try self.refreshMode(if (source) |value| value.swarm_mode else null, editable);
         const has_modality = current != null;
         const permission = if (source) |value| permissionLabel(value.permission) else "执行权限";
         try self.labels[1].?.setTextContent(self.cx.allocator, permission);
@@ -1513,7 +1543,15 @@ pub const View = struct {
         const model_width = @ceil(self.cx.text.measureTextWidth(self.labels[2].?.getText().?.content, 10, 400, false));
         const effort_width = if (self.labels[3].?.style.display != .none) @ceil(self.cx.text.measureTextWidth(self.labels[3].?.getText().?.content, 10, 400, false)) else 0;
         const model_chrome = S.compactModelWidth(0, effort_width, self.model_brand.style.display != .none);
+        const mode_visible = self.mode_wrapper.style.display != .none;
         const fixed_width = self.buttons[0].globalRect().w + self.buttons[1].globalRect().w + self.buttons[4].globalRect().w + actions_width + 48;
+        const mode_compact = row_width < fixed_width + natural_execution_width + model_chrome + 84 + 8 + 44;
+        if (mode_visible and mode_compact != self.mode_compact) {
+            self.mode_compact = mode_compact;
+            self.paintModeChip();
+            return .needs_layout;
+        }
+        const mode_width: f32 = if (mode_visible) (if (self.mode_compact) @as(f32, 28) else 84) + 8 else 0;
         // Always show the effective execution mode; truncate the model first.
         const compact = false;
         if (compact != self.execution_compact) {
@@ -1526,7 +1564,7 @@ pub const View = struct {
         }
         // Preserve the complete ID until the host's actual row width is exhausted.
         const execution_width = if (compact) @as(f32, 24) else natural_execution_width;
-        const available_model_width = @max(0, row_width - fixed_width - execution_width - model_chrome);
+        const available_model_width = @max(0, row_width - fixed_width - execution_width - model_chrome - mode_width);
         const label_width = @min(model_width, available_model_width);
         if (@abs(self.labels[2].?.style.width.px - label_width) > 0.1) {
             self.labels[2].?.setStyleInline(self.cx.allocator, S.compactModelLabel(label_width, self.model_brand.style.display != .none));
@@ -1652,7 +1690,7 @@ fn controlsEql(first: Projection, second: Projection) bool {
     return projectionEql(one, two);
 }
 fn projectionEql(first: Projection, second: Projection) bool {
-    return first.owner.eql(second.owner) and first.revision == second.revision and first.config_hash == second.config_hash and optionalKeyEql(first.current, second.current) and first.model_selection_required == second.model_selection_required and first.default_model_status == second.default_model_status and first.permission == second.permission and first.allow_auto_permission == second.allow_auto_permission and first.global_execution_mode == second.global_execution_mode and first.global_session_retention == second.global_session_retention and first.execution_mode_override == second.execution_mode_override and first.session_retention_override == second.session_retention_override and first.effort == second.effort and first.effort_fallback_from == second.effort_fallback_from and first.thinking == second.thinking and std.meta.eql(first.attachments, second.attachments) and WorkspaceTicket.same(first.workspace, second.workspace) and first.editable == second.editable and first.inventory_authorized == second.inventory_authorized and std.meta.eql(first.inventory_conversation_id, second.inventory_conversation_id) and usageEql(first.usage, second.usage);
+    return first.owner.eql(second.owner) and first.revision == second.revision and first.config_hash == second.config_hash and optionalKeyEql(first.current, second.current) and first.model_selection_required == second.model_selection_required and first.default_model_status == second.default_model_status and first.permission == second.permission and first.allow_auto_permission == second.allow_auto_permission and first.global_execution_mode == second.global_execution_mode and first.global_session_retention == second.global_session_retention and first.execution_mode_override == second.execution_mode_override and first.session_retention_override == second.session_retention_override and first.effort == second.effort and first.effort_fallback_from == second.effort_fallback_from and first.thinking == second.thinking and std.meta.eql(first.attachments, second.attachments) and WorkspaceTicket.same(first.workspace, second.workspace) and first.editable == second.editable and first.swarm_mode == second.swarm_mode and first.inventory_authorized == second.inventory_authorized and std.meta.eql(first.inventory_conversation_id, second.inventory_conversation_id) and usageEql(first.usage, second.usage);
 }
 fn usageEql(first: ?Usage, second: ?Usage) bool {
     const one = first orelse return second == null;

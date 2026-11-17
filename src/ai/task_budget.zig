@@ -59,6 +59,17 @@ pub const LocalFiles = enum(u8) {
     }
 };
 
+pub const BoostRound = struct {
+    number: u8,
+    phase: enum { implementation, challenge, repair },
+    previous: ?id.TaskId = null,
+};
+pub const VerificationItem = struct {
+    requirement: []const u8,
+    passed: bool,
+    detail: []const u8,
+};
+
 pub const Fact = struct {
     root: id.TaskId,
     task: id.TaskId,
@@ -89,10 +100,15 @@ pub const Fact = struct {
     read_only: bool = false,
     local_files: LocalFiles = .none,
     targets: ?[]const id.SessionHandle = null,
+    dependencies: ?[]const id.TaskId = null,
+    boost_round: ?BoostRound = null,
+    boost_limit: ?u8 = null,
+    verification: ?[]const VerificationItem = null,
     pub fn jsonStringify(self: Fact, writer: *std.json.Stringify) !void {
         try writer.beginObject();
         inline for (@typeInfo(Fact).@"struct".field_names) |name| {
-            if (!(comptime std.mem.eql(u8, name, "local_files")) or self.local_files != .none) {
+            const optional = comptime std.mem.eql(u8, name, "dependencies") or std.mem.eql(u8, name, "boost_round") or std.mem.eql(u8, name, "boost_limit") or std.mem.eql(u8, name, "verification");
+            if ((!(comptime std.mem.eql(u8, name, "local_files")) or self.local_files != .none) and (!optional or @field(self, name) != null)) {
                 try writer.objectField(name);
                 try writer.write(@field(self, name));
             }
@@ -115,9 +131,38 @@ pub const Fact = struct {
             // Delegated facts require a host-assigned seq (V0.7 §2.1).
             if (self.seq == 0) return error.InvalidTaskFact;
         } else if (!self.task.eql(self.root)) return error.InvalidTaskFact;
+        if (self.dependencies) |ids| {
+            if (self.parent == null or ids.len == 0 or ids.len > 16) return error.InvalidTaskFact;
+            for (ids) |dependency| if (!dependency.valid() or dependency.eql(self.task)) return error.InvalidTaskFact;
+        }
+        if (self.boost_round) |round| {
+            if (self.parent == null or round.number == 0 or round.number > 8 or (round.phase == .implementation) != (round.previous == null)) return error.InvalidTaskFact;
+        }
+        if (self.boost_limit) |limit| if (self.parent != null or limit < 1 or limit > 8) return error.InvalidTaskFact;
+        if (self.verification) |items| {
+            if (self.boost_limit == null) return error.InvalidTaskFact;
+            try validateVerification(items);
+        }
         if (self.counters.pending_requests > self.counters.requests) return error.InvalidTaskFact;
     }
 };
+fn validateVerification(items: []const VerificationItem) !void {
+    if (items.len == 0 or items.len > 16) return error.InvalidVerification;
+    for (items) |item| {
+        for ([_][]const u8{ item.requirement, item.detail }) |value| {
+            if (value.len > 512 or std.mem.trim(u8, value, " \t\r\n").len == 0 or !std.unicode.utf8ValidateSlice(value)) return error.InvalidVerification;
+        }
+    }
+}
+fn copyVerification(a: std.mem.Allocator, items: []const VerificationItem) ![]const VerificationItem {
+    const copy = try a.dupe(VerificationItem, items);
+    for (copy) |*item| {
+        item.requirement = try a.dupe(u8, item.requirement);
+        item.detail = try a.dupe(u8, item.detail);
+    }
+    return copy;
+}
+
 pub const Owned = struct {
     arena: std.heap.ArenaAllocator,
     fact: Fact,
@@ -130,6 +175,8 @@ pub const Owned = struct {
         copy.request_key = try arena.allocator().dupe(u8, fact.request_key);
         copy.label = try arena.allocator().dupe(u8, fact.label);
         if (fact.targets) |targets| copy.targets = try arena.allocator().dupe(id.SessionHandle, targets);
+        if (fact.dependencies) |ids| copy.dependencies = try arena.allocator().dupe(id.TaskId, ids);
+        if (fact.verification) |items| copy.verification = try copyVerification(arena.allocator(), items);
         return .{ .arena = arena, .fact = copy };
     }
     pub fn deinit(self: *Owned) void {
@@ -177,6 +224,9 @@ pub const Root = struct {
     /// V0.7 §2.3: max active delegated children per this root (1–16,
     /// clamped). Frozen at root creation from process configuration.
     child_limit: u8 = 4,
+    orchestration_mode: ?@import("swarm_mode.zig").Mode = null,
+    stall_since_ms: ?i64 = null,
+    stall_escalated: bool = false,
     pub fn init(a: std.mem.Allocator) Root {
         return .{ .allocator = a, .arena = .init(a), .last_ns = (Clock{}).now() };
     }
@@ -288,7 +338,12 @@ pub const Root = struct {
     pub fn factForSeq(self: *Root, parent: id.TaskId, seq: u32) !Fact {
         self.lock();
         defer self.mutex.unlock();
-        for (self.facts[0..self.count]) |fact| if (fact.parent != null and fact.parent.?.eql(parent) and fact.seq == seq) return fact;
+        var index_value = self.count;
+        while (index_value != 0) {
+            index_value -= 1;
+            const fact = self.facts[index_value];
+            if (fact.parent != null and fact.parent.?.eql(parent) and fact.seq == seq) return fact;
+        }
         return error.TaskNotFound;
     }
     /// Resolve a bare label reference: exactly one live-or-terminal delegated
@@ -369,6 +424,7 @@ pub const Root = struct {
         };
         if (active >= self.child_limit) return error.ChildTaskLimit;
         var fact = original;
+        if (fact.dependencies) |ids| fact.dependencies = try self.arena.allocator().dupe(id.TaskId, ids);
         fact.request_key = try self.arena.allocator().dupe(u8, original.request_key);
         fact.label = try self.arena.allocator().dupe(u8, original.label);
         if (original.targets) |targets| fact.targets = try self.arena.allocator().dupe(id.SessionHandle, targets);
@@ -509,6 +565,40 @@ pub const Root = struct {
             return err;
         };
     }
+    pub fn configureBoost(self: *Root, task: id.TaskId, limit: u8) !void {
+        self.lock();
+        defer self.mutex.unlock();
+        const i = try self.index(task);
+        var fact = self.facts[i];
+        if (fact.boost_limit != null) return;
+        fact.boost_limit = limit;
+        self.facts[i] = try self.write(fact);
+    }
+
+    pub fn factForTask(self: *Root, task: id.TaskId) !Fact {
+        self.lock();
+        defer self.mutex.unlock();
+        return self.facts[try self.index(task)];
+    }
+
+    pub fn verifyBoost(self: *Root, task: id.TaskId, items: []const VerificationItem) !void {
+        try validateVerification(items);
+        self.lock();
+        defer self.mutex.unlock();
+        const i = try self.index(task);
+        var fact = self.facts[i];
+        if (fact.boost_limit == null or terminal(fact.status)) return error.InvalidVerification;
+        if (fact.verification) |prior| {
+            if (@import("../config/settings_schema.zig").same(prior, items)) return;
+            return error.BoostAlreadyVerified;
+        }
+        for (self.facts[0..self.count]) |child| {
+            if (child.parent != null and child.parent.?.eql(task) and !terminal(child.status)) return error.BoostChildrenPending;
+        }
+        fact.verification = try copyVerification(self.arena.allocator(), items);
+        self.facts[i] = try self.write(fact);
+    }
+
     pub fn state(self: *Root, task: id.TaskId, status: Status, summary: []const u8) !void {
         self.lock();
         defer self.mutex.unlock();

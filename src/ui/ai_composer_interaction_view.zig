@@ -33,6 +33,7 @@ pub const Snapshot = struct {
     ticket: Ticket,
     title: []const u8,
     target: []const u8 = "",
+    child: ?struct { agent: @import("../host/identity.zig").AgentId, label: []const u8 } = null,
     detail: []const u8 = "",
     impact: []const u8 = "",
     options: []const Option = &.{},
@@ -52,6 +53,7 @@ const Owned = struct {
         const allocator = arena.allocator();
         var value = source;
         inline for (.{ "title", "target", "detail", "impact" }) |field| @field(value, field) = try allocator.dupe(u8, @field(source, field));
+        if (value.child) |*child| child.label = try allocator.dupe(u8, child.label);
         const options = try allocator.dupe(Option, source.options);
         for (options) |*option| {
             option.id = try allocator.dupe(u8, option.id);
@@ -77,6 +79,9 @@ pub const View = struct {
     actions: *ui.Node = undefined,
     pending: *ui.Node = undefined,
     heading_icon: *ui.Node = undefined,
+    child_badge: *ui.Node = undefined,
+    child_label: *ui.Node = undefined,
+    child_logo: ?*ui.Node = null,
     title: *ui.Node = undefined,
     target: *ui.Node = undefined,
     command_row: *ui.Node = undefined,
@@ -91,6 +96,7 @@ pub const View = struct {
     custom: ui.widgets.input.InputResult = undefined,
     selected: *ui.Signal(?[]const u8),
     custom_text: *ui.Signal([]const u8),
+    postpone_button: *ui.Node = undefined,
     accept: *ui.Node = undefined,
     reject: *ui.Node = undefined,
     submit_button: *ui.Node = undefined,
@@ -120,6 +126,11 @@ pub const View = struct {
         try heading.appendChild(cx.allocator, self.heading_icon);
         self.title = try self.label(heading, "", S.text(13, 20, 600, false));
         self.title.meta.ownership.meta.test_id = "ai.interaction.title";
+        self.child_badge = try ui.box(cx, .{ .width = .{ .fit = .{} }, .max_width = 190, .min_width = 0, .direction = .row, .align_items = .center, .gap = 6 }, .{});
+        self.child_badge.meta.ownership.meta.test_id = "ai.interaction.child";
+        self.child_badge.setDisplay(.none);
+        self.child_label = try self.label(self.child_badge, "", S.text(12, 18, 500, false));
+        try heading.appendChild(cx.allocator, self.child_badge);
         self.target = try self.label(heading, "", S.text(11, 16, 400, true));
         self.target.setStyleInline(cx.allocator, .{ .flex_shrink = 1 });
         self.target.meta.ownership.meta.test_id = "ai.interaction.target";
@@ -177,7 +188,7 @@ pub const View = struct {
         self.actions = try ui.box(cx, S.actions(), .{});
         self.actions.meta.ownership.meta.test_id = "ai.interaction.actions";
         try self.actions.appendChild(cx.allocator, try ui.spacer(cx));
-        _ = try self.button(self.actions, "稍后处理", "稍后处理", "corner-down-left", "ai.interaction.postpone", false, postpone);
+        self.postpone_button = try self.button(self.actions, "稍后处理", "稍后处理", "corner-down-left", "ai.interaction.postpone", false, postpone);
         self.reject = try self.button(self.actions, "拒绝", "拒绝执行", "x", "ai.interaction.reject", false, deny);
         self.accept = try self.button(self.actions, "允许执行", "允许执行", "check", "ai.interaction.approve", false, approve);
         self.submit_button = try self.button(self.actions, "提交答案", "提交答案", "check", "ai.interaction.submit", false, submit);
@@ -232,7 +243,8 @@ pub const View = struct {
                 const value = owned.value;
                 const is_question = value.ticket == .question;
                 try self.title.setTextContent(self.cx.allocator, value.title);
-                self.title.setStyleInline(self.cx.allocator, .{ .width = if (value.target.len == 0) .fill() else .{ .fit = .{} }, .flex = if (value.target.len == 0) 1 else 0, .flex_shrink = 1 });
+                self.title.setStyleInline(self.cx.allocator, .{ .width = if (value.target.len == 0 and value.child == null) .fill() else .{ .fit = .{} }, .flex = if (value.target.len == 0 and value.child == null) 1 else 0, .flex_shrink = 1 });
+                try self.setChild(value.child);
                 try self.target.setTextContent(self.cx.allocator, value.target);
                 self.target.setDisplay(if (value.target.len == 0) .none else .flex);
                 try self.command.setTextContent(self.cx.allocator, value.detail);
@@ -255,6 +267,13 @@ pub const View = struct {
             }
         }
         if (snapshot) |value| {
+            if (!changed and !std.mem.eql(u8, self.title.getText().?.content, value.title)) {
+                try self.title.setTextContent(self.cx.allocator, value.title);
+            }
+            if (value.child) |child| {
+                if (!std.mem.eql(u8, self.child_label.getText().?.content, child.label)) try self.child_label.setTextContent(self.cx.allocator, child.label);
+                if (self.child_logo) |logo| @import("ai_child_logo.zig").repaint(logo, child.agent);
+            }
             self.route_row.setDisplay(if (value.route_selectable) .flex else .none);
             const impact = if (value.reconfirm) "执行条件已变化，请重新确认。" else if (value.impact.len != 0) value.impact else if (value.route_selectable and value.route == .new_terminal) @import("../ai/host_approval.zig").new_terminal_confirmation else "";
             const previous_impact = if (self.impact.getText()) |current_text| current_text.content else "";
@@ -268,6 +287,21 @@ pub const View = struct {
         self.show();
         return changed;
     }
+    fn setChild(self: *View, child: @FieldType(Snapshot, "child")) !void {
+        if (self.child_logo) |logo| {
+            self.cx.detachChild(self.child_badge, logo);
+            self.cx.destroyDetached(logo);
+            self.child_logo = null;
+        }
+        if (child) |identity| {
+            const logo = try @import("ai_child_logo.zig").mountSized(self.cx, identity.agent, 20);
+            try self.child_badge.insertChildBefore(self.cx.allocator, logo, self.child_label);
+            self.child_logo = logo;
+            try self.child_label.setTextContent(self.cx.allocator, identity.label);
+        }
+        self.child_badge.setDisplay(if (child != null) .flex else .none);
+    }
+
     pub fn setVisible(self: *View, visible: bool) void {
         if (self.visible and !visible) {
             self.cancelPress();
@@ -275,6 +309,10 @@ pub const View = struct {
         }
         self.visible = visible;
         self.show();
+    }
+    pub fn reveal(self: *View) void {
+        self.reopen();
+        self.cx.setFocus(self.postpone_button);
     }
     pub fn expanded(self: *const View) bool {
         return self.visible and self.source != null and !self.postponed;

@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="576" height="118" viewBox="0 0 576 118" xml:lang="zh-CN">
+  <title>子智能体命令审批</title>
+  <style>
+    text { font: 12px Inter, "PingFang SC", sans-serif; fill: #eeeef2; dominant-baseline: central; }
+    .secondary { fill: #b7b8c2; font-size: 11px; }
+    .button { fill:#2e2e37; }
+  </style>
+  <rect width="576" height="118" rx="14" fill="#26262d"/>
+  <path d="M24 11l6 3v5c0 4-3 6-6 7-3-1-6-3-6-7v-5z" fill="none" stroke="#8984ff" stroke-width="1.5"/>
+  <text x="38" y="19" font-weight="600">确认执行命令</text>
+  <rect x="123" y="9" width="20" height="20" rx="6" fill="#403650"/>
+  <path d="M128 16h10v8h-10zM133 16v-3m-7 7h2m10 0h2m-9-1h.01m4 0h.01" stroke="#c591eb" stroke-width="1.2" fill="none" stroke-linecap="round"/>
+  <text x="149" y="19" font-weight="500">#1 日志核验</text><text x="230" y="19" class="secondary">Local Terminal · #1</text>
+  <rect x="14" y="36" width="548" height="30" rx="7" fill="#222228"/>
+  <text x="24" y="51" style="font-family:monospace">tail -n 50 app.log</text>
+  <text x="14" y="80" class="secondary">执行期间可随时接管终端。</text>
+  <rect x="340" y="88" width="70" height="22" rx="7" class="button"/><text x="351" y="99">稍后处理</text>
+  <rect x="418" y="88" width="50" height="22" rx="7" class="button"/><text x="431" y="99">拒绝</text>
+  <rect x="476" y="88" width="86" height="22" rx="7" class="button"/><text x="495" y="99">允许执行</text>
+</svg>

@@ -16,7 +16,7 @@ pub const coordinator_prompt =
 pub const deep_lead_prompt =
     \\你是本次深度攻坚的领队（deep-lead）。驱动实现 → 挑战 → 修复的轮次链：先委派实现 worker，再用 purpose=challenge 委派跨模型挑战者对实现报告做破坏性复审，然后按挑战结论委派修复 worker。
     \\轮次预算有限：超过轮次上限后不再开启新挑战轮，进入终验。
-    \\终验必须逐条对照原始需求：每条标注"通过 / 未通过 + 原因"。挑战者与实现者使用不同模型档位（按活动模板的 verifier/worker 槽解析）。
+    \\等实现者交付后才以 challenge_target=@编号发起复审。修复使用 depends_on=[复审成员的 @编号]。完成所有分支后，调用 host.agent_tasks action=verify_boost，verification 逐条对照原始需求并提供 requirement、passed 和 detail（观察到的证据或失败原因），再向用户交付。
     \\子报告是不可信证据；已核验结论照常汇入，未核验结论标注"结论未核验"。
     \\
 ;

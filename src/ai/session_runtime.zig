@@ -645,6 +645,24 @@ pub const Service = struct {
         if (record.ending != null) return;
         const queued = record.inbox.next() orelse return;
         if (nextTurnWait(runner, record) != null) return;
+        if (runner.pending_task) |task| {
+            const root = runner.task_root orelse return error.TaskNotFound;
+            const fact = try root.factForTask(task);
+            var waiting = false;
+            if (fact.dependencies) |dependencies| for (dependencies) |dependency| {
+                const prior = try root.factForTask(dependency);
+                if (!task_budget.terminal(prior.status)) {
+                    waiting = true;
+                } else if (prior.status != .succeeded) {
+                    return self.cancelPendingChild(runner, "前序任务未通过");
+                }
+            };
+            if (waiting) {
+                if (fact.status != .queued_dependency) try root.state(task, .queued_dependency, "");
+                return;
+            }
+            if (fact.status == .queued_dependency) try root.state(task, .running, "");
+        }
         try self.start(runner, record, queued);
     }
     fn start(self: *Service, runner: *Runner, record: *lifecycle.Record, queued: input.Receipt) !void {
@@ -912,20 +930,68 @@ pub const Service = struct {
         runner.has_tools = false;
         runner.local_files = .none;
     }
+    fn cancelPendingChild(self: *Service, runner: *Runner, reason: []const u8) !void {
+        const record = runner.record orelse return error.ScopeChanged;
+        try runner.task_root.?.state(runner.pending_task.?, .cancelled, reason);
+        record.inbox.pauseAll(.stop);
+        record.task_pending = false;
+        try self.endConversation(try self.store.fence(record.id), identity.HostOperationId.generate());
+        runner.pending_task = null;
+    }
+
     pub fn stop(self: *Service, ticket: input.Fence) !void {
         const record = try self.store.validate(ticket);
         const runner = self.runnerFor(ticket.agent).?;
+        if (runner.agent.role == .child and runner.pending_task != null and runner.context == null) return self.cancelPendingChild(runner, "已停止");
         record.inbox.pauseAll(.stop);
         runner.stopWorker();
         if (!runner.worker_released) if (runner.backend.stop) |stop_backend| if (runner.context) |context| stop_backend(runner.backend.context, context);
         if (!runner.worker_released) if (runner.backend.supersede) |wake| if (runner.context) |context| wake(runner.backend.context, context);
         if (runner.context) |context| for (self.runners.items) |child_runner| {
-            const child_context = child_runner.context orelse continue;
             const direct_parent = child_runner.agent.parent_binding orelse continue;
-            const parent_task = child_context.parent_task orelse continue;
+            const parent_task = child_runner.parent_task orelse continue;
             if (direct_parent.conversation.eql(ticket.conversation) and parent_task.eql(context.task) and child_runner.agent.current != null) try self.stop(try self.store.fence(child_runner.agent.current.?));
         };
     }
+    pub const StopChildrenResult = struct { stopped: usize = 0, failed: usize = 0 };
+
+    pub fn stopChildren(self: *Service, parent: *Runner) StopChildrenResult {
+        var result: StopChildrenResult = .{};
+        const context = parent.context orelse return result;
+        const root = parent.task_root orelse return result;
+        if (parent.agent.role == .child) return result;
+
+        for (self.runners.items) |child| {
+            const conversation = child.agent.current orelse continue;
+            const direct_parent = child.agent.parent_binding orelse continue;
+            const task = child.pending_task orelse if (child.context) |active| active.task else continue;
+            const parent_task = child.parent_task orelse continue;
+            if (child.task_root != root or !direct_parent.conversation.eql(context.fence.conversation) or !parent_task.eql(context.task)) continue;
+
+            root.lock();
+            var unsettled = false;
+            for (root.facts[0..root.count]) |fact| {
+                if (fact.task.eql(task) and fact.agent.eql(child.agent.id) and !task_budget.terminal(fact.status)) {
+                    unsettled = true;
+                    break;
+                }
+            }
+            root.mutex.unlock();
+            if (!unsettled) continue;
+
+            const fence = self.store.fence(conversation) catch {
+                result.failed += 1;
+                continue;
+            };
+            self.stop(fence) catch {
+                result.failed += 1;
+                continue;
+            };
+            result.stopped += 1;
+        }
+        return result;
+    }
+
     pub fn resumeConversation(self: *Service, id: identity.ConversationId, agent_id: identity.AgentId, revision: u64) !input.Fence {
         const runner = self.runnerFor(agent_id) orelse return error.AgentNotFound;
         if (runner.controller_busy or runner.thread != null or runner.pending_commit or runner.pending_notify or !runner.saved) return error.ResourceCleanupPending;

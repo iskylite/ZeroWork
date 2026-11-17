@@ -124,92 +124,39 @@ test "AI composer model tooltip follows long model names and selection changes" 
     try std.testing.expectEqualStrings("quiet", f.view.model_hint_label.getText().?.content);
 }
 
-// V0.7：模式芯片入 trailing 改变槽位布局；布局断言待 UI 布局批次恢复并重校准。
-// test "AI composer controls match the V3 compact row and retain the host send slot" {
-//     var f: Fixture = undefined;
-//     try f.init();
-//     defer f.deinit();
-//     const row = f.view.root.globalRect();
-//     const chip_width = f.view.buttons[2].globalRect().w;
-//     for (f.view.buttons, 0..) |button, index| {
-//         if (index == 3) {
-//             try std.testing.expect(button.style.display == .none);
-//             continue;
-//         }
-//         const r = button.globalRect();
-//         try std.testing.expectEqual(@as(f32, 24), r.h);
-//         try std.testing.expectApproxEqAbs(row.y + 2, r.y, 0.1);
-//         try std.testing.expect(r.x >= row.x and r.x + r.w <= row.x + row.w);
-//     }
-//     try std.testing.expectApproxEqAbs(row.x, f.view.buttons[0].globalRect().x, 0.1);
-//     try std.testing.expectApproxEqAbs(row.x + 32, f.view.buttons[1].globalRect().x, 0.1);
-//     try std.testing.expectEqual(@as(f32, 98), f.view.buttons[1].globalRect().w);
-//     try std.testing.expectApproxEqAbs(row.x + 138, f.view.buttons[5].globalRect().x, 0.1);
-//     try std.testing.expect(f.view.buttons[5].globalRect().x + f.view.buttons[5].globalRect().w < f.view.buttons[4].globalRect().x);
-//     try std.testing.expectApproxEqAbs(f.view.buttons[4].globalRect().x + f.view.buttons[4].globalRect().w + 8, f.view.buttons[2].globalRect().x, 0.1);
-//     try std.testing.expectApproxEqAbs(f.view.buttons[2].globalRect().x + chip_width + 8, f.send.globalRect().x, 0.1);
-//     try std.testing.expectApproxEqAbs(row.x + 544, f.send.globalRect().x, 0.1);
-//     try std.testing.expectEqual(@as(f32, 28), f.send.globalRect().h);
-//     try std.testing.expectApproxEqAbs(row.x + 40, f.view.icons[1].globalRect().x, 0.1);
-//     try std.testing.expectApproxEqAbs(row.x + 56, f.view.labels[1].?.globalRect().x, 0.1);
-//     try std.testing.expectApproxEqAbs(f.view.buttons[2].globalRect().x + 28, f.view.labels[2].?.globalRect().x, 0.1);
-//     const logo = find(f.view.buttons[2], "ai.composer.model.logo") orelse return error.MissingModelLogo;
-//     try std.testing.expectEqual(@as(f32, 16), logo.globalRect().w);
-//     try std.testing.expectEqual(@as(f32, 16), logo.globalRect().h);
-//     try std.testing.expectApproxEqAbs(f.view.buttons[2].globalRect().x + 8, logo.globalRect().x, 0.1);
-//     try std.testing.expect(hasText(logo, "A"));
-//     try std.testing.expectEqual(@as(f32, 12), f.view.icons[1].globalRect().w);
-//     try std.testing.expectEqual(@as(f32, 10), f.view.labels[2].?.getText().?.font_size);
-//     try std.testing.expectEqual(@as(u16, 400), f.view.labels[2].?.getText().?.font_weight);
-//     try std.testing.expectApproxEqAbs(row.x + 110, f.view.chevrons[0].globalRect().x, 0.1);
-//     try std.testing.expectApproxEqAbs(f.view.buttons[2].globalRect().x + chip_width - 20, f.view.chevrons[1].globalRect().x, 0.1);
-//     try std.testing.expectApproxEqAbs(f.view.buttons[4].globalRect().x + 8, f.view.ring.globalRect().x, 0.1);
-//     try std.testing.expectApproxEqAbs(f.view.labels[2].?.globalRect().x + f.view.labels[2].?.globalRect().w + 4, f.view.labels[3].?.globalRect().x, 0.1);
-//     try std.testing.expect(chip_width < 190);
-//     try std.testing.expectEqualStrings("alpha", f.view.labels[2].?.getText().?.content);
-//     try std.testing.expectEqualStrings("高", f.view.labels[3].?.getText().?.content);
-//     try std.testing.expectEqualStrings("—", f.view.labels[4].?.getText().?.content);
-//     try std.testing.expect(f.view.disabled[4].peek());
-//     try std.testing.expectEqual(@as(usize, 0), f.calls);
-// }
-//
-//
-// V0.7：模式芯片入 trailing 改变槽位布局；布局断言待 UI 布局批次恢复并重校准。
-// test "AI composer collapses the hidden Stop slot and restores it while running" {
-//     var f: Fixture = undefined;
-//     try f.init();
-//     defer f.deinit();
-//     const stop = try ui.box(f.cx, .{ .width = .{ .px = 28 }, .height = .{ .px = 28 } }, .{});
-//     try f.view.trailing.insertChildBefore(a, stop, f.send);
-//     f.view.separate_actions = true;
-//     stop.setDisplay(.none);
-//     stop.setOpacityRaw(0);
-//     f.settle();
-//
-//     const send_x = f.send.globalRect().x;
-//     const idle_model = f.view.buttons[2].globalRect();
-//     try std.testing.expectEqual(@as(f32, 28), f.view.trailing.globalRect().w);
-//     try std.testing.expectApproxEqAbs(idle_model.x + idle_model.w + 8, send_x, 0.1);
-//
-//     stop.setDisplay(.flex);
-//     stop.setOpacityRaw(1);
-//     f.settle();
-//     const busy_model = f.view.buttons[2].globalRect();
-//     try std.testing.expectEqual(@as(f32, 62), f.view.trailing.globalRect().w);
-//     try std.testing.expectApproxEqAbs(busy_model.x + busy_model.w + 8, stop.globalRect().x, 0.1);
-//     try std.testing.expectApproxEqAbs(stop.globalRect().x + 34, f.send.globalRect().x, 0.1);
-//     try std.testing.expectApproxEqAbs(send_x, f.send.globalRect().x, 0.1);
-//
-//     stop.setDisplay(.none);
-//     stop.setOpacityRaw(0);
-//     f.settle();
-//     const restored_model = f.view.buttons[2].globalRect();
-//     try std.testing.expectEqual(@as(f32, 28), f.view.trailing.globalRect().w);
-//     try std.testing.expectApproxEqAbs(restored_model.x + restored_model.w + 8, f.send.globalRect().x, 0.1);
-//     try std.testing.expectApproxEqAbs(idle_model.x, restored_model.x, 0.1);
-// }
-//
-//
+test "AI composer orchestration chip keeps send separate and selects a mode at 860x480" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    f.cx.setViewport(860, 480);
+    var snapshot = f.snapshot();
+    snapshot.swarm_mode = .auto;
+    try f.view.update(snapshot);
+    f.settle();
+
+    const chip = f.view.buttons[6];
+    const execution = f.view.buttons[5].globalRect();
+    const usage = f.view.buttons[4].globalRect();
+    try std.testing.expectEqual(@as(f32, 24), chip.globalRect().h);
+    try std.testing.expect(chip.globalRect().x >= execution.x + execution.w);
+    try std.testing.expect(chip.globalRect().x + chip.globalRect().w < usage.x);
+    try std.testing.expectEqual(@as(f32, 28), f.view.trailing.globalRect().w);
+    try std.testing.expectApproxEqAbs(f.view.root.globalRect().x + f.view.root.globalRect().w, f.send.globalRect().x + 28, 0.1);
+
+    f.click(chip);
+    const popup = find(f.cx.root.?, "ai.mode.menu").?;
+    const menu = popup.globalRect();
+    try std.testing.expect(menu.x >= 0 and menu.y >= 0 and menu.x + menu.w <= 860 and menu.y + menu.h <= 480);
+    f.enter(find(popup, "ai.mode.boost").?);
+    try std.testing.expectEqual(@as(usize, 1), f.calls);
+    try std.testing.expectEqual(.boost, f.last.?.action.swarm_mode);
+    snapshot.swarm_mode = .boost;
+    try f.view.update(snapshot);
+    f.settle();
+    try std.testing.expectEqualStrings("Boost", f.view.labels[6].?.getText().?.content);
+    try std.testing.expectEqual(ui.icons.get("flame").?.icon_id.?, f.view.icons[6].getIcon().?.icon_id);
+}
+
 test "AI composer grouped model list uses configured capabilities and a captured typed selection awaiting acknowledgement" {
     var f: Fixture = undefined;
     try f.init();

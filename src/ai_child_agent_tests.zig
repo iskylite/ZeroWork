@@ -276,8 +276,11 @@ test "v0.4 child Stop follows only its root while End also closes user directed 
     var root_provider: WorkerFixture = .{};
     var delegated_provider: WorkerFixture = .{};
     var user_provider: WorkerFixture = .{};
+    var other_provider: WorkerFixture = .{};
+    var other_child_provider: WorkerFixture = .{};
     var service = Runtime.Service.init(a);
     defer service.deinit();
+    service.slots.configure(6, 3);
     const root = try service.attach(live.owner, root_provider.backend());
     const ticket = try service.store.create(root.agent.id);
     _ = try service.submit(ticket, .generate(), .{ .content = "parent" }, null);
@@ -290,6 +293,27 @@ test "v0.4 child Stop follows only its root while End also closes user directed 
     _ = try service.submit(try service.store.fence(user_record.id), .generate(), .{ .content = "user" }, null);
     try delegated_provider.started();
     try user_provider.started();
+    const other_owner: scope.Scope = .{ .owner = .{ .session = 99 }, .members = .{}, .inventory = &.{99} };
+    const other = try service.attach(other_owner.owner, other_provider.backend());
+    const other_ticket = try service.store.create(other.agent.id);
+    _ = try service.submit(other_ticket, .generate(), .{ .content = "other parent" }, null);
+    try other_provider.started();
+    const other_record = try service.store.registerChild(other_ticket, .{ .name = "other child", .request_key = "other-child" }, null);
+    const other_child = try service.useChild(other_ticket, other_record.child.?.info.agent, other_record.revision, other_owner, &.{}, other_child_provider.backend(), other.context.?.task);
+    _ = try service.submit(try service.store.fence(other_record.id), .generate(), .{ .content = "other child" }, null);
+    try other_child_provider.started();
+
+    const stopped = service.stopChildren(root);
+    try std.testing.expectEqual(@as(usize, 1), stopped.stopped);
+    try std.testing.expectEqual(@as(usize, 0), stopped.failed);
+    try awaitIdle(&service, delegated);
+    try std.testing.expect(!root.worker.?.cancel.isCancelled());
+    try std.testing.expect(!user.worker.?.cancel.isCancelled());
+    try std.testing.expect(!other_child.worker.?.cancel.isCancelled());
+    try service.stop(other_ticket);
+    try awaitIdle(&service, other);
+    try awaitIdle(&service, other_child);
+
     try service.stop(ticket);
     try awaitIdle(&service, root);
     try awaitIdle(&service, delegated);

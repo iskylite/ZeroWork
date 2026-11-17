@@ -24,6 +24,15 @@ const TabPick = struct {
         self.view.selectPage(self.page);
     }
 };
+const GraphPick = struct {
+    view: *View,
+    agent: id.AgentId,
+    revision: u64,
+    fn choose(self: *GraphPick) void {
+        self.view.open.set(false);
+        self.view.hooks.select(self.view.hooks.context, self.agent, self.revision);
+    }
+};
 const Header = @import("ai_assistant_header.zig");
 const id = @import("../host/identity.zig");
 /// V0.7 §14: panel pages. Members is the ordinary mode; Board/Graph/Rounds
@@ -33,11 +42,12 @@ pub const Page = enum { members, board, graph, rounds };
 pub const Hooks = struct {
     context: *anyopaque,
     select: *const fn (*anyopaque, id.AgentId, u64) void,
+    open_approval: ?*const fn (*anyopaque, id.AgentId) void = null,
     /// V0.7 §12.2: level-2 stall banner actions. urge_parent injects a
     /// user-attributed steer through the existing channel; stop_all stops
     /// every unsettled child of this parent.
-    urge_parent: ?*const fn (*anyopaque) void = null,
-    stop_all: ?*const fn (*anyopaque) void = null,
+    urge_parent: ?*const fn (*anyopaque, id.TaskId) void = null,
+    stop_all: ?*const fn (*anyopaque, id.TaskId) void = null,
 };
 pub const View = struct {
     cx: *ui.Cx,
@@ -46,13 +56,22 @@ pub const View = struct {
     open: *ui.Signal(bool),
     root: *ui.Node,
     content: *ui.Node,
+    scroll: ui.widgets.scroll_area.ScrollAreaResult,
+    tabs: *ui.Node,
+    decisions_list: *ui.Node,
+    viewport: ui.Size,
+    board_scope: ?*ui.Scope = null,
+    graph_scope: ?*ui.Scope = null,
     chrome: *ui.Node,
     painted_colors: theme.Colors,
     button: *ui.Node,
     badge: *ui.Node,
     heading_count: *ui.Node,
+    heading_title: *ui.Node,
+    stall_stop: *ui.Node = undefined,
     /// V0.7 §12.2/§14.4: level-2 stall banner node (hidden unless escalated).
     stall_banner: ?*ui.Node = null,
+    stall_task: ?id.TaskId = null,
     /// V0.7 §14.1-14.3: panel page tabs. The default page keeps the member
     /// list; Board/Graph/Rounds pages appear only with delegated children.
     page: Page = .members,
@@ -63,6 +82,11 @@ pub const View = struct {
     board_list: ?*ui.Node = null,
     graph_canvas: ?*ui.Node = null,
     rounds_list: ?*ui.Node = null,
+    verification_button: *ui.Node = undefined,
+    verification_label: *ui.Node = undefined,
+    verification_arrow: *ui.Node = undefined,
+    verification_detail: *ui.Node = undefined,
+    verification_expanded: bool = false,
     board_fingerprint: u64 = 0,
     graph_fingerprint: u64 = 0,
     rounds_fingerprint: u64 = 0,
@@ -71,75 +95,93 @@ pub const View = struct {
     board_filter_member: ?u32 = null,
     board_filter_ask_only: bool = false,
     rows: std.ArrayList(*Row) = .empty,
-    rows_scope: ?*ui.Scope = null,
     fingerprint: u64 = 0,
-    a11y_label: [80]u8 = undefined,
+    a11y_label: [128]u8 = undefined,
     pub fn mount(cx: *ui.Cx, scope: *ui.Scope, button: *ui.Node, hooks: Hooks) !*View {
         const open = try scope.createSignal(bool, false);
-        const popup = try ui.widgets.Popover(.{ .open = open, .trigger = .manual, .anchor = .{ .node = button }, .position = .bottom_start, .offset = .{ .static = 6 }, .width = 400, .max_height = 300, .close_on_escape = true, .close_on_outside_click = true, .constrain_width_to_viewport = true, .flip = true, .viewport_padding = 8 }).mount(scope, cx);
+        const popup = try ui.widgets.Popover(.{ .open = open, .trigger = .manual, .anchor = .{ .node = button }, .position = .bottom_start, .offset = .{ .static = 6 }, .max_height = 440, .close_on_escape = true, .close_on_outside_click = true, .flip = true, .shift_main_axis = true, .viewport_padding = 8 }).mount(scope, cx);
         popup.wrapper.setStyleInline(cx.allocator, .{ .position = .absolute, .width = .{ .px = 0 }, .height = .{ .px = 0 } });
-        popup.chrome.setStyleInline(cx.allocator, .{ .background = theme.current().overlay, .border = .{ .radius = 12 }, .padding = ui.Padding.all(8) });
-        const heading = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 32 }, .direction = .row, .align_items = .center, .gap = 8, .padding = .{ .left = 52, .right = 12 }, .flex_shrink = 0 }, .{});
+        popup.chrome.setStyleInline(cx.allocator, S.panel(cx.tokens, cx.viewport));
+        popup.chrome.meta.ownership.meta.test_id = "ai.children.panel";
+        const heading = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 32 }, .direction = .row, .align_items = .center, .gap = 8, .padding = .{ .left = 4, .right = 4 }, .flex_shrink = 0 }, .{});
         heading.meta.ownership.meta.test_id = "ai.children.heading";
         const title = try ui.textStyled(cx, S.name, "子智能体");
         title.meta.ownership.meta.test_id = "ai.children.title";
         try heading.appendChild(cx.allocator, title);
-        try heading.appendChild(cx.allocator, try ui.spacer(cx));
+        const heading_spacer = try ui.spacer(cx);
+        try heading.appendChild(cx.allocator, heading_spacer);
         const heading_count = try ui.textStyled(cx, S.secondary, "");
         try heading.appendChild(cx.allocator, heading_count);
         try popup.content.appendChild(cx.allocator, heading);
-        const scroll = try ui.widgets.ScrollArea(.{ .direction = .vertical }).mount(popup.scope, cx);
-        scroll.container.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .fit = .{ .max = 252 } }, .max_height = 252, .min_height = 0 });
-        scroll.content.setStyleInline(cx.allocator, .{ .width = .fill(), .direction = .column });
-        scroll.container.meta.ownership.meta.test_id = "ai.children.list";
-        try popup.content.appendChild(cx.allocator, scroll.container);
-        // 占位节点：banner 插在 content 顶部（heading 之后）；self 创建后再填
-        // 充按钮与文案（V0.7 §12.2/§14.4 停滞警示条）。
         const banner_placeholder = try ui.box(cx, .{}, .{});
         banner_placeholder.setDisplay(.none);
         banner_placeholder.meta.ownership.meta.test_id = "ai.children.stall";
-        try popup.content.insertChildBefore(cx.allocator, banner_placeholder, scroll.container);
-        // V0.7 §14: page tab row below the banner; page bodies follow the
-        // member list (all share the G3/G8 sources). Tabs beyond the member
-        // list appear only when delegated children exist.
-        const tab_row = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 28 }, .direction = .row, .align_items = .center, .gap = 6, .flex_shrink = 0 }, .{});
+        try popup.content.appendChild(cx.allocator, banner_placeholder);
+        const tab_row = try ui.box(cx, .{ .width = .{ .fit = .{} }, .height = .{ .px = 32 }, .direction = .row, .align_items = .center, .gap = 6, .flex_shrink = 0 }, .{});
         tab_row.meta.ownership.meta.test_id = "ai.children.tabs";
-        try popup.content.insertChildBefore(cx.allocator, tab_row, scroll.container);
-        const board_list_placeholder = try ui.box(cx, .{ .width = .fill(), .direction = .column, .gap = 4 }, .{});
-        board_list_placeholder.setDisplay(.none);
-        try popup.content.appendChild(cx.allocator, board_list_placeholder);
-        const graph_canvas_placeholder = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 220 }, .flex_shrink = 0 }, .{});
-        graph_canvas_placeholder.setDisplay(.none);
-        try popup.content.appendChild(cx.allocator, graph_canvas_placeholder);
-        const rounds_list_placeholder = try ui.box(cx, .{ .width = .fill(), .direction = .column, .gap = 6 }, .{});
-        rounds_list_placeholder.setDisplay(.none);
-        try popup.content.appendChild(cx.allocator, rounds_list_placeholder);
+        try heading.insertChildBefore(cx.allocator, tab_row, heading_spacer);
+
+        const scroll = try ui.widgets.ScrollArea(.{ .direction = .vertical }).mount(popup.scope, cx);
+        @import("ai_card_scroll.zig").containVertical(scroll);
+        scroll.container.setStyleInline(cx.allocator, S.panelBody(cx.viewport, false, false));
+        scroll.container.meta.ownership.meta.test_id = "ai.children.viewport";
+        scroll.content.setStyleInline(cx.allocator, .{ .width = .fill(), .direction = .column });
+        try popup.content.appendChild(cx.allocator, scroll.container);
+
+        const members = try ui.box(cx, S.page(4), .{});
+        members.meta.ownership.meta.test_id = "ai.children.list";
+        try scroll.content.appendChild(cx.allocator, members);
+        const board = try ui.box(cx, S.page(6), .{});
+        board.meta.ownership.meta.test_id = "ai.children.board";
+        const decisions = try ui.box(cx, S.page(4), .{});
+        try board.appendChild(cx.allocator, decisions);
+        try scroll.content.appendChild(cx.allocator, board);
+        const graph = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 220 }, .flex_shrink = 0 }, .{});
+        graph.meta.ownership.meta.test_id = "ai.children.graph";
+        try scroll.content.appendChild(cx.allocator, graph);
+        const rounds = try ui.box(cx, S.page(8), .{});
+        rounds.meta.ownership.meta.test_id = "ai.children.rounds";
+        try scroll.content.appendChild(cx.allocator, rounds);
+
         const badge = try Header.mountCountBadge(cx, button, "ai.children.count");
-        const self = try scope.createState(View, .{ .cx = cx, .scope = popup.scope, .hooks = hooks, .open = open, .root = popup.wrapper, .content = scroll.content, .chrome = popup.chrome, .painted_colors = theme.current(), .button = button, .badge = badge, .heading_count = heading_count, .stall_banner = banner_placeholder, .board_list = board_list_placeholder, .graph_canvas = graph_canvas_placeholder, .rounds_list = rounds_list_placeholder });
+        badge.setTextColor(theme.current().danger_ink);
+        const self = try scope.createState(View, .{ .cx = cx, .scope = popup.scope, .hooks = hooks, .open = open, .root = popup.wrapper, .content = members, .scroll = scroll, .tabs = tab_row, .decisions_list = decisions, .viewport = cx.viewport, .chrome = popup.chrome, .painted_colors = theme.current(), .button = button, .badge = badge, .heading_count = heading_count, .heading_title = title, .stall_banner = banner_placeholder, .board_list = board, .graph_canvas = graph, .rounds_list = rounds });
         // V0.7 §12.2/§14.4: level-2 stall banner. Hidden until the host
         // escalates; carries the 催父/停全部 one-click actions.
-        const banner_text = try ui.textStyled(cx, S.name, "集群停滞：父任务长时间无动作");
-        banner_text.setStyleInline(cx.allocator, .{ .font_size = 12, .font_weight = 600 });
-        try banner_placeholder.appendChild(cx.allocator, banner_text);
-        const banner_actions = try ui.box(cx, .{ .direction = .row, .gap = 8, .width = .fill(), .flex_shrink = 0 }, .{});
-        const urge = try ui.widgets.Button(.{ .label = "催父", .variant = .secondary, .on_click = cx.on(View, self, urgeParent) }).mount(popup.scope, cx);
+        const warning = try ui.iconTint(cx, ui.icons.get("timer").?, theme.current().warn, .{ .width = .{ .px = 14 }, .height = .{ .px = 14 }, .flex_shrink = 0 });
+        try banner_placeholder.appendChild(cx.allocator, warning);
+        try banner_placeholder.appendChild(cx.allocator, try ui.textStyled(cx, S.secondary, "进度停滞"));
+        try banner_placeholder.appendChild(cx.allocator, try ui.spacer(cx));
+        const urge = try ui.widgets.Button(.{ .label = "提醒", .a11y_label = "提醒协调者", .variant = .secondary, .on_click = cx.on(View, self, urgeParent) }).mount(popup.scope, cx);
         urge.meta.ownership.meta.test_id = "ai.children.stall.urge";
-        try banner_actions.appendChild(cx.allocator, urge);
-        const stop = try ui.widgets.Button(.{ .label = "停全部", .variant = .secondary, .on_click = cx.on(View, self, stopAll) }).mount(popup.scope, cx);
+        try banner_placeholder.appendChild(cx.allocator, urge);
+        const stop = try ui.widgets.Button(.{ .label = "停止子任务", .a11y_label = "停止本任务的子任务", .variant = .ghost, .on_click = cx.on(View, self, stopAll) }).mount(popup.scope, cx);
         stop.meta.ownership.meta.test_id = "ai.children.stall.stop";
-        try banner_actions.appendChild(cx.allocator, stop);
-        banner_placeholder.setStyleInline(cx.allocator, .{ .width = .fill(), .direction = .column, .gap = 6, .padding = ui.Padding.all(10), .border = .{ .width = 1, .radius = 8 }, .flex_shrink = 0 });
-        try banner_placeholder.appendChild(cx.allocator, banner_actions);
+        self.stall_stop = stop;
+        try banner_placeholder.appendChild(cx.allocator, stop);
+        banner_placeholder.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = 34 }, .direction = .row, .align_items = .center, .gap = 6, .padding = .{ .left = 8, .right = 4 }, .background = theme.popupAction(), .border = .{ .radius = 8 }, .flex_shrink = 0 });
+        self.verification_button = try ui.widgets.Button(.{ .variant = .ghost, .base_style = S.verificationFooter(), .a11y_label = "终验", .on_click = cx.on(View, self, toggleVerification) }).mount(popup.scope, cx);
+        self.verification_button.meta.ownership.meta.test_id = "ai.children.rounds.verify";
+        self.verification_label = try ui.textStyled(cx, S.name, "终验");
+        self.verification_arrow = try ui.iconTint(cx, ui.icons.chevron_down, theme.current().fg_2, .{ .width = .{ .px = 12 }, .height = .{ .px = 12 }, .flex_shrink = 0 });
+        try self.verification_button.appendChild(cx.allocator, self.verification_label);
+        try self.verification_button.appendChild(cx.allocator, try ui.spacer(cx));
+        try self.verification_button.appendChild(cx.allocator, self.verification_arrow);
+        try popup.content.appendChild(cx.allocator, self.verification_button);
+        self.verification_detail = try ui.box(cx, S.page(6), .{});
+        self.verification_detail.meta.ownership.meta.test_id = "ai.children.rounds.verification";
+        try rounds.appendChild(cx.allocator, self.verification_detail);
         // V0.7 §14: page tabs (members always; Board/Graph/Rounds appear with
         // delegated children — setPages toggles their display).
         self.tab_members = try View.mountTab(cx, popup.scope, self, "成员", "ai.children.tab.members", .members);
-        self.tab_board = try View.mountTab(cx, popup.scope, self, "Board", "ai.children.tab.board", .board);
-        self.tab_graph = try View.mountTab(cx, popup.scope, self, "Graph", "ai.children.tab.graph", .graph);
-        self.tab_rounds = try View.mountTab(cx, popup.scope, self, "Rounds", "ai.children.tab.rounds", .rounds);
+        self.tab_board = try View.mountTab(cx, popup.scope, self, "留言板", "ai.children.tab.board", .board);
+        self.tab_graph = try View.mountTab(cx, popup.scope, self, "关系图", "ai.children.tab.graph", .graph);
+        self.tab_rounds = try View.mountTab(cx, popup.scope, self, "轮次", "ai.children.tab.rounds", .rounds);
         try tab_row.appendChild(cx.allocator, self.tab_members.?);
         try tab_row.appendChild(cx.allocator, self.tab_board.?);
         try tab_row.appendChild(cx.allocator, self.tab_graph.?);
         try tab_row.appendChild(cx.allocator, self.tab_rounds.?);
+        self.setPagesAvailable(.auto, 0, 0);
         self.applyPageVisibility();
         try scope.onCleanup(View, self, cleanup);
         _ = ui.clickable(button, cx.on(View, self, toggle));
@@ -154,9 +196,13 @@ pub const View = struct {
         self.cx.requestRedraw();
     }
     /// V0.7 §12.2/§14.4: show or clear the level-2 stall banner.
-    pub fn setStallEscalated(self: *View, escalated: bool) void {
+    pub fn setStallTask(self: *View, task: ?id.TaskId) void {
         const banner = self.stall_banner orelse return;
-        banner.setDisplay(if (escalated) .flex else .none);
+        const previous = self.stall_task;
+        self.stall_task = task;
+        if ((previous == null) == (task == null)) return;
+        banner.setDisplay(if (task != null) .flex else .none);
+        self.scroll.container.setStyleInline(self.cx.allocator, S.panelBody(self.viewport, task != null, self.page == .rounds));
     }
     fn mountTab(cx: *ui.Cx, tab_scope: *ui.Scope, view: *View, label: []const u8, test_id: []const u8, page: Page) !*ui.Node {
         const state = try tab_scope.createState(TabPick, .{ .view = view, .page = page });
@@ -164,44 +210,45 @@ pub const View = struct {
         tab_button.meta.ownership.meta.test_id = test_id;
         return tab_button;
     }
-    /// V0.7 §14: select the panel page (three-way mutual exclusion).
     fn selectPage(self: *View, page: Page) void {
         if (self.page == page) return;
         self.page = page;
         self.applyPageVisibility();
-        self.fingerprint = 0;
-        self.board_fingerprint = 0;
-        self.graph_fingerprint = 0;
-        self.rounds_fingerprint = 0;
+        ui.widgets.scroll_area.setScrollY(self.scroll.state, self.scroll.content, 0);
         self.cx.requestRedraw();
     }
-    /// Board/Graph/Rounds pages exist only with delegated children; in the
-    /// ordinary mode the tabs stay hidden and the member list is the panel
-    /// (§14.1: 普通模式无 Graph).
-    pub fn setPagesAvailable(self: *View, children: usize) void {
-        const available = children != 0;
-        for ([_]?*ui.Node{ self.tab_board, self.tab_graph, self.tab_rounds }) |maybe| {
-            if (maybe) |tab| tab.setDisplay(if (available) .flex else .none);
-        }
-        if (!available and self.page != .members) self.selectPage(.members);
+
+    pub fn setPagesAvailable(self: *View, mode: @import("../ai/swarm_mode.zig").Mode, children: usize, active: usize) void {
+        const board = mode != .auto and children != 0;
+        const graph = mode == .swarm and active > 1;
+        const rounds = mode == .boost and children != 0;
+        self.tabs.setDisplay(if (board) .flex else .none);
+        self.heading_title.setDisplay(if (board) .none else .flex);
+        if (self.tab_board) |tab| tab.setDisplay(if (board) .flex else .none);
+        if (self.tab_graph) |tab| tab.setDisplay(if (graph) .flex else .none);
+        if (self.tab_rounds) |tab| tab.setDisplay(if (rounds) .flex else .none);
+        if (switch (self.page) { .members => false, .board => !board, .graph => !graph, .rounds => !rounds }) self.selectPage(.members);
     }
+
     fn applyPageVisibility(self: *View) void {
-        const members = self.page == .members;
+        self.content.setDisplay(if (self.page == .members) .flex else .none);
         if (self.board_list) |node| node.setDisplay(if (self.page == .board) .flex else .none);
         if (self.graph_canvas) |node| node.setDisplay(if (self.page == .graph) .flex else .none);
         if (self.rounds_list) |node| node.setDisplay(if (self.page == .rounds) .flex else .none);
-        // The member scroll stays mounted; other pages overlay-hide it.
-        if (self.rows_scope != null or members) {
-            for (self.rows.items) |row| row.node.setDisplay(if (members) .flex else .none);
-        }
-        if (self.tab_members) |tab| {
-            if (tab.behavior.interaction.a11y) |*a11y| a11y.pressed = members;
+        self.verification_button.setDisplay(if (self.page == .rounds) .flex else .none);
+        self.scroll.container.setStyleInline(self.cx.allocator, S.panelBody(self.viewport, self.stall_task != null, self.page == .rounds));
+        for ([_]?*ui.Node{ self.tab_members, self.tab_board, self.tab_graph, self.tab_rounds }, 0..) |maybe, index| {
+            const tab = maybe orelse continue;
+            const active = index == @intFromEnum(self.page);
+            tab.setBackground(if (active) theme.popupSelection() else ui.Color.TRANSPARENT);
+            if (tab.behavior.interaction.a11y) |*a11y| a11y.selected = active;
         }
     }
+
     /// V0.7 §10.2: render the Auto-upgrade decision timeline at the top of
     /// the Board page (explainable: why a request ran in parallel).
     pub fn updateDecisions(self: *View, rows: []const projection.DecisionRow) !void {
-        const list = self.board_list orelse return;
+        const list = self.decisions_list;
         var hash = std.hash.Wyhash.init(0);
         for (rows) |row| {
             std.hash.autoHash(&hash, row.at_ms);
@@ -216,8 +263,8 @@ pub const View = struct {
             self.cx.destroyDetached(child);
         }
         for (rows) |row| {
-            var label: [128]u8 = undefined;
-            const head = try std.fmt.bufPrint(&label, "升级判定 · {s}", .{row.reason[0..@min(row.reason.len, 96)]});
+            var label: [256]u8 = undefined;
+            const head = try std.fmt.bufPrint(&label, "本次并行执行 · {s}", .{row.reason});
             const wrap = try ui.box(self.cx, .{ .width = .fill(), .direction = .column, .gap = 2, .padding = ui.Padding.all(8), .border = .{ .width = 1, .radius = 8 }, .flex_shrink = 0 }, .{});
             wrap.meta.ownership.meta.test_id = "ai.children.decision";
             try wrap.appendChild(self.cx.allocator, try ui.textStyled(self.cx, S.secondary, head));
@@ -230,7 +277,7 @@ pub const View = struct {
     pub fn updateBoard(self: *View, rows: []const projection.BoardRow) !void {
         const list = self.board_list orelse return;
         var hash = std.hash.Wyhash.init(0);
-        hash.update(if (self.board_filter_member) |member| &.{@as(u8, 1), @intCast(member)} else &.{@as(u8, 0)});
+        std.hash.autoHash(&hash, self.board_filter_member);
         std.hash.autoHash(&hash, self.board_filter_ask_only);
         for (rows) |row| {
             // §14.2 filters: by member, by category, ask-only.
@@ -245,9 +292,14 @@ pub const View = struct {
         const stamp = hash.final();
         if (stamp == self.board_fingerprint) return;
         self.board_fingerprint = stamp;
-        // Rebuild the board page content.
-        while (list.children.items.len != 0) {
-            const child = list.children.items[0];
+        if (self.board_scope) |old| old.dispose();
+        self.board_scope = try self.scope.childScope();
+        // Keep the decision timeline mounted while messages change.
+        var index = list.children.items.len;
+        while (index != 0) {
+            index -= 1;
+            const child = list.children.items[index];
+            if (child == self.decisions_list) continue;
             self.cx.detachChild(list, child);
             self.cx.destroyDetached(child);
         }
@@ -270,14 +322,15 @@ pub const View = struct {
     /// §14.2: the filter row (仅看 ask toggle + member reset) rides the top
     /// of the Board page. Mounted dynamically after each rebuild.
     fn mountBoardFilter(self: *View, list: *ui.Node) !void {
-        const state = try self.scope.createState(BoardFilterPick, .{ .view = self });
+        const scope = self.board_scope.?;
+        const state = try scope.createState(BoardFilterPick, .{ .view = self });
         const row = try ui.box(self.cx, .{ .width = .fill(), .direction = .row, .align_items = .center, .gap = 8, .padding = .{ .top = 4, .bottom = 4 }, .flex_shrink = 0 }, .{});
         row.meta.ownership.meta.test_id = "ai.children.board.filters";
-        const ask = try ui.widgets.Button(.{ .label = if (self.board_filter_ask_only) "✓ 仅看 ask/answer" else "仅看 ask/answer", .variant = .ghost, .on_click = self.cx.on(BoardFilterPick, state, BoardFilterPick.toggleAsk) }).mount(self.scope, self.cx);
+        const ask = try ui.widgets.Button(.{ .label = if (self.board_filter_ask_only) "✓ 仅看提问与回复" else "仅看提问与回复", .variant = .ghost, .on_click = self.cx.on(BoardFilterPick, state, BoardFilterPick.toggleAsk) }).mount(scope, self.cx);
         ask.meta.ownership.meta.test_id = "ai.children.board.filter.ask";
         try row.appendChild(self.cx.allocator, ask);
         if (self.board_filter_member != null) {
-            const reset = try ui.widgets.Button(.{ .label = "清除成员筛选", .variant = .ghost, .on_click = self.cx.on(BoardFilterPick, state, BoardFilterPick.resetMember) }).mount(self.scope, self.cx);
+            const reset = try ui.widgets.Button(.{ .label = "清除成员筛选", .variant = .ghost, .on_click = self.cx.on(BoardFilterPick, state, BoardFilterPick.resetMember) }).mount(scope, self.cx);
             reset.meta.ownership.meta.test_id = "ai.children.board.filter.reset";
             try row.appendChild(self.cx.allocator, reset);
         }
@@ -297,7 +350,7 @@ pub const View = struct {
         const canvas = self.graph_canvas orelse return;
         var hash = std.hash.Wyhash.init(0);
         for (entries) |entry| {
-            std.hash.autoHash(&hash, entry.seq);
+            std.hash.autoHash(&hash, .{ entry.seq, entry.agent, entry.revision, entry.awaiting_approval });
             hash.update(entry.status);
             hash.update(entry.name);
         }
@@ -307,31 +360,25 @@ pub const View = struct {
         const stamp = hash.final();
         const visible = entries.len > 1;
         if (stamp == self.graph_fingerprint) return;
+        if (self.cx.pressed_node) |pressed| if (pressed.isDescendantOf(canvas)) {
+            self.cx.scheduleRedrawAfterNs(16 * std.time.ns_per_ms);
+            return;
+        };
         self.graph_fingerprint = stamp;
+        if (self.graph_scope) |old| old.dispose();
+        self.graph_scope = null;
         while (canvas.children.items.len != 0) {
             const child = canvas.children.items[0];
             self.cx.detachChild(canvas, child);
             self.cx.destroyDetached(child);
         }
-        if (!visible) {
-            // §14.2: ≤1 active child hides the Graph page.
-            return;
-        }
-        // Fixed ring coordinates: radius scaled to the canvas, angles even.
-        const center_x: f32 = 200;
-        const center_y: f32 = 110;
-        const radius: f32 = 80;
-        for (entries[0..@min(entries.len, 16)], 0..) |entry, index| {
-            const angle = 2 * std.math.pi * @as(f32, @floatFromInt(index)) / @as(f32, @floatFromInt(@min(entries.len, 16)));
-            const x = center_x + radius * @cos(angle) - 50;
-            const y = center_y + radius * @sin(angle) - 16;
-            const node = try ui.box(self.cx, .{ .position = .absolute, .inset = .{ .left = .{ .px = x }, .top = .{ .px = y } }, .width = .{ .px = 100 }, .height = .{ .px = 32 }, .direction = .row, .align_items = .center, .gap = 4, .border = .{ .width = 1, .radius = 8 }, .padding = ui.Padding.all(6) }, .{});
-            try node.appendChild(self.cx.allocator, try ui.textStyled(self.cx, S.secondary, if (entry.seq != 0) try std.fmt.allocPrint(self.cx.allocator, "#{d} {s}", .{ entry.seq, entry.name }) else entry.name));
-            try canvas.appendChild(self.cx.allocator, node);
-        }
-        const parent_node = try ui.box(self.cx, .{ .position = .absolute, .inset = .{ .left = .{ .px = center_x - 40 }, .top = .{ .px = center_y - 16 } }, .width = .{ .px = 80 }, .height = .{ .px = 32 }, .align_items = .center, .justify = .center, .border = .{ .width = 1, .radius = 16 }, .flex_shrink = 0 }, .{});
-        try parent_node.appendChild(self.cx.allocator, try ui.textStyled(self.cx, S.name, "父任务"));
-        try canvas.appendChild(self.cx.allocator, parent_node);
+        if (!visible) return;
+
+        const scope = try self.scope.childScope();
+        self.graph_scope = scope;
+        const center_x = (S.panelWidth(self.viewport) - 16) / 2;
+        const center_y: f32 = 103;
+        const radius: f32 = 75;
         // Edges: per-member post volume draws a line from the ring node to
         // the parent. Simple axis-aligned segments (deterministic layout).
         for (entries[0..@min(entries.len, 16)], 0..) |entry, index| {
@@ -356,46 +403,129 @@ pub const View = struct {
                 try canvas.appendChild(self.cx.allocator, vertical);
             }
         }
+        const colors = theme.current();
+        const parent_node = try ui.box(self.cx, S.graphNode(center_x, center_y, 68, colors.accent), .{});
+        try parent_node.appendChild(self.cx.allocator, try ui.textStyled(self.cx, S.name, "协调者"));
+        try canvas.appendChild(self.cx.allocator, parent_node);
+
+        const count = @min(entries.len, 16);
+        for (entries[0..count], 0..) |entry, index| {
+            const angle = 2 * std.math.pi * @as(f32, @floatFromInt(index)) / @as(f32, @floatFromInt(count));
+            const x = center_x + radius * @cos(angle);
+            const y = center_y + radius * @sin(angle);
+            const tint = if (entry.awaiting_approval or entry.waiting_user) colors.warn else if (entry.running) colors.accent else if (std.mem.eql(u8, entry.status, "已完成")) colors.ok else colors.fg_2;
+            const width: f32 = if (count <= 6) 38 else 28;
+            const pick = try scope.createState(GraphPick, .{ .view = self, .agent = entry.agent, .revision = entry.revision });
+            const accessible = try std.fmt.allocPrint(scope.allocator, "#{d} {s}，{s}", .{ entry.seq, entry.name, entry.status });
+            const node = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = accessible, .base_style = S.graphNode(x, y, width, tint), .on_click = self.cx.on(GraphPick, pick, GraphPick.choose) }).mount(scope, self.cx);
+            node.setStyleInline(self.cx.allocator, S.graphNode(x, y, width, tint));
+            node.meta.ownership.meta.test_id = "ai.children.graph.member";
+            var number: [16]u8 = undefined;
+            const caption = try ui.textStyled(self.cx, S.name, "");
+            try caption.setTextContent(self.cx.allocator, try std.fmt.bufPrint(&number, "#{d}", .{entry.seq}));
+            try node.appendChild(self.cx.allocator, caption);
+            try canvas.appendChild(self.cx.allocator, node);
+
+            if (count <= 6) {
+                var style = S.secondary(self.cx.tokens);
+                style.text_align = .center;
+                const label = try ui.text(self.cx, entry.name, style);
+                label.setStyleInline(self.cx.allocator, .{ .position = .absolute, .inset = .{ .left = .{ .px = x - 50 }, .top = .{ .px = y + 17 } }, .width = .{ .px = 100 } });
+                try canvas.appendChild(self.cx.allocator, label);
+            }
+        }
     }
     /// V0.7 §14.3 Rounds: boost chain rounds as a vertical timeline of node
     /// cards (seq/label/status/summary), with the final verification bar.
-    pub fn updateRounds(self: *View, rows: []const projection.RoundRow) !void {
+    pub fn updateRounds(self: *View, boost: projection.BoostView) !void {
         const list = self.rounds_list orelse return;
         var hash = std.hash.Wyhash.init(0);
-        for (rows) |row| {
-            std.hash.autoHash(&hash, row.seq);
-            hash.update(row.status);
+        if (boost.parent) |parent| std.hash.autoHash(&hash, .{ parent.task, parent.status, parent.verification != null });
+        for (boost.rows) |row| {
+            std.hash.autoHash(&hash, .{ row.seq, row.status, row.round, row.previous_seq });
+            hash.update(row.label);
             hash.update(row.summary);
         }
         const stamp = hash.final();
-        if (stamp == self.rounds_fingerprint and list.children.items.len != 0) return;
+        if (stamp == self.rounds_fingerprint) return;
         self.rounds_fingerprint = stamp;
-        while (list.children.items.len != 0) {
-            const child = list.children.items[0];
+        self.clearContent(self.verification_detail);
+        var index = list.children.items.len;
+        while (index > 1) {
+            index -= 1;
+            const child = list.children.items[index];
             self.cx.detachChild(list, child);
             self.cx.destroyDetached(child);
         }
-        if (rows.len == 0) {
-            try list.appendChild(self.cx.allocator, try ui.textStyled(self.cx, S.secondary, "暂无轮次记录"));
-            return;
+        const items = if (boost.parent) |parent| parent.verification orelse &.{} else &.{};
+        if (items.len == 0) self.verification_expanded = false;
+        const passed = for (items) |item| {
+            if (!item.passed) break false;
+        } else true;
+        const summary = if (items.len != 0)
+            if (passed) "终验通过" else "终验未通过"
+        else if (boost.parent) |parent|
+            if (@import("../ai/task_budget.zig").terminal(parent.status)) "未提交终验" else "等待终验"
+        else
+            "等待终验";
+        try self.verification_label.setTextContent(self.cx.allocator, summary);
+        self.verification_label.setTextColor(if (items.len == 0) theme.current().fg_2 else if (passed) theme.current().ok else theme.current().danger_ink);
+        self.verification_button.setFocusable(items.len != 0);
+        if (self.verification_button.behavior.interaction.a11y) |*attrs| {
+            attrs.label = summary;
+            attrs.expanded = if (items.len != 0) self.verification_expanded else null;
         }
-        for (rows) |row| {
-            var title: [96]u8 = undefined;
-            const card = try ui.box(self.cx, .{ .width = .fill(), .direction = .column, .gap = 2, .padding = ui.Padding.all(8), .border = .{ .width = 1, .radius = 8 }, .flex_shrink = 0 }, .{});
-            try card.appendChild(self.cx.allocator, try ui.textStyled(self.cx, S.name, try std.fmt.bufPrint(&title, "第 {d} 轮 · #{d} {s} · {s}", .{ row.round + 1, row.seq, if (row.label.len != 0) row.label else "", row.status })));
-            if (row.summary.len != 0) try card.appendChild(self.cx.allocator, try ui.textStyled(self.cx, S.secondary, row.summary[0..@min(row.summary.len, 120)]));
+        self.verification_arrow.setDisplay(if (items.len == 0) .none else .flex);
+        self.verification_detail.setDisplay(if (self.verification_expanded) .flex else .none);
+        for (items) |item| {
+            const card = try ui.box(self.cx, S.timelineCard(true), .{});
+            const heading = try ui.box(self.cx, .{ .width = .fill(), .direction = .row, .align_items = .center, .gap = 6 }, .{});
+            const icon = if (item.passed) ui.icons.get("circle-check").? else ui.icons.get("circle-x").?;
+            try heading.appendChild(self.cx.allocator, try ui.iconTint(self.cx, icon, if (item.passed) theme.current().ok else theme.current().danger_ink, .{ .width = .{ .px = 14 }, .height = .{ .px = 14 }, .flex_shrink = 0 }));
+            try heading.appendChild(self.cx.allocator, try ui.textStyled(self.cx, S.name, item.requirement));
+            try card.appendChild(self.cx.allocator, heading);
+            try card.appendChild(self.cx.allocator, try ui.textStyled(self.cx, S.detail, item.detail));
+            try self.verification_detail.appendChild(self.cx.allocator, card);
+        }
+        if (boost.rows.len == 0) try list.appendChild(self.cx.allocator, try ui.textStyled(self.cx, S.secondary, "暂无轮次"));
+        for (boost.rows) |row| {
+            var title: [160]u8 = undefined;
+            const card = try ui.box(self.cx, S.timelineCard(false), .{});
+            const phase = switch (row.round.phase) { .implementation => "实现", .challenge => "复审", .repair => "修复" };
+            const heading = try std.fmt.bufPrint(&title, "第 {d} 轮 · {s}   #{d} {s}", .{ row.round.number, phase, row.seq, row.label });
+            try card.appendChild(self.cx.allocator, try ui.textStyled(self.cx, S.name, heading));
+            var status: [100]u8 = undefined;
+            const state = switch (row.status) {
+                .succeeded => "已完成", .failed => "失败", .cancelled => "已停止", .outcome_unknown, .interrupted => "待核验", .queued_dependency => "等待前序", .human_wait => "等待用户", .waiting_model => "等待模型", .settling => "收尾中", .waiting_children => "等待子任务", .running => "运行中",
+            };
+            const caption = if (row.previous_seq) |seq| try std.fmt.bufPrint(&status, "{s} · 接续 #{d}", .{ state, seq }) else state;
+            try card.appendChild(self.cx.allocator, try ui.textStyled(self.cx, S.secondary, caption));
+            if (row.summary.len != 0) try card.appendChild(self.cx.allocator, try ui.textStyled(self.cx, S.secondary, row.summary));
             try list.appendChild(self.cx.allocator, card);
         }
-        const verify = try ui.box(self.cx, .{ .width = .fill(), .direction = .row, .align_items = .center, .gap = 6, .padding = ui.Padding.all(8), .border = .{ .width = 1, .radius = 8 }, .flex_shrink = 0 }, .{});
-        verify.meta.ownership.meta.test_id = "ai.children.rounds.verify";
-        try verify.appendChild(self.cx.allocator, try ui.textStyled(self.cx, S.secondary, "父终验：进行中"));
-        try list.appendChild(self.cx.allocator, verify);
+    }
+
+    fn clearContent(self: *View, parent: *ui.Node) void {
+        while (parent.children.items.len != 0) {
+            const child = parent.children.items[0];
+            self.cx.detachChild(parent, child);
+            self.cx.destroyDetached(child);
+        }
+    }
+
+    fn toggleVerification(self: *View) void {
+        if (self.verification_detail.children.items.len == 0) return;
+        self.verification_expanded = !self.verification_expanded;
+        self.verification_detail.setDisplay(if (self.verification_expanded) .flex else .none);
+        if (self.verification_button.behavior.interaction.a11y) |*attrs| attrs.expanded = self.verification_expanded;
+        ui.widgets.setScrollY(self.scroll.state, self.scroll.content, 0);
+        self.cx.requestRedraw();
     }
         fn urgeParent(self: *View) void {
-        if (self.hooks.urge_parent) |urge| urge(self.hooks.context);
+        if (self.hooks.urge_parent) |urge| urge(self.hooks.context, self.stall_task orelse return);
     }
     fn stopAll(self: *View) void {
-        if (self.hooks.stop_all) |stop| stop(self.hooks.context);
+        if (self.hooks.stop_all) |stop| stop(self.hooks.context, self.stall_task orelse return);
     }
     pub fn update(self: *View, entries: []const projection.Entry) !void {
         return self.updateWithCount(entries, null);
@@ -403,71 +533,104 @@ pub const View = struct {
     /// Historical lists may show another parent's children. The header badge
     /// continues to describe only the currently displayed main conversation.
     pub fn updateWithCount(self: *View, entries: []const projection.Entry, running_count: ?usize) !void {
+        if (!std.meta.eql(self.viewport, self.cx.viewport)) {
+            self.viewport = self.cx.viewport;
+            self.chrome.setStyleInline(self.cx.allocator, S.panel(self.cx.tokens, self.viewport));
+            self.scroll.container.setStyleInline(self.cx.allocator, S.panelBody(self.viewport, self.stall_task != null, self.page == .rounds));
+            self.graph_fingerprint = 0;
+        }
         if (!std.meta.eql(self.painted_colors, theme.current())) {
             self.painted_colors = theme.current();
-            self.chrome.setStyleInline(self.cx.allocator, S.popup(self.cx.tokens));
+            self.chrome.setStyleInline(self.cx.allocator, S.panel(self.cx.tokens, self.viewport));
+            self.applyPageVisibility();
             Header.repaintCountBadge(self.cx, self.badge);
+            self.badge.setTextColor(theme.current().danger_ink);
+            self.graph_fingerprint = 0;
             for (self.rows.items) |row| row.repaint();
         }
         var count: usize = 0;
         var hash = std.hash.Wyhash.init(0);
         for (entries) |entry| {
-            count += @intFromBool(entry.running);
-            std.hash.autoHash(&hash, .{ entry.agent, entry.revision, entry.group, entry.running, entry.reusable, entry.changed_at_ms });
+            count += @intFromBool(entry.running or entry.waiting_user);
+            std.hash.autoHash(&hash, .{ entry.agent, entry.revision, entry.group, entry.running, entry.awaiting_approval, entry.reusable, entry.changed_at_ms });
             hash.update(entry.name);
             hash.update(entry.status);
             hash.update(entry.summary);
         }
-        // V0.7 §14.1 计数口径: "运行中"仅含执行中与等待用户任务；排队等
-        // 模型槽的任务单独计入徽标——徽标即待审批子任务数（§14.4 红点）。
         var waiting_approval: usize = 0;
-        for (entries) |entry| {
-            if (entry.status.len >= 12 and std.mem.eql(u8, entry.status[0..12], "等待用户")) waiting_approval += 1;
-        }
+        for (entries) |entry| waiting_approval += @intFromBool(entry.awaiting_approval);
         count = running_count orelse count;
         var count_buffer: [64]u8 = undefined;
         const count_label = if (waiting_approval != 0)
-            try std.fmt.bufPrint(&count_buffer, "{d} 个运行中 · {d} 待审批", .{ count, waiting_approval })
-        else
-            try std.fmt.bufPrint(&count_buffer, "{d} 个运行中", .{count});
+            try std.fmt.bufPrint(&count_buffer, "{d} 待审批", .{waiting_approval})
+        else if (count != 0)
+            try std.fmt.bufPrint(&count_buffer, "{d} 运行中", .{count})
+        else "";
+        self.heading_count.setDisplay(if (count_label.len == 0) .none else .flex);
+        const stoppable = for (entries) |entry| {
+            if (entry.active or entry.running) break true;
+        } else false;
+        self.stall_stop.setDisplay(if (stoppable) .flex else .none);
         if (!sameText(self.heading_count, count_label)) try self.heading_count.setTextContent(self.cx.allocator, count_label);
-        const label = try std.fmt.bufPrint(&self.a11y_label, "子智能体，{d} 个运行中，{d} 个等待用户", .{ count, waiting_approval });
+        const label = try std.fmt.bufPrint(&self.a11y_label, "子智能体，{d} 个运行中，{d} 个待审批", .{ count, waiting_approval });
         if (self.button.behavior.interaction.a11y) |*a11y| a11y.label = label;
         try Header.updateCountBadge(self.cx, self.badge, waiting_approval);
         if (!self.open.peek()) {
             self.fingerprint = 0;
+            var index = self.rows.items.len;
+            while (index != 0) {
+                index -= 1;
+                const row = self.rows.items[index];
+                if (row.node.style.display != .none) continue;
+                self.cx.detachChild(self.content, row.node);
+                self.cx.destroyDetached(row.node);
+                _ = self.rows.orderedRemove(index);
+                row.scope.dispose();
+            }
             return;
         }
         const stamp = hash.final();
         if (stamp == self.fingerprint) return;
-        // While the list is open retain row nodes/order so a press cannot land
-        // on a different Agent. The next open applies the latest grouped sort.
-        if (self.rows.items.len != 0 and self.fingerprint != 0) {
-            for (self.rows.items) |row| {
-                row.node.setDisplay(.none);
-                for (entries) |entry| if (row.agent.eql(entry.agent)) {
-                    row.node.setDisplay(.flex);
-                    try row.update(entry);
-                    break;
-                };
+        if (self.cx.pressed_node) |pressed| {
+            if (pressed.isDescendantOf(self.content)) {
+                self.cx.scheduleRedrawAfterNs(16 * std.time.ns_per_ms);
+                return;
             }
+        }
+        var same_order = self.fingerprint != 0;
+        var index: usize = 0;
+        if (same_order) for (self.content.children.items) |node| {
+            if (node.style.display == .none) continue;
+            const row = for (self.rows.items) |row| {
+                if (row.node == node) break row;
+            } else continue;
+            if (index >= entries.len or !row.agent.eql(entries[index].agent) or row.group != entries[index].group) {
+                same_order = false;
+                break;
+            }
+            index += 1;
+        };
+        if (same_order and index == entries.len) {
+            for (entries) |entry| try self.rowFor(entry.agent).?.update(entry);
             self.fingerprint = stamp;
             return;
         }
-        if (self.rows_scope) |old| old.dispose();
-        self.rows.clearRetainingCapacity();
-        self.rows_scope = try self.scope.childScope();
-        const scope = self.rows_scope.?;
+        for (self.rows.items) |row| {
+            if (row.node.parent != null) self.cx.detachChild(self.content, row.node);
+            row.node.setDisplay(.none);
+        }
         while (self.content.children.items.len != 0) {
             const node = self.content.children.items[0];
             self.cx.detachChild(self.content, node);
             self.cx.destroyDetached(node);
         }
         if (entries.len == 0) try self.content.appendChild(self.cx.allocator, try ui.textStyled(self.cx, S.secondary, "暂无子智能体"));
+        const grouped = entries.len > 1 and entries[0].group != entries[entries.len - 1].group;
         var group: ?projection.Group = null;
         for (entries) |entry| {
-            if (group != entry.group) {
+            if (grouped and group != entry.group and entry.group != .approval) {
                 const header = try ui.textStyled(self.cx, S.secondary, switch (entry.group) {
+                    .approval => "待审批",
                     .attention => "待处理",
                     .active => "进行中",
                     .recent => "最近结束",
@@ -476,8 +639,17 @@ pub const View = struct {
                 try self.content.appendChild(self.cx.allocator, header);
                 group = entry.group;
             }
-            const row = try scope.createState(Row, .{ .view = self, .agent = entry.agent, .revision = entry.revision, .node = undefined, .name = undefined, .detail = undefined, .status = undefined, .spinner = undefined, .spinner_color = try scope.createSignal(?ui.Color, theme.current().accent) });
-            const node = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = entry.name, .base_style = ui.BoxStyle{ .width = .fill(), .height = .{ .px = 60 }, .direction = .row, .justify = .start, .align_items = .center, .padding = ui.Padding.all(10), .gap = 10, .flex_shrink = 0, .border = .{ .radius = 8 } }, .on_click = self.cx.on(Row, row, Row.select) }).mount(scope, self.cx);
+            if (self.rowFor(entry.agent)) |row| {
+                row.group = entry.group;
+                row.node.setDisplay(.flex);
+                try self.content.appendChild(self.cx.allocator, row.node);
+                try row.update(entry);
+                continue;
+            }
+            const scope = try self.scope.childScope();
+            errdefer scope.dispose();
+            const row = try scope.createState(Row, .{ .view = self, .agent = entry.agent, .revision = entry.revision, .group = entry.group, .scope = scope, .node = undefined, .name = undefined, .detail = undefined, .status = undefined, .spinner = undefined, .spinner_color = try scope.createSignal(?ui.Color, theme.current().accent) });
+            const node = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = entry.name, .base_style = ui.BoxStyle{ .width = .fill(), .height = .{ .px = 52 }, .direction = .row, .justify = .start, .align_items = .center, .padding = ui.Padding.all(10), .gap = 10, .flex_shrink = 0, .border = .{ .radius = 8 } }, .on_click = self.cx.on(Row, row, Row.select) }).mount(scope, self.cx);
             for (node.children.items) |slot| slot.setDisplay(.none);
             row.node = node;
             node.meta.ownership.meta.test_id = try std.fmt.bufPrint(&row.test_id, "ai.child.{s}", .{std.fmt.bytesToHex(entry.agent.bytes, .lower)});
@@ -510,7 +682,14 @@ pub const View = struct {
             try row.update(entry);
             try self.rows.append(self.cx.allocator, row);
         }
+        // Keep retired rows until the popover closes so a retained pointer
+        // cannot turn into a different member during the current interaction.
+        for (self.rows.items) |row| if (row.node.parent == null) try self.content.appendChild(self.cx.allocator, row.node);
         self.fingerprint = stamp;
+    }
+    fn rowFor(self: *View, agent: id.AgentId) ?*Row {
+        for (self.rows.items) |row| if (row.agent.eql(agent)) return row;
+        return null;
     }
     fn sameText(node: *ui.Node, value: []const u8) bool {
         return if (node.getText()) |text| std.mem.eql(u8, text.content, value) else false;
@@ -519,6 +698,9 @@ pub const View = struct {
         view: *View,
         agent: id.AgentId,
         revision: u64,
+        group: projection.Group,
+        scope: *ui.Scope,
+        approval: bool = false,
         test_id: [48]u8 = undefined,
         a11y_label: [384]u8 = undefined,
         display_name: [64]u8 = undefined,
@@ -533,6 +715,8 @@ pub const View = struct {
         spinner_color: *ui.Signal(?ui.Color),
         fn update(self: *Row, entry: projection.Entry) !void {
             self.revision = entry.revision;
+            self.approval = entry.awaiting_approval;
+            const status = if (self.approval) "在主对话审批" else entry.status;
             // V0.7 §2.1: rows show the host display name "#N label".
             const display = if (entry.seq != 0)
                 if (entry.name.len != 0)
@@ -542,24 +726,25 @@ pub const View = struct {
             else
                 entry.name;
             if (!View.sameText(self.name, display)) try self.name.setTextContent(self.view.cx.allocator, display);
-            if (self.node.behavior.interaction.a11y) |*a11y| a11y.label = try std.fmt.bufPrint(&self.a11y_label, "{s}，{s}", .{ display, entry.status });
-            self.status_text.set(entry.status);
-            self.visual = if (entry.running) .running else if (std.mem.eql(u8, entry.status, "失败")) .failed else if (entry.group == .attention) .attention else if (entry.group == .active) .waiting else if (std.mem.eql(u8, entry.status, "已停止")) .stopped else .complete;
+            if (self.node.behavior.interaction.a11y) |*a11y| a11y.label = try std.fmt.bufPrint(&self.a11y_label, "{s}，{s}", .{ display, status });
+            self.status_text.set(status);
+            self.visual = if (self.approval) .approval else if (entry.running) .running else if (std.mem.eql(u8, entry.status, "失败")) .failed else if (entry.group == .attention) .attention else if (entry.group == .active) .waiting else if (std.mem.eql(u8, entry.status, "已停止")) .stopped else .complete;
             self.repaint();
             var buf: [256]u8 = undefined;
             const seconds: i64 = if (entry.changed_at_ms > 0) @max(0, @divTrunc(@import("../platform/realtime.zig").milliseconds(undefined) - entry.changed_at_ms, 1000)) else 0;
             var summary_len = @min(entry.summary.len, 100);
             while (summary_len != 0 and summary_len < entry.summary.len and entry.summary[summary_len] & 0xc0 == 0x80) summary_len -= 1;
             // V0.7 §3.8: usage facts as established facts (no ledger).
-            const detail = if (entry.requests != 0)
+            const detail = if (self.approval) status else if (entry.requests != 0)
                 try std.fmt.bufPrint(&buf, "{s}{s} · {d} 次请求 · {d} tokens · {d} 秒前", .{ if (entry.summary.len != 0) entry.summary[0..summary_len] else entry.status, if (entry.reusable) " · 可复用" else "", entry.requests, entry.tokens, seconds })
             else
                 try std.fmt.bufPrint(&buf, "{s}{s} · {d} 秒前", .{ if (entry.summary.len != 0) entry.summary[0..summary_len] else entry.status, if (entry.reusable) " · 可复用" else "", seconds });
             if (!View.sameText(self.detail, detail)) try self.detail.setTextContent(self.view.cx.allocator, detail);
         }
-        const Visual = enum { running, waiting, attention, failed, stopped, complete };
+        const Visual = enum { running, waiting, approval, attention, failed, stopped, complete };
         fn repaint(self: *Row) void {
             Logo.repaint(self.logo, self.agent);
+            self.node.setBackground(if (self.approval) theme.popupSelection() else theme.popupAction());
             const colors = theme.current();
             const running = self.visual == .running;
             self.spinner.setDisplay(if (running) .flex else .none);
@@ -571,6 +756,7 @@ pub const View = struct {
             const asset = ui.icons.get(switch (self.visual) {
                 .running => unreachable,
                 .waiting => "clock-3",
+                .approval => "shield",
                 .attention => "circle-help",
                 .failed => "circle-alert",
                 .stopped => "circle-stop",
@@ -579,7 +765,7 @@ pub const View = struct {
             const tint = switch (self.visual) {
                 .running => unreachable,
                 .waiting => colors.accent,
-                .attention => colors.warn,
+                .approval, .attention => colors.warn,
                 .failed => colors.danger,
                 .stopped => colors.fg_2,
                 .complete => colors.ok,
@@ -588,7 +774,9 @@ pub const View = struct {
         }
         fn select(self: *Row) void {
             self.view.open.set(false);
-            self.view.hooks.select(self.view.hooks.context, self.agent, self.revision);
+            if (self.approval) {
+                if (self.view.hooks.open_approval) |open_approval| open_approval(self.view.hooks.context, self.agent);
+            } else self.view.hooks.select(self.view.hooks.context, self.agent, self.revision);
         }
     };
 };

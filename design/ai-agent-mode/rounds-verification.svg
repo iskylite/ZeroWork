@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="360" height="270" viewBox="0 0 360 270" xml:lang="zh-CN">
+  <title>Boost 终验未通过</title>
+  <style>
+    text { font: 12px Inter, "PingFang SC", sans-serif; fill: #eeeef2; dominant-baseline: central; }
+    .secondary { fill: #b7b8c2; font-size: 11px; }
+    .ok { stroke: #6fd895; }
+    .failed { stroke: #ffa0a6; }
+    .mark { fill: none; stroke-width: 1.2; stroke-linecap: round; stroke-linejoin: round; }
+  </style>
+  <rect width="360" height="270" rx="12" fill="#26262d"/>
+  <text x="18" y="24" class="secondary">成员</text><text x="64" y="24" class="secondary">留言板</text>
+  <rect x="108" y="10" width="48" height="28" rx="8" fill="#333349"/><text x="120" y="24" font-weight="600">轮次</text>
+  <g id="passed" transform="translate(8 40)">
+    <rect width="344" height="46" rx="8" fill="#333349"/>
+    <circle cx="15" cy="15" r="5.5" class="mark ok"/><path d="m12 15 2 2 3-4" class="mark ok"/>
+    <text x="26" y="15" font-weight="600">覆盖边界输入</text>
+    <text x="8" y="33" class="secondary">修复报告包含已覆盖的边界用例。</text>
+  </g>
+  <g id="failed" transform="translate(8 92)">
+    <rect width="344" height="46" rx="8" fill="#333349"/>
+    <circle cx="15" cy="15" r="5.5" class="mark failed"/><path d="m13 13 4 4m0-4-4 4" class="mark failed"/>
+    <text x="26" y="15" font-weight="600">核对空输入提示</text>
+    <text x="8" y="33" class="secondary">现有材料缺少空输入的运行结果。</text>
+  </g>
+  <g id="implementation" transform="translate(8 146)">
+    <rect width="344" height="64" rx="8" fill="#2d2d35"/>
+    <text x="8" y="14" font-weight="600">第 1 轮 · 实现   #1 实现校验</text>
+    <text x="8" y="32" class="secondary">已完成</text><text x="8" y="49" class="secondary">已交付校验规则</text>
+  </g>
+  <g id="verification" transform="translate(8 230)">
+    <rect width="344" height="32" rx="8" fill="#333349"/>
+    <text x="8" y="16" style="fill:#ffa0a6" font-weight="600">终验未通过</text>
+    <path d="m322 14 4 4 4-4" stroke="#b7b8c2" stroke-width="1.4" fill="none"/>
+  </g>
+</svg>

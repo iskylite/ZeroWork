@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="296" height="158" viewBox="0 0 296 158" xml:lang="zh-CN">
+  <title>编排模式</title>
+  <style>
+    text { font: 12px Inter, "PingFang SC", sans-serif; fill: #f2f2f6; dominant-baseline: central; }
+    .secondary { fill: #b8b8c4; font-size: 10px; }
+    .glyph { fill: none; stroke: #b8b8c4; stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
+    .selected { stroke: #a9a2ff; }
+  </style>
+  <defs>
+    <path id="network" d="M5 1h4v4H5zM1 9h4v4H1zm8 0h4v4H9zM7 5v2M3 9V7h8v2"/>
+    <path id="bot" d="M2 5h10v7H2zM7 5V2M0 8h2m10 0h2M5 8h.01M9 8h.01"/>
+    <path id="flame" d="M7 1c0 3 5 4 5 8a5 5 0 0 1-10 0c0-2 1-3 2-4 0 2 1 3 2 3 1-2 2-4 1-7z"/>
+  </defs>
+  <rect width="296" height="158" rx="14" fill="#26262d"/>
+  <use href="#network" x="13" y="18" class="glyph selected"/>
+  <text x="36" y="24" font-weight="700">编排模式</text>
+  <path class="glyph" d="m270 20 7 7m0-7-7 7"/>
+  <rect x="12" y="79" width="272" height="31" rx="6" fill="#333349"/>
+  <use href="#bot" x="20" y="55" class="glyph"/>
+  <use href="#network" x="20" y="87" class="glyph selected"/>
+  <use href="#flame" x="20" y="120" class="glyph"/>
+  <text x="41" y="61">Auto</text><text x="150" y="61" class="secondary">按任务自动判断</text>
+  <text x="41" y="94">Swarm</text><text x="150" y="94" class="secondary">并行协作</text>
+  <text x="41" y="127">Boost</text><text x="150" y="127" class="secondary">实现、复审、修复</text>
+  <path class="glyph selected" d="m261 93 3 3 6-6"/>
+</svg>

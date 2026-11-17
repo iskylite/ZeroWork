@@ -65,6 +65,7 @@ pub const Controller = struct {
     search_query: []const u8 = "",
     search_return_page: ?usize = null,
     scroll_offsets: [9]f32 = @splat(0),
+    role_template_editor: ?usize = null,
     folded_sections: u64 = std.math.maxInt(u64),
     plugin_page: plugins.State,
     background: material.Draft,
@@ -110,8 +111,11 @@ pub const Controller = struct {
     /// draft; save persists it through the [ai] child_role_templates JSON.
     pub fn setRoleTemplates(self: *Controller, templates: []const config.ai_role_templates.Stored) !void {
         if (self.model.locked) return error.SettingsLocked;
+        var has_default = false;
         for (templates, 0..) |template, index| {
-            template.validate() catch |err| return err;
+            try template.validate();
+            if (template.is_default and has_default) return error.DuplicateRoleTemplate;
+            has_default = has_default or template.is_default;
             for (templates[0..index]) |prior| if (std.mem.eql(u8, prior.name, template.name)) return error.DuplicateRoleTemplate;
         }
         var candidate = self.model.value;

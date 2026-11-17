@@ -49,12 +49,7 @@ pub fn fieldEqual(a: config.Config, b: config.Config, index: usize) bool {
     if (index == extensions_index) return same(a.ai.extensions, b.ai.extensions);
     if (index == role_templates_index) return a.ai.child_role_templates.len == b.ai.child_role_templates.len and blk: {
         for (a.ai.child_role_templates, b.ai.child_role_templates) |left, right| {
-            if (!std.mem.eql(u8, left.name, right.name)) break :blk false;
-            for (left.efforts, right.efforts) |l, r| if (l != r) break :blk false;
-            for (left.models, right.models) |l, r| {
-                if ((l == null) != (r == null)) break :blk false;
-                if (l) |lv| if (!std.mem.eql(u8, lv, r.?)) break :blk false;
-            }
+            if (!same(left, right)) break :blk false;
         }
         break :blk true;
     };

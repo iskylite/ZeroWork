@@ -1342,6 +1342,26 @@ pub const Store = struct {
                 const record = self.find(fact.conversation) orelse return error.InvalidSessionJournal;
                 const info = (record.child orelse return error.InvalidSessionJournal).info;
                 if (!parent_fact.root.eql(fact.root) or !info.owning_parent_conversation.eql(parent_fact.conversation)) return error.InvalidSessionJournal;
+                if (fact.dependencies) |dependencies| for (dependencies) |dependency| {
+                    const linked = for (self.task_facts.items) |prior| {
+                        if (prior.fact.task.eql(dependency) and prior.fact.parent != null and prior.fact.parent.?.eql(parent_task)) break true;
+                    } else false;
+                    if (!linked) return error.InvalidSessionJournal;
+                };
+                if (fact.boost_round) |round| {
+                    const limit = parent_fact.boost_limit orelse return error.InvalidSessionJournal;
+                    if (round.number > limit) return error.InvalidSessionJournal;
+                    if (round.previous) |previous| {
+                        const linked = for (self.task_facts.items) |prior| {
+                            if (!prior.fact.task.eql(previous) or prior.fact.parent == null or !prior.fact.parent.?.eql(parent_task)) continue;
+                            const earlier = prior.fact.boost_round orelse return error.InvalidSessionJournal;
+                            if (earlier.number + 1 != round.number) return error.InvalidSessionJournal;
+                            if ((round.phase == .repair) != (earlier.phase == .challenge)) return error.InvalidSessionJournal;
+                            break true;
+                        } else false;
+                        if (!linked) return error.InvalidSessionJournal;
+                    } else if (round.number != 1) return error.InvalidSessionJournal;
+                }
             }
             var owned = try @import("task_budget.zig").Owned.init(self.allocator, fact);
             errdefer owned.deinit();

@@ -123,6 +123,9 @@ v0.4 默认策略与活动子任务交接：构建 `zig build -Dtest-mode=true -
 对应定向检查：`./scripts/test_isolated.sh test -Dtest-filter='v0.4' -j2`，`./scripts/test_isolated.sh test -Dtest-filter='settings' -j2`，`./scripts/test_isolated.sh test-ui -Dui-test-filter='lifecycle controller' -j2` 和 `./scripts/test_isolated.sh test-ui -Dui-test-filter='tab grouping native drop' -j2`。异常复用覆盖当前账本与恢复事实、只读新任务不改写旧 unknown、伪造动态写调用被宿主拦截、目标不相交与 reconnect generation 不能绕过重叠约束；拖放检查等待期间不建半成品组、原目标成员版本变化时不发布。
 
 
+v0.7 Boost 与角色模板：构建 test-mode 应用后，运行 `ZW_AI_TEST_PREFIX=/tmp/zw-build node e2e/ai_v07_boost_templates_native.ts /tmp/zw-boost-dark dark` 或传 `light`。隔离配置与 loopback Provider 验证模板新建、模型/档位选择、复制/删除、设为默认、860×480 原生编排菜单、实现→复审→修复依赖、提前终验被拒绝以及可展开终验。追加 `--stall` 等待真实停滞阈值并捕获简化的停滞区。截图需实际查看。
+
+
 v0.4 子智能体对话与设置气泡：`zig build -Dtest-mode=true --prefix /tmp/zw-child-ui-build -j2` 后运行 `ZW_AI_TEST_PREFIX=/tmp/zw-child-ui-build node e2e/ai_child_dialog_native.ts /tmp/zw-child-dialog-new-run`。使用隔离数据、真实 Local PTY 与 loopback Provider，验证子提问／审批只消费原子票据、命令仅执行一次、父子草稿和真实拖入图片隔离、非复用子对话的显式用户续行、子模型独立与父权限上限、后台 queue／steer、主标题栏打开列表及标题／LOGO／状态列对齐、主子共用 600×456 默认尺寸、设置气泡宽 320 且自然撑高、名称同行与任务记录折叠／展开／数量不截断、时间线几何不变、最大化恢复、收起重开保留草稿、860×480、历史子详情只读与显式恢复父对话不发模型请求，最后正常 Quit。报告记录二进制 SHA-256、请求、journal 和 Metal 截图，必须实际查看。核心与 UI 定向使用 `v0.4`、`AI composer`、`v0.4 child list`、`conversation UI` 过滤器。受控回答不替代真实模型／外部 MCP／远端业务验收。
 
 标准 MCP 与飞书 CLI 只读验收：先构建启用 harness 的应用，运行

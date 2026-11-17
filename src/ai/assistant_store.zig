@@ -25,11 +25,13 @@ pub const Controls = struct {
     effort_explicit: bool = false,
     effort_fallback_from: ?Effort = null,
     thinking: ?bool = null,
+    swarm_mode: ?@import("swarm_mode.zig").Mode = null,
 
     /// Capture defaults once; later global edits belong to future agents.
     pub fn ensureDefaults(self: *Controls, ai: @import("../config/config.zig").Ai) void {
         if (self.permission == null) self.permission = ai.permission_mode;
         if (self.execution_mode == null) self.execution_mode = ai.execution_mode;
+        if (self.swarm_mode == null) self.swarm_mode = @enumFromInt(@intFromEnum(ai.swarm_mode_default));
     }
 
     pub fn ensureEffort(self: *Controls, ai: @import("../config/config.zig").Ai) void {

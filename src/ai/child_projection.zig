@@ -4,7 +4,7 @@ const id = @import("../host/identity.zig");
 const life = @import("session_lifecycle.zig");
 const runtime = @import("session_runtime.zig");
 const budget = @import("task_budget.zig");
-pub const Group = enum { attention, active, recent };
+pub const Group = enum { approval, attention, active, recent };
 pub const Entry = struct {
     agent: id.AgentId,
     conversation: id.ConversationId,
@@ -16,6 +16,9 @@ pub const Entry = struct {
     status: []const u8,
     group: Group,
     running: bool,
+    active: bool = false,
+    waiting_user: bool = false,
+    awaiting_approval: bool = false,
     reusable: bool,
     changed_at_ms: i64 = 0,
     task: ?id.TaskId = null,
@@ -64,13 +67,18 @@ pub const BoardRow = struct {
     text: []const u8,
 };
 
-/// V0.7 §14.3 Rounds row: a boost chain round entry.
 pub const RoundRow = struct {
     seq: u32,
     label: []const u8,
-    status: []const u8,
+    status: budget.Status,
     summary: []const u8,
-    round: usize,
+    round: budget.BoostRound,
+    previous_seq: ?u32,
+};
+
+pub const BoostView = struct {
+    rows: []RoundRow,
+    parent: ?budget.Fact,
 };
 pub fn latest(service: *runtime.Service, agent: id.AgentId) ?budget.Fact {
     var result: ?budget.Fact = null;
@@ -103,7 +111,7 @@ pub fn entry(service: *runtime.Service, record: *life.Record) Entry {
     const needs_verification = unresolved(service, info.agent);
     const group: Group = if (needs_verification) .attention else switch (state) {
         .human_wait, .failed, .outcome_unknown, .interrupted => .attention,
-        .running, .waiting_model, .waiting_children, .settling => .active,
+        .running, .queued_dependency, .waiting_model, .waiting_children, .settling => .active,
         else => .recent,
     };
     return .{ .agent = info.agent, .conversation = record.id, .revision = record.child_settings_revision, .name = prefs.name, .seq = if (fact) |value| value.seq else 0, .summary = if (fact) |value| value.summary else "", .status = if (record.ending != null) "收尾中" else if (needs_verification and budget.terminal(state)) "待核验" else if (fact == null) "空闲" else switch (state) {
@@ -118,7 +126,7 @@ pub fn entry(service: *runtime.Service, record: *life.Record) Entry {
         .settling => "收尾中",
         .succeeded => "已完成",
         .cancelled => "已停止",
-    }, .group = group, .running = active, .reusable = prefs.reusable, .changed_at_ms = if (fact) |value| value.changed_at_ms else 0, .task = if (fact) |value| value.task else null, .requests = if (fact) |value| value.counters.requests else 0, .tokens = if (fact) |value| value.counters.input_tokens + value.counters.output_tokens else 0 };
+    }, .group = group, .running = active, .active = fact != null and !budget.terminal(state), .waiting_user = state == .human_wait, .reusable = prefs.reusable, .changed_at_ms = if (fact) |value| value.changed_at_ms else 0, .task = if (fact) |value| value.task else null, .requests = if (fact) |value| value.counters.requests else 0, .tokens = if (fact) |value| value.counters.input_tokens + value.counters.output_tokens else 0 };
 }
 pub fn less(_: void, left: Entry, right: Entry) bool {
     if (left.group != right.group) return @backingInt(left.group) < @backingInt(right.group);
@@ -176,21 +184,47 @@ pub fn boardRows(a: std.mem.Allocator, service: *runtime.Service, parent: id.Con
     return rows.toOwnedSlice(a);
 }
 
-/// V0.7 §14.3: boost chain rounds — delegated children grouped by creation
-/// order into rounds of the implement→challenge→repair chain. This edition
-/// derives a simple ordinal round per sibling (full chain attribution lands
-/// with challenge_target linkage persistence).
-pub fn roundRows(a: std.mem.Allocator, service: *runtime.Service, parent: id.ConversationId) ![]RoundRow {
+pub fn boostView(a: std.mem.Allocator, service: *runtime.Service, conversation: id.ConversationId) !BoostView {
+    var parent: ?budget.Fact = null;
+    var live: ?*budget.Root = null;
+    for (service.store.task_facts.items) |saved| {
+        const fact = saved.fact;
+        if (fact.parent == null and fact.boost_limit != null and fact.conversation.eql(conversation) and (parent == null or fact.created_at_ms >= parent.?.created_at_ms)) parent = fact;
+    }
+    for (service.task_roots.items) |root| {
+        const facts = root.displayFacts();
+        if (facts.len == 0) continue;
+        const fact = facts[0];
+        if (fact.parent == null and fact.boost_limit != null and fact.conversation.eql(conversation) and (parent == null or fact.created_at_ms >= parent.?.created_at_ms)) {
+            parent = fact;
+            live = root;
+        }
+    }
+
     var rows: std.ArrayList(RoundRow) = .empty;
     errdefer rows.deinit(a);
-    for (service.store.records.items) |record| if (record.child) |owned| if (owned.info.owning_parent_conversation.eql(parent)) {
-        const item = entry(service, record);
-        try rows.append(a, .{ .seq = item.seq, .label = if (item.name.len != 0) item.name else "", .status = item.status, .summary = item.summary, .round = @intFromBool(item.seq > 1) });
-    };
+    if (parent) |run| {
+        var facts: std.ArrayList(budget.Fact) = .empty;
+        defer facts.deinit(a);
+        if (live) |root| {
+            try facts.appendSlice(a, root.displayFacts());
+        } else {
+            for (service.store.task_facts.items) |saved| {
+                if (saved.fact.root.eql(run.root)) try facts.append(a, saved.fact);
+            }
+        }
+        for (facts.items) |fact| {
+            const round = fact.boost_round orelse continue;
+            const previous_seq: ?u32 = if (round.previous) |task| for (facts.items) |prior| {
+                if (prior.task.eql(task)) break prior.seq;
+            } else null else null;
+            try rows.append(a, .{ .seq = fact.seq, .label = fact.label, .status = fact.status, .summary = fact.summary, .round = round, .previous_seq = previous_seq });
+        }
+    }
     std.mem.sort(RoundRow, rows.items, {}, struct {
         fn less(_: void, left: RoundRow, right: RoundRow) bool {
-            return left.seq < right.seq;
+            return if (left.round.number == right.round.number) left.seq < right.seq else left.round.number < right.round.number;
         }
     }.less);
-    return rows.toOwnedSlice(a);
+    return .{ .rows = try rows.toOwnedSlice(a), .parent = parent };
 }

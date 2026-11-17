@@ -74,9 +74,13 @@ pub fn asset(agent: AgentId) ir.Asset {
     return variants[value / 6 % 3 + value / 18 % 3 * 3];
 }
 pub fn mount(cx: *ui.Cx, agent: AgentId) !*ui.Node {
-    const node = try ui.box(cx, .{ .width = .{ .px = 32 }, .height = .{ .px = 32 }, .align_items = .center, .justify = .center, .background = ink(agent).withAlpha(24), .border = .{ .radius = 9 }, .flex_shrink = 0 }, .{});
+    const node = try mountSized(cx, agent, 32);
     node.meta.ownership.meta.test_id = "ai.child.logo";
-    try node.appendChild(cx.allocator, try ui.iconTint(cx, asset(agent), ink(agent), .{ .width = .{ .px = 22 }, .height = .{ .px = 22 }, .flex_shrink = 0 }));
+    return node;
+}
+pub fn mountSized(cx: *ui.Cx, agent: AgentId, size: f32) !*ui.Node {
+    const node = try ui.box(cx, .{ .width = .{ .px = size }, .height = .{ .px = size }, .align_items = .center, .justify = .center, .background = ink(agent).withAlpha(24), .border = .{ .radius = 9 }, .flex_shrink = 0 }, .{});
+    try node.appendChild(cx.allocator, try ui.iconTint(cx, asset(agent), ink(agent), .{ .width = .{ .px = @round(size * 0.69) }, .height = .{ .px = @round(size * 0.69) }, .flex_shrink = 0 }));
     return node;
 }
 pub fn repaint(node: *ui.Node, agent: AgentId) void {

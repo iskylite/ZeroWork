@@ -71,6 +71,9 @@ pub const Snapshot = struct {
                 for (&template.models) |*model| {
                     if (model.*) |id| model.* = try owned.dupe(u8, id);
                 }
+                for (&template.providers) |*provider| if (provider.*) |id| {
+                    provider.* = try owned.dupe(u8, id);
+                };
             }
             copy.ai.child_role_templates = owned_templates;
         }

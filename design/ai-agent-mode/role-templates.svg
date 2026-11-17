@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="492" height="338" viewBox="0 0 492 338" xml:lang="zh-CN">
+  <title>角色模板设置</title>
+  <style>
+    text { font: 12px Inter, "PingFang SC", sans-serif; fill: #eeeef2; dominant-baseline: central; }
+    .secondary { fill: #b7b8c2; }
+    .field { fill: #303039; }
+    .icon { fill: none; stroke: #b7b8c2; stroke-width: 1.3; stroke-linecap: round; stroke-linejoin: round; }
+  </style>
+  <defs><path id="chevron" d="m0 0 3 3 3-3"/></defs>
+  <rect width="492" height="338" rx="12" fill="#26262d"/>
+  <path d="m20 18 7 4-7 4-7-4zm-7 8 7 4 7-4m-14 4 7 4 7-4" fill="none" stroke="#a099fc" stroke-width="1.3"/>
+  <text x="38" y="26" font-weight="700">角色模板</text><use href="#chevron" class="icon" x="459" y="24"/>
+  <text x="16" y="56">均衡</text><rect class="field" x="401" y="44" width="75" height="24" rx="7"/><text x="414" y="56">设为默认</text>
+  <text x="16" y="88">巡检</text><text x="312" y="88" class="secondary">默认</text>
+  <rect class="field" x="352" y="76" width="38" height="24" rx="7"/><text x="359" y="88">编辑</text>
+  <rect class="field" x="395" y="76" width="38" height="24" rx="7"/><text x="402" y="88">复制</text>
+  <rect class="field" x="438" y="76" width="38" height="24" rx="7"/><text x="445" y="88">删除</text>
+  <g id="editor" transform="translate(16 105)">
+    <rect width="460" height="193" rx="8" fill="#222229"/>
+    <rect class="field" x="8" y="8" width="444" height="25" rx="6"/>
+    <text x="17" y="20">巡检</text>
+    <g transform="translate(8 38)">
+      <text y="12" class="secondary">规划</text>
+      <rect class="field" x="52" width="216" height="24" rx="6"/><text x="62" y="12">继承会话模型</text><use href="#chevron" class="icon" x="251" y="10"/>
+      <rect class="field" x="274" width="128" height="24" rx="6"/><text x="284" y="12">自动推理强度</text><use href="#chevron" class="icon" x="385" y="10"/>
+    </g>
+    <g transform="translate(8 68)">
+      <text y="12" class="secondary">核验</text>
+      <rect class="field" x="52" width="216" height="24" rx="6"/><text x="62" y="12">review-model · fixture</text><use href="#chevron" class="icon" x="251" y="10"/>
+      <rect class="field" x="274" width="128" height="24" rx="6"/><text x="284" y="12">高</text><use href="#chevron" class="icon" x="385" y="10"/>
+    </g>
+    <g transform="translate(8 98)">
+      <text y="12" class="secondary">执行</text>
+      <rect class="field" x="52" width="216" height="24" rx="6"/><text x="62" y="12">继承会话模型</text><use href="#chevron" class="icon" x="251" y="10"/>
+      <rect class="field" x="274" width="128" height="24" rx="6"/><text x="284" y="12">自动推理强度</text><use href="#chevron" class="icon" x="385" y="10"/>
+    </g>
+    <g transform="translate(8 128)">
+      <text y="12" class="secondary">批处理</text>
+      <rect class="field" x="52" width="216" height="24" rx="6"/><text x="62" y="12">继承会话模型</text><use href="#chevron" class="icon" x="251" y="10"/>
+      <rect class="field" x="274" width="128" height="24" rx="6"/><text x="284" y="12">自动推理强度</text><use href="#chevron" class="icon" x="385" y="10"/>
+    </g>
+    <rect class="field" x="359" y="161" width="42" height="24" rx="6"/><text x="368" y="173">取消</text>
+    <rect class="field" x="407" y="161" width="45" height="24" rx="6"/><text x="417" y="173">应用</text>
+  </g>
+  <rect class="field" x="16" y="306" width="82" height="24" rx="7"/><text x="33" y="318">新建模板</text>
+</svg>

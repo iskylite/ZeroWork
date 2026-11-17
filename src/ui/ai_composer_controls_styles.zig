@@ -11,7 +11,7 @@ pub fn width(kind: Kind) f32 {
         .effort => 276,
         .usage => 288,
         .execution => 296,
-        // V0.7 §10.1: mode chip menu (Auto/Swarm/Boost + template submenu).
+        // V0.7 §10.1: mode chip menu (Auto/Swarm/Boost).
         .mode => 296,
     };
 }
@@ -25,7 +25,7 @@ pub fn height(kind: Kind) f32 {
         .effort => 86,
         .usage => 156,
         .execution => 218,
-        .mode => 190,
+        .mode => 158,
     };
 }
 pub fn row() ui.BoxStyle {
@@ -36,6 +36,12 @@ pub fn trailing() ui.BoxStyle {
 }
 pub fn chip(w: f32, radius: f32) ui.BoxStyle {
     return .{ .width = .{ .px = w }, .height = .{ .px = 24 }, .direction = .row, .align_items = .center, .justify = .start, .padding = .{ .left = 8, .right = 8 }, .gap = 4, .background = theme.popupAction(), .border = .{ .width = 0, .radius = radius }, .flex_shrink = 0 };
+}
+pub fn modeChip(compact: bool, active: bool) ui.BoxStyle {
+    var result = if (compact) iconButton(8) else chip(84, 8);
+    if (compact) result.width = .{ .px = 28 };
+    if (active) result.background = theme.popupSelection();
+    return result;
 }
 pub fn iconButton(radius: f32) ui.BoxStyle {
     var result = chip(24, radius);

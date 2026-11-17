@@ -34,7 +34,7 @@ pub const contribution: host.Contribution = .{ .authority = .conversation_contex
     \\{
     \\  "type":"object","additionalProperties":false,"required":["action"],
     \\  "properties":{
-    \\    "action":{"type":"string","enum":["create","reuse","list","send","stop","wait_events"],"description":"Use only the fields documented for the selected action."},
+    \\    "action":{"type":"string","enum":["create","reuse","list","send","stop","wait_events","verify_boost"],"description":"Use only the fields documented for the selected action."},
     \\    "request_key":{"type":"string","minLength":1,"maxLength":128,"description":"Optional for create and reuse; required for send. Omit on create/reuse to let the host derive a stable key from the task content—identical retries then deduplicate automatically. Reuse a key only when retrying the same request."},
     \\    "name":{"type":"string","minLength":1,"maxLength":32,"description":"Optional for create only. A short display label (1-32 characters); not required to be unique."},
     \\    "text":{"type":"string","minLength":1,"maxLength":32768,"description":"Required for create and reuse as task instructions, or for send as the message."},
@@ -51,13 +51,14 @@ pub const contribution: host.Contribution = .{ .authority = .conversation_contex
     \\    "model":{"type":"object","additionalProperties":false,"description":"Optional for create only. Set both provider_id and model_id.","properties":{"provider_id":{"type":"string"},"model_id":{"type":"string"}},"required":["provider_id","model_id"]},
     \\    "effort":{"type":"string","enum":["none","low","medium","high","xhigh","max","ultra"],"description":"Optional for create only."},
     \\    "after_sequence":{"type":"integer","minimum":0,"description":"Optional for wait_events only. Use the last returned sequence watermark, or 0 for the first read. Omit to receive only events newer than the last delivered report."},
+    \\    "verification":{"type":"array","minItems":1,"maxItems":16,"description":"Required for verify_boost only. Each item checks one original requirement and cites observed evidence.","items":{"type":"object","additionalProperties":false,"required":["requirement","passed","detail"],"properties":{"requirement":{"type":"string","maxLength":512},"passed":{"type":"boolean"},"detail":{"type":"string","maxLength":512}}}},
     \\    "wait_ms":{"type":"integer","minimum":0,"maximum":10000,"description":"Optional for wait_events only. Defaults to 0."}
     \\  }
     \\}
     ,
     .max_argument_bytes = 48 * 1024,
 } };
-pub const Action = enum { create, reuse, list, send, stop, wait_events };
+pub const Action = enum { create, reuse, list, send, stop, wait_events, verify_boost };
 pub const Purpose = enum { work, verify, challenge };
 pub const Request = struct {
     action: Action,
@@ -85,6 +86,7 @@ pub const Request = struct {
     model: ?@import("provider_config.zig").ModelSelection = null,
     effort: ?@import("provider.zig").Effort = null,
     after_sequence: ?u64 = null,
+    verification: ?[]const budget.VerificationItem = null,
     wait_ms: u16 = 0,
     /// Wire keys stay agent_id/task_id (V0.4 schema); values now also accept
     /// "@N" seq references and unique bare labels (V0.7 §2.1). Parsing goes
@@ -107,6 +109,7 @@ pub const Request = struct {
         model: ?@import("provider_config.zig").ModelSelection = null,
         effort: ?@import("provider.zig").Effort = null,
         after_sequence: ?u64 = null,
+        verification: ?[]const budget.VerificationItem = null,
         wait_ms: u16 = 0,
     };
     fn remapReferences(allocator: std.mem.Allocator, value: std.json.Value) !std.json.Value {
@@ -147,7 +150,7 @@ pub const Request = struct {
         return init(parsed);
     }
     fn init(shaped: Shape) @This() {
-        return .{ .action = shaped.action, .purpose = shaped.purpose, .local_files = shaped.local_files, .request_key = shaped.request_key, .name = shaped.name, .text = shaped.text, .agent_ref = shaped.agent_ref, .task_ref = shaped.task_ref, .session_refs = shaped.session_refs, .context_mode = shaped.context_mode, .reusable = shaped.reusable, .role = shaped.role, .depends_on = shaped.depends_on, .challenge_target = shaped.challenge_target, .model = shaped.model, .effort = shaped.effort, .after_sequence = shaped.after_sequence, .wait_ms = shaped.wait_ms };
+        return .{ .action = shaped.action, .purpose = shaped.purpose, .local_files = shaped.local_files, .request_key = shaped.request_key, .name = shaped.name, .text = shaped.text, .agent_ref = shaped.agent_ref, .task_ref = shaped.task_ref, .session_refs = shaped.session_refs, .context_mode = shaped.context_mode, .reusable = shaped.reusable, .role = shaped.role, .depends_on = shaped.depends_on, .challenge_target = shaped.challenge_target, .model = shaped.model, .effort = shaped.effort, .after_sequence = shaped.after_sequence, .verification = shaped.verification, .wait_ms = shaped.wait_ms };
     }
 };
 pub fn parse(a: std.mem.Allocator, value: std.json.Value) !std.json.Parsed(Request) {
@@ -174,12 +177,13 @@ pub fn parse(a: std.mem.Allocator, value: std.json.Value) !std.json.Parsed(Reque
     if (r.action != .send and r.action != .create and r.action != .reuse and (r.text != null or r.request_key != null)) return error.InvalidArguments;
     if (r.action != .send and r.action != .stop and r.task_ref != null) return error.InvalidArguments;
     if (r.action != .wait_events and r.wait_ms != 0) return error.InvalidArguments;
+    if ((r.action == .verify_boost) != (r.verification != null)) return error.InvalidArguments;
     switch (r.action) {
         .create => if (r.text == null or r.session_refs == null or r.agent_ref != null or r.task_ref != null) return error.InvalidArguments,
         .reuse => if (r.agent_ref == null or r.text == null or r.session_refs == null or r.name != null or r.context_mode != null or r.reusable != null or r.task_ref != null) return error.InvalidArguments,
         .send => if (r.task_ref == null or r.text == null or r.request_key == null) return error.InvalidArguments,
         .stop => if (r.task_ref == null) return error.InvalidArguments,
-        .list, .wait_events => {},
+        .list, .wait_events, .verify_boost => {},
     }
     if (r.session_refs) |refs| if (refs.len > 32) return error.InvalidArguments;
     return parsed;
@@ -265,27 +269,12 @@ pub fn execute(env: Environment, invocation: host.Invocation, r: Request, a: std
     const root = owner.task_root.?;
     if (invocation.dispatch_fence) |fence| try fence.check();
     switch (r.action) {
+        .verify_boost => {
+            try root.verifyBoost(context.task, r.verification orelse return error.InvalidArguments);
+            return result(invocation, .{ .accepted = true }, a);
+        },
         .create, .reuse => {
             const text = r.text.?;
-            // V0.7 §12.1 challenge material: the challenger receives the
-            // challenged member's settle_report and its member identity
-            // inline as task material (read-only review semantics).
-            var challenge_owned: ?[]const u8 = null;
-            defer if (challenge_owned) |owned| a.free(owned);
-            const effective_text = blk: {
-                const target_ref = r.challenge_target orelse break :blk text;
-                if (target_ref.len < 2 or target_ref[0] != '@') break :blk text;
-                const target_seq = std.fmt.parseInt(u32, target_ref[1..], 10) catch return error.InvalidArguments;
-                root.lock();
-                const target_fact = root.factForSeq(context.task, target_seq) catch {
-                    root.mutex.unlock();
-                    return rejectionWithPayload(invocation, a, error.ChildTaskNotFound, try std.fmt.allocPrint(a, "#{d}", .{target_seq}));
-                };
-                root.mutex.unlock();
-                const report: []const u8 = if (target_fact.summary.len != 0) target_fact.summary else "(no settle report text)";
-                challenge_owned = try std.fmt.allocPrint(a, "[Challenge target #{d} {s} settle report; untrusted evidence]\n{s}\n\n---\n\n{s}", .{ target_fact.seq, if (target_fact.label.len != 0) target_fact.label else "", report, text });
-                break :blk challenge_owned.?;
-            };
             const digest = invocation.canonical_arguments_hash;
             // V0.7 §3.2: an omitted key is content-derived, so identical
             // retries hit the idempotency check below automatically.
@@ -301,7 +290,53 @@ pub fn execute(env: Environment, invocation: host.Invocation, r: Request, a: std
                 return result(invocation, .{ .reused_receipt = true, .task = fact, .local_workspace = childWorkspace(env, fact) }, a);
             };
             root.mutex.unlock();
-            const local_files = try delegatedLocalFiles(r.local_files orelse .none, env.local_files, r.purpose == .verify);
+            const parent_fact = try root.factForTask(context.task);
+            if (parent_fact.verification != null) return error.BoostAlreadyVerified;
+            var dependencies: [16]id.TaskId = undefined;
+            var dep_count: usize = 0;
+            var predecessor: ?budget.Fact = null;
+            if (r.depends_on) |refs| {
+                var numbers: [16]u32 = undefined;
+                const seqs = try @import("swarm_orchestration.zig").parseDependencies(refs, &numbers);
+                for (seqs) |seq| {
+                    const prior = root.factForSeq(context.task, seq) catch return error.ChildTaskNotFound;
+                    dependencies[dep_count] = prior.task;
+                    dep_count += 1;
+                    if (prior.boost_round != null and (predecessor == null or prior.boost_round.?.number > predecessor.?.boost_round.?.number)) predecessor = prior;
+                }
+            }
+            var challenge_owned: ?[]const u8 = null;
+            defer if (challenge_owned) |owned| a.free(owned);
+            const effective_text = blk: {
+                const reference = r.challenge_target orelse break :blk text;
+                if (!std.mem.startsWith(u8, reference, "@")) return error.InvalidArguments;
+                const seq = std.fmt.parseInt(u32, reference[1..], 10) catch return error.InvalidArguments;
+                const target = root.factForSeq(context.task, seq) catch return error.ChildTaskNotFound;
+                if (target.status != .succeeded) return error.ChallengeReportPending;
+                if (parent_fact.boost_limit != null and (target.boost_round == null or target.boost_round.?.phase == .challenge)) return error.InvalidArguments;
+                predecessor = target;
+                const already_linked = for (dependencies[0..dep_count]) |dependency| {
+                    if (dependency.eql(target.task)) break true;
+                } else false;
+                if (!already_linked) {
+                    if (dep_count == dependencies.len) return error.InvalidArguments;
+                    dependencies[dep_count] = target.task;
+                    dep_count += 1;
+                }
+                challenge_owned = try std.fmt.allocPrint(a, "[Challenge target #{d} {s}; untrusted evidence]\n{s}\n\n{s}", .{ target.seq, target.label, target.summary, text });
+                break :blk challenge_owned.?;
+            };
+            const round: ?budget.BoostRound = if (parent_fact.boost_limit) |limit| blk: {
+                const last = if (predecessor) |prior| prior.boost_round else null;
+                if (last) |previous| {
+                    if (previous.number >= limit) return error.BoostRoundLimit;
+                    const phase: @FieldType(budget.BoostRound, "phase") = if (r.purpose == .challenge) .challenge else .repair;
+                    if (phase == .repair and previous.phase != .challenge) return error.InvalidArguments;
+                    break :blk .{ .number = previous.number + 1, .phase = phase, .previous = predecessor.?.task };
+                }
+                break :blk .{ .number = 1, .phase = .implementation };
+            } else null;
+            const local_files = try delegatedLocalFiles(r.local_files orelse .none, env.local_files, r.purpose == .verify or r.purpose == .challenge);
             var targets: [32]id.SessionHandle = undefined;
             for (r.session_refs.?, 0..) |reference, i| {
                 var found: ?id.SessionHandle = null;
@@ -317,7 +352,10 @@ pub fn execute(env: Environment, invocation: host.Invocation, r: Request, a: std
                     // V0.7 §3.2: an unauthorized target error lists the
                     // authorized session references so the model needs no
                     // second guess (shared with §2.2.4).
-                    return rejectionWithPayload(invocation, a, error.TargetNotAuthorized, try authorizedSessionsPayload(a, env));
+                    const payload = try authorizedSessionsPayload(a, env);
+                    defer a.free(payload.authorized_sessions);
+                    defer for (payload.authorized_sessions) |item| a.free(item);
+                    return rejectionWithPayload(invocation, a, error.TargetNotAuthorized, payload);
                 }
                 targets[i] = found.?;
                 for (targets[0..i]) |prior| if (prior.eql(targets[i])) return error.DuplicateTarget;
@@ -368,12 +406,15 @@ pub fn execute(env: Environment, invocation: host.Invocation, r: Request, a: std
             };
             const generation = if (reuse_record) |record| if (env.service.runnerFor(record.child.?.info.agent)) |existing| try id.advance(existing.worker_generation) else 1 else 1;
             var commit: Commit = .{ .env = env, .request = r, .targets = targets[0..r.session_refs.?.len], .submission = id.SubmissionId.generate(), .label = label, .effective_key = effective_key, .effective_text = effective_text, .reuse_agent = reuse_agent };
-            var fact = root.launch(.{ .root = context.root_task, .task = id.TaskId.generate(), .parent = context.task, .conversation = .{}, .agent = .{}, .generation = generation, .request_key = effective_key, .label = label, .input_hash = digest, .read_only = r.purpose == .verify or r.purpose == .challenge, .local_files = local_files, .targets = targets[0..r.session_refs.?.len] }, &commit, Commit.run) catch |err| {
+            var fact = root.launch(.{ .root = context.root_task, .task = id.TaskId.generate(), .parent = context.task, .conversation = .{}, .agent = .{}, .generation = generation, .request_key = effective_key, .label = label, .input_hash = digest, .read_only = r.purpose == .verify or r.purpose == .challenge, .local_files = local_files, .targets = targets[0..r.session_refs.?.len], .dependencies = if (dep_count == 0) null else dependencies[0..dep_count], .boost_round = round }, &commit, Commit.run) catch |err| {
                 // V0.7 §3.5: budget errors carry {active count, limit,
                 // holders as #seq label} so the model can decide to stop one
                 // or wait instead of guessing from a bare error code.
                 if (err != error.ChildTaskLimit) return err;
-                return rejectionWithPayload(invocation, a, err, try childLimitPayload(a, root, context.task));
+                const payload = try childLimitPayload(a, root, context.task);
+                defer a.free(payload.holders);
+                defer for (payload.holders) |item| a.free(item);
+                return rejectionWithPayload(invocation, a, err, payload);
             };
             const record = commit.record.?;
             const runner = env.factory.install(env.factory.context, record, root, fact, commit.submission, effective_text) catch |err| {
@@ -393,66 +434,6 @@ pub fn execute(env: Environment, invocation: host.Invocation, r: Request, a: std
                 }
                 return error.ChildStartupFailed;
             };
-            // V0.7 §12.1 depends_on gate: the created task holds its active
-            // slot immediately, but the worker only starts once every listed
-            // dependency reached a terminal status. A failed/cancelled/
-            // interrupted/outcome_unknown dependency never auto-starts; the
-            // structured disclosure carries it for the parent to re-plan
-            // (re-dispatch, serialize or drop the branch).
-            var gated = false;
-            var blocked_seq: u32 = 0;
-            var blocked_status: []const u8 = "";
-            if (r.depends_on) |refs| {
-                const orchestration = @import("swarm_orchestration.zig");
-                const dependencies = orchestration.parseDependencies(refs) catch |err| return rejectionWithPayload(invocation, a, err, .{ .reason = "invalid depends_on references" });
-                orchestration.containsSelf(dependencies, fact.seq) catch |err| return rejectionWithPayload(invocation, a, err, try std.fmt.allocPrint(a, "dependency cycle through #{d}", .{fact.seq}));
-                // Resolve dependencies under one lock; the facts array is
-                // scanned directly (factForSeq takes its own lock).
-                var resolved: [16]budget.Fact = undefined;
-                var resolved_count: usize = 0;
-                var missing: u32 = 0;
-                {
-                    root.lock();
-                    defer root.mutex.unlock();
-                    for (dependencies) |dep_seq| {
-                        var found: ?budget.Fact = null;
-                        for (root.facts[0..root.count]) |candidate| {
-                            if (candidate.parent != null and candidate.parent.?.eql(context.task) and candidate.seq == dep_seq) {
-                                found = candidate;
-                                break;
-                            }
-                        } else {
-                            missing = dep_seq;
-                            break;
-                        }
-                        resolved[resolved_count] = found.?;
-                        resolved_count += 1;
-                    }
-                }
-                if (missing != 0) return rejectionWithPayload(invocation, a, error.ChildTaskNotFound, try std.fmt.allocPrint(a, "#{d}", .{missing}));
-                for (resolved[0..resolved_count]) |dep| {
-                    if (budget.terminal(dep.status)) {
-                        if (dep.status != .succeeded) {
-                            blocked_seq = dep.seq;
-                            blocked_status = @tagName(dep.status);
-                            break;
-                        }
-                    } else gated = true;
-                }
-            }
-            if (blocked_seq != 0) {
-                // The task keeps its slot but never auto-starts; the parent
-                // decides the branch. The structured result discloses the
-                // unsatisfied dependency (never hides it).
-                try root.state(fact.task, .queued_dependency, "dependency failed");
-                return result(invocation, .{ .task = fact, .gated = true, .blocked_dependency = try std.fmt.allocPrint(a, "#{d} {s}", .{ blocked_seq, blocked_status }), .local_workspace = childWorkspace(env, fact) }, a);
-            }
-            if (gated) {
-                // Waiting dependencies: hold the slot, defer the start to the
-                // host's dependency sweep (turn_manager deliver pass).
-                try root.state(fact.task, .queued_dependency, "");
-                return result(invocation, .{ .task = fact, .gated = true, .local_workspace = childWorkspace(env, fact) }, a);
-            }
             env.service.pump(runner) catch |err| {
                 initializeFailedStartup(env.service, runner, record, root, fact, commit.submission);
                 runner.failure = err;
@@ -460,8 +441,8 @@ pub fn execute(env: Environment, invocation: host.Invocation, r: Request, a: std
                 try root.state(fact.task, .settling, @errorName(err));
                 try env.service.endConversation(try env.service.store.fence(record.id), id.HostOperationId.generate());
             };
-            fact.status = if (runner.failure != null) .failed else .running;
-            return result(invocation, .{ .task = fact, .local_workspace = childWorkspace(env, fact) }, a);
+            fact = try root.factForTask(fact.task);
+            return result(invocation, .{ .task = fact, .gated = fact.status == .queued_dependency, .local_workspace = childWorkspace(env, fact) }, a);
         },
         .list => {
             // V0.7 §3.4/G3: panel-ready rows. This is the single structure
@@ -530,7 +511,9 @@ pub fn execute(env: Environment, invocation: host.Invocation, r: Request, a: std
             root.mutex.unlock();
             if (budget.terminal(fact.status)) return error.TaskAlreadyFinished;
             const child_runner = env.service.runnerFor(fact.agent) orelse return error.ChildTaskNotFound;
-            if (child_runner.context == null or !child_runner.context.?.task.eql(fact.task) or child_runner.worker_generation != fact.generation) return error.ChildTaskNotFound;
+            const queued = child_runner.pending_task != null and child_runner.pending_task.?.eql(fact.task);
+            if (!queued and (child_runner.context == null or !child_runner.context.?.task.eql(fact.task) or child_runner.worker_generation != fact.generation)) return error.ChildTaskNotFound;
+            if (queued and r.action != .stop) return error.ChildTaskNotFound;
             const ticket = try env.service.store.fence(fact.conversation);
             if (r.action == .stop) {
                 if (fact.user_waits != 0) return error.ChildAwaitingUser;

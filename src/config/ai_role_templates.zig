@@ -139,6 +139,34 @@ pub const Stored = struct {
     models: [5]?[]const u8 = @splat(null),
     /// Per-slot efforts (null = adapted/inherit).
     efforts: [5]?@import("../ai/provider.zig").Effort = @splat(null),
+    /// Older configurations store only a model ID. Resolve it only when unique.
+    providers: [5]?[]const u8 = @splat(null),
+    is_default: bool = false,
+
+    pub fn active(templates: []const Stored) ?Stored {
+        for (templates) |item| if (item.is_default) return item;
+        return null;
+    }
+
+    pub fn selection(self: Stored, ai: @import("config.zig").Ai, role: Role) ?@import("../ai/provider_config.zig").ModelSelection {
+        const index = @intFromEnum(role);
+        const model_id = self.models[index] orelse return null;
+        const provider_config = @import("../ai/provider_config.zig");
+        if (self.providers[index]) |provider_id| {
+            const key: provider_config.ModelSelection = .{ .provider_id = provider_id, .model_id = model_id };
+            _ = provider_config.fromSettingsSelection(ai, key) catch return null;
+            return key;
+        }
+        var resolved: ?provider_config.ModelSelection = null;
+        for (ai.providers[0..@min(ai.provider_count, ai.providers.len)]) |provider| {
+            if (!provider.enabled) continue;
+            const key: provider_config.ModelSelection = .{ .provider_id = provider_config.providerId(provider), .model_id = model_id };
+            if (!provider_config.hasConfiguredModel(ai, key)) continue;
+            if (resolved != null) return null;
+            resolved = key;
+        }
+        return resolved;
+    }
     /// Slot index by role order parent=0,planner=1,verifier=2,worker=3,batch=4.
     pub fn encode(a: std.mem.Allocator, list: []const Stored) ![]const u8 {
         return std.json.Stringify.valueAlloc(a, list, .{});
@@ -150,7 +178,11 @@ pub const Stored = struct {
         };
     }
     pub fn validate(self: Stored) !void {
-        if (std.mem.trim(u8, self.name, " \t\r\n").len == 0 or self.name.len > 64 or !std.unicode.utf8ValidateSlice(self.name)) return error.InvalidRoleTemplate;
+        if (std.mem.trim(u8, self.name, " \t\r\n").len == 0 or self.name.len > 64 or !std.unicode.utf8ValidateSlice(self.name) or std.mem.eql(u8, self.name, builtin.name)) return error.InvalidRoleTemplate;
+        for (self.models, self.providers) |model, provider| {
+            if (model) |value| if (value.len == 0 or !std.unicode.utf8ValidateSlice(value)) return error.InvalidRoleTemplate;
+            if (provider) |value| if (model == null or value.len == 0 or !std.unicode.utf8ValidateSlice(value)) return error.InvalidRoleTemplate;
+        }
     }
 };
 
