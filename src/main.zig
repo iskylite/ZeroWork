@@ -8647,9 +8647,15 @@ const AiHost = struct {
             var handles: [@import("ai/tool_scope.zig").max_targets]@import("host/identity.zig").SessionHandle = undefined;
             var terminals: @TypeOf(handles) = undefined;
             var terminal_count: usize = 0;
-            if (allowed.memberIds().len > handles.len) return error.TooManyToolTargets;
+            if (allowed.memberIds().len > handles.len) {
+                self_call.result = try @import("ai/child_gateway.zig").rejectAdmission(self_call.invocation, self_call.allocator, error.TooManyToolTargets);
+                return;
+            }
             for (allowed.memberIds(), 0..) |session_id, i| {
-                const tab = value.tabForSession(session_id) orelse return error.StaleSession;
+                const tab = value.tabForSession(session_id) orelse {
+                    self_call.result = try @import("ai/child_gateway.zig").rejectAdmission(self_call.invocation, self_call.allocator, error.StaleSession);
+                    return;
+                };
                 handles[i] = tab.content_owner.session;
                 if (value.workspaceTerminal(tab)) {
                     terminals[terminal_count] = handles[i];
@@ -8886,7 +8892,7 @@ const AiHost = struct {
         defer history.deinit();
         var inherited: ?@import("ai/session_lifecycle.zig").Store.Inherited = null;
         if (request.action == .create and @import("ai/child_agent.zig").resolve(.{ .context_mode = self.request_config.?.value.ai.child_context_mode, .reuse_policy = self.requestChildReuse() }, request.context_mode, request.reusable).context_mode == .inherit) {
-            const loop = self.managerRef().tool_run orelse return error.NoStableCheckpoint;
+            const loop = self.managerRef().tool_run orelse return gateway.rejectAdmission(invocation, allocator, error.NoStableCheckpoint);
             var targets: [32]@import("host/identity.zig").SessionHandle = undefined;
             var ids: [32]u64 = undefined;
             for (request.session_refs.?, 0..) |reference, i| {
@@ -8894,13 +8900,16 @@ const AiHost = struct {
                     const current = try @import("ai/host_queries.zig").sessionRef(allocator, invocation.context, child.owner);
                     defer allocator.free(current);
                     if (std.mem.eql(u8, reference, current)) break child.owner;
-                } else return error.TargetNotAuthorized;
+                } else return gateway.rejectAdmission(invocation, allocator, error.TargetNotAuthorized);
                 targets[i] = handle;
                 ids[i] = @backingInt(handle.session_id);
             }
             var child_scope = loop.scope;
             child_scope.inventory = ids[0..request.session_refs.?.len];
-            history = try loop.snapshotForChild(allocator, invocation.call_id, child_scope, targets[0..request.session_refs.?.len]);
+            history = loop.snapshotForChild(allocator, invocation.call_id, child_scope, targets[0..request.session_refs.?.len]) catch |err| switch (err) {
+                error.InheritanceScopeProjectionRequired, error.InvalidInheritanceSnapshot => return gateway.rejectAdmission(invocation, allocator, err),
+                else => return err,
+            };
             inherited = .{ .source = .{ .conversation = invocation.context.conversation_id, .content_revision = self.attached_runner.?.record.?.content_revision, .turn = invocation.turn_id, .message_count = history.messages.len }, .messages = history.messages };
         }
         var call: ChildGatewayCall = .{ .host = self, .invocation = invocation, .request = request, .inherited = inherited, .allocator = allocator };
@@ -8915,7 +8924,7 @@ const AiHost = struct {
         defer if (request.action == .wait_events) root.state(task, .running, "") catch {};
         while (true) {
             try bridge.callController(&call, ChildGatewayCall.run, cancel);
-            if (request.action != .wait_events or call.has_events or (@import("ai/retry.zig").Clock{}).now() - started >= @as(i128, request.wait_ms) * std.time.ns_per_ms) return call.result.?;
+            if (request.action != .wait_events or call.result.?.status == .rejected or call.has_events or (@import("ai/retry.zig").Clock{}).now() - started >= @as(i128, request.wait_ms) * std.time.ns_per_ms) return call.result.?;
             call.result.?.deinit(allocator);
             call.result = null;
             if (cancel) |token| if (token.isCancelled()) return error.Cancelled;

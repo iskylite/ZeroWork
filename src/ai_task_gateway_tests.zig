@@ -192,11 +192,11 @@ test "v0.4 task gateway atomic launch idempotency report delivery and worker set
     try std.testing.expectEqual(@as(usize, 2), parent.task_root.?.count);
     var child_env = env;
     child_env.authority = service.runners.items[1].context.?.authority();
-    try std.testing.expectError(error.ChildCannotDelegate, invoke(child_env, "{\"action\":\"list\"}"));
+    try expectAdmissionRejection(child_env, "{\"action\":\"list\"}", "ChildCannotDelegate");
     var repeated = try invoke(env, create);
     defer repeated.deinit(a);
     try std.testing.expectEqual(@as(usize, 1), child.calls.load(.acquire));
-    try std.testing.expectError(error.ChildRequestConflict, invoke(env, "{\"action\":\"create\",\"request_key\":\"one\",\"name\":\"reader\",\"text\":\"changed\",\"session_refs\":[]}"));
+    try expectAdmissionRejection(env, "{\"action\":\"create\",\"request_key\":\"one\",\"name\":\"reader\",\"text\":\"changed\",\"session_refs\":[]}", "ChildRequestConflict");
     // V0.7 §3.2: unauthorized targets return a rejected payload listing the
     // authorized session references instead of a bare error code.
     var outside = try invoke(env, "{\"action\":\"create\",\"request_key\":\"outside\",\"name\":\"reader\",\"text\":\"x\",\"session_refs\":[\"s1:outside:99:1\"]}");
@@ -294,6 +294,19 @@ test "v0.7 send and stop on a settled child reject with a payload instead of out
     // The settled child stays untouched: no inbox submission, no reopen.
     try std.testing.expectEqual(@as(usize, 1), child.calls.load(.acquire));
 }
+fn expectAdmissionRejection(env: gateway.Environment, json: []const u8, code: []const u8) !void {
+    const before = env.service.store.records.items.len;
+    var response = try invoke(env, json);
+    defer response.deinit(a);
+    try std.testing.expectEqual(.rejected, response.status);
+    try std.testing.expect(!response.receipt.side_effect_started and response.receipt.local_released and !response.receipt.remote_effect_unknown);
+    try std.testing.expectEqual(before, env.service.store.records.items.len);
+    const parsed = try std.json.parseFromSlice(std.json.Value, a, response.blocks[0].structured, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings(code, parsed.value.object.get("error_code").?.string);
+    try std.testing.expectEqualStrings("child_admission", parsed.value.object.get("details").?.object.get("stage").?.string);
+}
+
 fn expectLocalFileRejection(env: gateway.Environment, json: []const u8, reason: []const u8) !void {
     const record_count = env.service.store.records.items.len;
     const runner_count = env.service.runners.items.len;
@@ -810,7 +823,7 @@ test "v0.4 task readonly verification launches a new child task while original u
     defer a.free(reference);
     const work = try std.fmt.allocPrint(a, "{{\"action\":\"reuse\",\"request_key\":\"work\",\"agent_id\":\"{s}\",\"text\":\"never replay\",\"session_refs\":[\"{s}\"]}}", .{ std.fmt.bytesToHex(record.child.?.info.agent.bytes, .lower), reference });
     defer a.free(work);
-    try std.testing.expectError(error.ChildNeedsVerification, invoke(env, work));
+    try expectAdmissionRejection(env, work, "ChildNeedsVerification");
     const verify = try std.fmt.allocPrint(a, "{{\"action\":\"reuse\",\"purpose\":\"verify\",\"request_key\":\"verify\",\"agent_id\":\"{s}\",\"text\":\"only observe current state\",\"session_refs\":[\"{s}\"]}}", .{ std.fmt.bytesToHex(record.child.?.info.agent.bytes, .lower), reference });
     defer a.free(verify);
     var response = try invoke(env, verify);
@@ -827,5 +840,5 @@ test "v0.4 task readonly verification launches a new child task while original u
     try std.testing.expect(root.facts[2].read_only and root.facts[2].targets.?[0].eql(target));
     try std.testing.expect(!root.facts[1].task.eql(root.facts[2].task));
     try std.testing.expectEqual(budget.Status.succeeded, root.facts[2].status);
-    try std.testing.expectError(error.ChildNeedsVerification, invoke(env, work));
+    try expectAdmissionRejection(env, work, "ChildNeedsVerification");
 }

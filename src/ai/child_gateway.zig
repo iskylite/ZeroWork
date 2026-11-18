@@ -313,7 +313,10 @@ fn derivedRequestKey(r: Request) [65]u8 {
     return key;
 }
 pub fn execute(env: Environment, invocation: host.Invocation, r: Request, a: std.mem.Allocator) !host.Result {
-    const owner = try parent(env);
+    const owner = parent(env) catch |err| switch (err) {
+        error.ChildCannotDelegate, error.NoActiveParentTask => return rejectAdmission(invocation, a, err),
+        else => return err,
+    };
     const context = owner.context.?;
     const parent_fence = owner.commit_fence orelse context.fence;
     const root = owner.task_root.?;
@@ -336,7 +339,7 @@ pub fn execute(env: Environment, invocation: host.Invocation, r: Request, a: std
             root.lock();
             for (root.facts[0..root.count]) |fact| if (std.mem.eql(u8, fact.request_key, effective_key) and fact.parent != null) {
                 root.mutex.unlock();
-                if (!std.mem.eql(u8, &fact.input_hash, &digest)) return error.ChildRequestConflict;
+                if (!std.mem.eql(u8, &fact.input_hash, &digest)) return rejectAdmission(invocation, a, error.ChildRequestConflict);
                 return result(invocation, .{ .reused_receipt = true, .task = fact, .local_workspace = childWorkspace(env, fact) }, a);
             };
             root.mutex.unlock();
@@ -408,7 +411,7 @@ pub fn execute(env: Environment, invocation: host.Invocation, r: Request, a: std
                     return rejectionWithPayload(invocation, a, error.TargetNotAuthorized, payload);
                 }
                 targets[i] = found.?;
-                for (targets[0..i]) |prior| if (prior.eql(targets[i])) return error.DuplicateTarget;
+                for (targets[0..i]) |prior| if (prior.eql(targets[i])) return rejectAdmission(invocation, a, error.DuplicateTarget);
                 try env.live.validateDirectory(&.{@backingInt(targets[i].session_id)});
             }
             if (local_files != .none and !hasWorkspaceTarget(env.workspace_targets, targets[0..r.session_refs.?.len]))
@@ -416,14 +419,14 @@ pub fn execute(env: Environment, invocation: host.Invocation, r: Request, a: std
             const reuse_agent = if (r.agent_ref) |reference| try resolveAgent(root, context.task, reference) else null;
             const reuse_record = if (reuse_agent) |agent| try env.service.store.childFor(parent_fence, agent) else null;
             if (reuse_record) |record| {
-                if (!life.Store.childPreferences(record).reusable) return error.ChildNotReusable;
+                if (!life.Store.childPreferences(record).reusable) return rejectAdmission(invocation, a, error.ChildNotReusable);
                 // Unknown effects retain their original replay gate. Reusing a
                 // fresh Worker cannot turn an unresolved attempt into permission.
                 const verify_only = r.purpose == .verify;
                 var has_fact = false;
                 for (env.service.store.task_facts.items) |prior| if (prior.fact.agent.eql(record.child.?.info.agent) and (prior.fact.status == .outcome_unknown or prior.fact.status == .interrupted)) {
                     has_fact = true;
-                    try checkReuseWithLocalFiles(prior.fact, targets[0..r.session_refs.?.len], verify_only, local_files);
+                    checkReuseWithLocalFiles(prior.fact, targets[0..r.session_refs.?.len], verify_only, local_files) catch |err| return rejectAdmission(invocation, a, err);
                 };
                 // The replay index contains restored facts. Current process
                 // roots own live/final facts until shutdown; a successful
@@ -433,11 +436,11 @@ pub fn execute(env: Environment, invocation: host.Invocation, r: Request, a: std
                     defer prior_root.mutex.unlock();
                     for (prior_root.facts[0..prior_root.count]) |prior| if (prior.agent.eql(record.child.?.info.agent) and (prior.status == .outcome_unknown or prior.status == .interrupted)) {
                         has_fact = true;
-                        try checkReuseWithLocalFiles(prior, targets[0..r.session_refs.?.len], verify_only, local_files);
+                        checkReuseWithLocalFiles(prior, targets[0..r.session_refs.?.len], verify_only, local_files) catch |err| return rejectAdmission(invocation, a, err);
                     };
                 }
-                if (!has_fact and !verify_only and (r.session_refs.?.len != 0 or local_files == .write)) if (env.service.runnerFor(record.child.?.info.agent)) |prior| if (prior.task_outcome == .outcome_unknown) return error.ChildNeedsVerification;
-                if (env.service.runnerFor(record.child.?.info.agent)) |existing| if (existing.worker != null or existing.thread != null or existing.pending_commit or existing.pending_notify or existing.agent.current != null) return error.ResourceCleanupPending;
+                if (!has_fact and !verify_only and (r.session_refs.?.len != 0 or local_files == .write)) if (env.service.runnerFor(record.child.?.info.agent)) |prior| if (prior.task_outcome == .outcome_unknown) return rejectAdmission(invocation, a, error.ChildNeedsVerification);
+                if (env.service.runnerFor(record.child.?.info.agent)) |existing| if (existing.worker != null or existing.thread != null or existing.pending_commit or existing.pending_notify or existing.agent.current != null) return rejectAdmission(invocation, a, error.ResourceCleanupPending);
             }
             const label = r.name orelse "";
             const Commit = struct {
@@ -687,6 +690,12 @@ fn rejectionWithPayload(invocation: host.Invocation, a: std.mem.Allocator, failu
     const blocks = try a.alloc(host.Block, 1);
     blocks[0] = .{ .structured = body };
     return .{ .status = .rejected, .blocks = blocks, .receipt = .{ .conversation_id = invocation.context.conversation_id, .task_id = invocation.context.task_id, .operation_id = invocation.operation_id, .binding_revision = invocation.context.binding_revision } };
+}
+
+/// Emit explicit evidence only from an admission site known not to have
+/// dispatched. The same error could have different meaning after launch.
+pub fn rejectAdmission(invocation: host.Invocation, a: std.mem.Allocator, failure: anyerror) !host.Result {
+    return rejectionWithPayload(invocation, a, failure, .{ .stage = "child_admission" });
 }
 
 const LocalFileRejection = enum { parent_file_authority, missing_workspace_target };
