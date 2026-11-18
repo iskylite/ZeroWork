@@ -795,7 +795,16 @@ test "local recording captures real zsh output resize frozen policy and exit arc
         rig.discard();
         pause();
     }
-    try service.exportRecording(.cast, std.testing.io, sandbox.tmp.dir, "live.cast");
+    const until_export = native.zw_local_monotonic_ms() + 5000;
+    while (true) {
+        service.exportRecording(.cast, std.testing.io, sandbox.tmp.dir, "live.cast") catch |err| {
+            // WorkerBusy occurs before touching the export path.
+            if (err != error.WorkerBusy or native.zw_local_monotonic_ms() >= until_export) return err;
+            pause();
+            continue;
+        };
+        break;
+    }
     const cast = try sandbox.tmp.dir.readFileAlloc(std.testing.io, "live.cast", allocator, .limited(2 * 1024 * 1024));
     defer allocator.free(cast);
     try std.testing.expect(std.mem.indexOf(u8, cast, "RECORD_OUTPUT") != null);
