@@ -1608,7 +1608,7 @@ test "one model response dispatches more than sixteen tool calls" {
     try http.validateToolMessages(manager.tool_run.?.request);
 }
 
-test "tool diagnostics recover from missing child authority without lifting unknown guard" {
+test "tool diagnostics recover from child admission rejections without lifting unknown guard" {
     const tools = @import("plugin_tools.zig");
     const child = @import("child_gateway.zig");
     const identity = @import("../host/identity.zig");
@@ -1627,7 +1627,8 @@ test "tool diagnostics recover from missing child authority without lifting unkn
             self.calls += 1;
             return switch (self.calls) {
                 1 => child.rejectLocalFiles(invocation, allocator, .missing_workspace_target, .read, .read),
-                2 => child.result(invocation, .{ .accepted = true }, allocator),
+                2 => child.rejectAdmission(invocation, allocator, error.InheritanceScopeProjectionRequired),
+                3 => child.result(invocation, .{ .accepted = true }, allocator),
                 else => error.ChildStartupFailed,
             };
         }
@@ -1644,17 +1645,22 @@ test "tool diagnostics recover from missing child authority without lifting unkn
     try std.testing.expect(!rejected.receipt.side_effect_started and rejected.receipt.local_released and !rejected.receipt.remote_effect_unknown);
     try std.testing.expect(!loop.uncertain);
     try std.testing.expect(std.mem.indexOf(u8, rejected.blocks[0].structured, "missing_workspace_target") != null);
+    const narrowed: provider.ToolCall = .{ .id = "narrowed-inherited-scope", .name = wire[0].name(), .arguments = "{\"action\":\"create\",\"text\":\"test\",\"session_refs\":[],\"context_mode\":\"inherit\"}" };
+    try loop.complete("", &.{narrowed}, callbacks, .{}, 1, null);
+    try std.testing.expectEqual(.rejected, loop.records.items[1].host_result.?.status);
+    try std.testing.expect(!loop.uncertain);
+    try std.testing.expect(std.mem.indexOf(u8, loop.records.items[1].result_body.?, "context_mode=independent") != null);
     var good: provider.ToolCall = .{ .id = "corrected-child", .name = wire[0].name(), .arguments = "{\"action\":\"create\",\"text\":\"test\",\"session_refs\":[]}" };
     try loop.complete("", &.{good}, callbacks, .{}, 1, null);
-    try std.testing.expectEqual(.succeeded, loop.records.items[1].host_result.?.status);
-    try std.testing.expectEqual(@as(usize, 2), gateway.calls);
+    try std.testing.expectEqual(.succeeded, loop.records.items[2].host_result.?.status);
+    try std.testing.expectEqual(@as(usize, 3), gateway.calls);
     good.id = "actual-unknown";
     try loop.complete("", &.{good}, callbacks, .{}, 1, null);
     try std.testing.expect(loop.uncertain);
     good.id = "denied-followup";
     try loop.complete("", &.{good}, callbacks, .{}, 1, null);
-    try std.testing.expectEqual(@as(usize, 3), gateway.calls);
-    try std.testing.expect(std.mem.indexOf(u8, loop.records.items[3].result_body.?, "EarlierToolOutcomeUnknown") != null);
+    try std.testing.expectEqual(@as(usize, 4), gateway.calls);
+    try std.testing.expect(std.mem.indexOf(u8, loop.records.items[4].result_body.?, "EarlierToolOutcomeUnknown") != null);
 }
 
 test "tool diagnostics distinguishes JSON syntax object type and missing search pattern" {

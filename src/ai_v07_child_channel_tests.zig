@@ -174,7 +174,10 @@ test "v0.7 create 省略 request_key/name 内容派生幂等命中" {
     defer second_child.deinit(a);
     try std.testing.expectEqual(@as(usize, 3), service.store.records.items.len);
     // 同一显式键 + 不同内容报 ChildRequestConflict。
-    try std.testing.expectError(error.ChildRequestConflict, invoke(env, "{\"action\":\"create\",\"request_key\":\"k1\",\"text\":\"内容不同\",\"session_refs\":[]}"));
+    var conflict = try invoke(env, "{\"action\":\"create\",\"request_key\":\"k1\",\"text\":\"内容不同\",\"session_refs\":[]}");
+    defer conflict.deinit(a);
+    try std.testing.expectEqual(.rejected, conflict.status);
+    try std.testing.expect(std.mem.indexOf(u8, conflict.blocks[0].structured, "ChildRequestConflict") != null);
     // 让 worker 完成并收尾，避免测试进程挂起。
     child.release.store(true, .release);
     const start = (Clock{}).now();
@@ -315,8 +318,13 @@ test "v0.7 Boost verification waits for settlement and survives journal replay" 
     const child = try service.store.registerChild(fence, .{ .name = "实现", .request_key = "implement" }, null);
     const child_task = id.TaskId.generate();
     try root.add(.{
-        .root = root_id, .task = child_task, .parent = root_id, .conversation = child.id,
-        .agent = child.child.?.info.agent, .generation = 1, .request_key = "implement",
+        .root = root_id,
+        .task = child_task,
+        .parent = root_id,
+        .conversation = child.id,
+        .agent = child.child.?.info.agent,
+        .generation = 1,
+        .request_key = "implement",
         .boost_round = .{ .number = 1, .phase = .implementation },
     });
     const checks = [_]budget.VerificationItem{
