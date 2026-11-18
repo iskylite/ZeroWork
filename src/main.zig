@@ -8681,18 +8681,22 @@ const AiHost = struct {
                 const template = templates.Stored.active(ai.child_role_templates);
                 const configured = if (template) |item| item.selection(ai, role) else null;
                 const selection = request.model orelse configured orelse source.controls.model;
-                _ = try ai_provider_config.fromSettingsSelection(ai, selection);
-                if (request.effort) |effort| {
-                    try ai_provider_config.validateEffort(ai, selection, effort);
-                } else if (template) |item| {
+                if (try @import("ai/child_gateway.zig").rejectInvalidModelSelection(self_call.invocation, self_call.allocator, ai, selection, request.effort)) |result| {
+                    self_call.result = result;
+                    return;
+                }
+                if (request.effort == null) if (template) |item| {
                     const slot = @backingInt(role);
                     const preferred = if (item.models[slot] != null and configured == null)
                         source.controls.effort
                     else
                         item.efforts[slot] orelse templates.adaptedEffort(role) orelse source.controls.effort;
-                    const supported = try ai_provider_config.supportedEfforts(ai, selection);
+                    const supported = ai_provider_config.supportedEfforts(ai, selection) catch |err| {
+                        self_call.result = try @import("ai/child_gateway.zig").rejectAdmission(self_call.invocation, self_call.allocator, err);
+                        return;
+                    };
                     request.effort = if (preferred) |effort| ai_provider.Effort.supportedAtOrBelow(supported, effort) else ai_provider.Effort.lowestSupported(supported);
-                }
+                };
                 request.model = selection;
             }
             var skill_ids: [32][]const u8 = undefined;

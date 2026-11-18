@@ -307,6 +307,36 @@ fn expectAdmissionRejection(env: gateway.Environment, json: []const u8, code: []
     try std.testing.expectEqualStrings("child_admission", parsed.value.object.get("details").?.object.get("stage").?.string);
 }
 
+test "child frozen model and effort errors reject before dispatch" {
+    const host = @import("ai/host_tools.zig");
+    const config = @import("config/config.zig");
+    const invocation: host.Invocation = .{
+        .context = .{ .conversation_id = .generate(), .task_id = .generate(), .binding = .{ .session = 1 }, .binding_revision = 1, .grant_revision = 1 },
+        .authority = .conversation_context,
+        .operation_id = 4,
+        .turn_id = 2,
+        .call_id = "invalid-child-model",
+        .tool_id = gateway.tool_id,
+        .arguments = .null,
+        .arguments_json = "{}",
+        .arguments_hash = @splat(0),
+        .canonical_arguments_hash = @splat(0),
+    };
+    var models = [_]config.AiModel{.{ .id = "local", .context_window = 8192, .default = true }};
+    var providers = [_]config.AiProvider{.{ .kind = .ollama, .name = "local", .enabled = true, .endpoint = "http://127.0.0.1:11434", .model_count = models.len, .models = &models }};
+    const settings: config.Ai = .{ .default_provider = "local", .provider_count = providers.len, .providers = &providers };
+    for ([_][]const u8{ "missing", "local" }, [_][]const u8{ "UnknownModel", "UnsupportedEffort" }) |model, code| {
+        var response = (try gateway.rejectInvalidModelSelection(invocation, a, settings, .{ .provider_id = "local", .model_id = model }, .high)).?;
+        defer response.deinit(a);
+        try std.testing.expectEqual(.rejected, response.status);
+        try std.testing.expect(!response.receipt.side_effect_started and response.receipt.local_released and !response.receipt.remote_effect_unknown);
+        const parsed = try std.json.parseFromSlice(std.json.Value, a, response.blocks[0].structured, .{});
+        defer parsed.deinit();
+        try std.testing.expectEqualStrings(code, parsed.value.object.get("error_code").?.string);
+    }
+    try std.testing.expect((try gateway.rejectInvalidModelSelection(invocation, a, settings, .{ .provider_id = "local", .model_id = "local" }, null)) == null);
+}
+
 fn expectLocalFileRejection(env: gateway.Environment, json: []const u8, reason: []const u8) !void {
     const record_count = env.service.store.records.items.len;
     const runner_count = env.service.runners.items.len;

@@ -698,6 +698,14 @@ pub fn rejectAdmission(invocation: host.Invocation, a: std.mem.Allocator, failur
     return rejectionWithPayload(invocation, a, failure, .{ .stage = "child_admission" });
 }
 
+/// Validate only frozen settings, before any child runner or provider work.
+pub fn rejectInvalidModelSelection(invocation: host.Invocation, a: std.mem.Allocator, ai: @import("../config/config.zig").Ai, selection: ?@import("provider_config.zig").ModelSelection, effort: ?@import("provider.zig").Effort) !?host.Result {
+    const config = @import("provider_config.zig");
+    _ = config.fromSettingsSelection(ai, selection) catch |err| return try rejectAdmission(invocation, a, err);
+    if (effort) |level| config.validateEffort(ai, selection, level) catch |err| return try rejectAdmission(invocation, a, err);
+    return null;
+}
+
 const LocalFileRejection = enum { parent_file_authority, missing_workspace_target };
 
 pub fn rejectLocalFiles(invocation: host.Invocation, a: std.mem.Allocator, reason: LocalFileRejection, requested: budget.LocalFiles, available: budget.LocalFiles) !host.Result {
