@@ -374,9 +374,7 @@ pub const Context = struct {
         const ready = snapshot.interactive_execution and snapshot.input_ready and snapshot.shell.prompt_ready == true;
         const failed = if (snapshot.failure) |failure| std.mem.eql(u8, failure, "UnsupportedShell") or std.mem.eql(u8, failure, "UnsupportedMultiplexer") or std.mem.eql(u8, failure, "ShellHooksConflict") else false;
         if (!ready and !failed and !timed_out) return null;
-        var temporary = std.heap.ArenaAllocator.init(allocator);
-        defer temporary.deinit();
-        const body = try std.json.Stringify.valueAlloc(allocator, .{ .state = if (ready) "attached" else if (failed) "failed" else "attaching", .initialized = ready, .timed_out = timed_out and !ready, .shell_context = .{ .id = if (snapshot.shell.id) |id| @as(?[]const u8, try temporary.allocator().dupe(u8, &id)) else null, .revision = snapshot.shell.revision, .prompt_ready = snapshot.shell.prompt_ready }, .input_epoch = snapshot.input_epoch, .failure = snapshot.failure, .next_tool = if (ready) "host.run_in_terminal" else "host.read_terminal", .business_command_sent = false }, .{});
+        const body = try @import("../ai/shell_attachment.zig").progressBody(allocator, &snapshot, ready, failed, timed_out);
         errdefer allocator.free(body);
         const blocks = try allocator.alloc(host.Block, 1);
         blocks[0] = .{ .structured = body };

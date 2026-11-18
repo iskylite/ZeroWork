@@ -13,7 +13,7 @@ const until_field = "\"until\":{\"type\":\"string\",\"enum\":[\"revision\",\"dec
 const output_fields = "\"output_cursor\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":128,\"description\":\"Use the exact next_cursor string from the previous result.\"},\"max_bytes\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":65536}";
 const default_decision_wait_ms = 5 * std.time.ms_per_min;
 pub const contributions = [_]host.Contribution{
-    tool("run_in_terminal", "Execute the exact approved command in the same authorized, ready terminal and shell. Local private integration and SSH shell events provide different evidence: inspect snapshot.completion_source. shell_reported events are cooperative shell reports, not tamper-proof private receipts. Saves the same-PTY START/END observation interval; output_scope=session_interval and output_attribution describe its limits, never complete exclusive command output. Requires a durable recording barrier and a ready input boundary. Fixed modes and write approvals still apply. Optional wait_ms (suggest 2000 for short commands) waits for a decision in this same call. Returns the real result or original execution_ref; use host.wait_execution with until=decision for ongoing work. wait_interrupted describes only an interrupted observation wait: preserve the original execution and never assume the command was unsent. Provide shell_id and shell_revision together or omit both. For nested shells, both are required; use control.shell_context.id and revision from host.get_session. Use ordinary ssh/su/bash/zsh/container interactive commands. A shell_switch notice is a candidate, not proof of entry. When the terminal is occupied, occupied_policy selects the behavior: wait (default) queues the command behind the foreground work and submits it once the terminal is ready; new_session opens a separate work session through the authorized lifecycle; reject fails fast with the occupier summary. On ShellPromptNotObserved the host recovers the shell automatically within this same call; only when automatic recovery fails, inspect host.read_terminal/host.get_session and use host.attach_shell manually, then submit only the unsent business command. For unknown outcomes read the screen/output and verify results; never invent an exit code or replay effects. After ShellContextExitedWithoutCompletion, use host.get_session to confirm the parent Shell is prompt_ready and input_ready. Use its current shell_id and shell_revision for a new command on that parent. The child result stays unknown. Do not repeat failed execution until readiness or shell context changes. IntegrationUnavailable writes no command. Never replay an unknown outcome with a new request_key.", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"session_ref\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":128},\"command\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":65534},\"shell_id\":{\"type\":\"string\",\"minLength\":32,\"maxLength\":32},\"shell_revision\":{\"type\":\"integer\",\"minimum\":0},\"occupied_policy\":{\"type\":\"string\",\"enum\":[\"wait\",\"new_session\",\"reject\"]}," ++ key_field ++ "," ++ wait_fields ++ "},\"required\":[\"session_ref\",\"command\",\"request_key\"]}"),
+    tool("run_in_terminal", "Execute the exact approved command in the same authorized, ready terminal and shell. Local private integration and SSH shell events provide different evidence: inspect snapshot.completion_source. shell_reported events are cooperative shell reports, not tamper-proof private receipts. Saves the same-PTY START/END observation interval; output_scope=session_interval and output_attribution describe its limits, never complete exclusive command output. Requires a durable recording barrier and a ready input boundary. Fixed modes and write approvals still apply. Optional wait_ms (suggest 2000 for short commands) waits for a decision in this same call. Returns the real result or original execution_ref; use host.wait_execution with until=decision for ongoing work. wait_interrupted describes only an interrupted observation wait: preserve the original execution and never assume the command was unsent. Provide shell_id and shell_revision together or omit both. For nested shells, both are required; map control.shell_context.id and revision from host.read_terminal (include_control=true) or host.get_session to shell_id and shell_revision, only for the same intended terminal and shell. On ShellContextRequired no command was sent: follow the read-only next_tool hint, then use the observed pair and a fresh request_key only after verifying the intended shell. Do not retry unchanged or switch to a parent shell. Use ordinary ssh/su/bash/zsh/container interactive commands. A shell_switch notice is a candidate, not proof of entry. When the terminal is occupied, occupied_policy selects the behavior: wait (default) queues the command behind the foreground work and submits it once the terminal is ready; new_session opens a separate work session through the authorized lifecycle; reject fails fast with the occupier summary. On ShellPromptNotObserved the host recovers the shell automatically within this same call; only when automatic recovery fails, inspect host.read_terminal/host.get_session and use host.attach_shell manually, then submit only the unsent business command. For unknown outcomes read the screen/output and verify results; never invent an exit code or replay effects. After ShellContextExitedWithoutCompletion, use host.get_session to confirm the parent Shell is prompt_ready and input_ready. Use its current shell_id and shell_revision for a new command on that parent. The child result stays unknown. Do not repeat failed execution until readiness or shell context changes. IntegrationUnavailable writes no command. Never replay an unknown outcome with a new request_key.", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"session_ref\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":128},\"command\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":65534},\"shell_id\":{\"type\":\"string\",\"minLength\":32,\"maxLength\":32},\"shell_revision\":{\"type\":\"integer\",\"minimum\":0},\"occupied_policy\":{\"type\":\"string\",\"enum\":[\"wait\",\"new_session\",\"reject\"]}," ++ key_field ++ "," ++ wait_fields ++ "},\"required\":[\"session_ref\",\"command\",\"request_key\"]}"),
     tool("get_execution", "Read a previously admitted execution by its original execution_ref. This read uses no new shell command or recording slot. Use next_cursor to read new bytes. output_retained means only previously captured output is available and later progress is unconfirmed. After reconnect use the same reference for old evidence, and an authorized read-only file tool for an existing job log. A new shell prompt or printed marker never proves the old command completed.", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{" ++ ref_field ++ "," ++ output_fields ++ "},\"required\":[\"execution_ref\"]}"),
     tool("wait_execution", "For an ongoing command, call once with its execution_ref and until=decision, omitting wait_ms. The host waits within the task budget, or up to five minutes when no task deadline is set, for a foreground result, explicit input request, failure, unknown outcome or takeover. Ordinary output stays buffered. Explicit wait_ms requests a shorter bounded observation. Use after_revision with until=revision to wait for a newer revision. If the wait times out or is interrupted, use the returned state and preserve the original execution_ref; do not replay the command or start a shell sleep to check it.", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{" ++ ref_field ++ "," ++ output_fields ++ "," ++ until_field ++ ",\"after_revision\":{\"type\":\"integer\",\"minimum\":0},\"wait_ms\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":30000}},\"required\":[\"execution_ref\"]}"),
     tool("send_execution_input", "Send input to the current execution using its live input capability, current fence and fresh per-input approval. Supply exactly one of text, key=enter, or host_secret_request=true. Omit the other two fields. controlled_line is a helper-attested consumer; terminal_stream only authorizes ordinary PTY bytes and does not prove which foreground program consumes them or that it is waiting. A written receipt means native write completed, not foreground consumption. Text is a single line of UTF-8, at most 4096 bytes, with no control characters. host_secret_request is supported only by the explicit Local native zerowork_secret_consume sink, which consumes and erases a secret without delivering it to arbitrary programs. Unknown password/OTP consumers require user takeover; never send secrets as text. Use user takeover for unknown input targets, raw/TUI interaction or secrets; never infer input authority from prompt text.", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{" ++ ref_field ++ "," ++ key_field ++ ",\"text\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":4096},\"key\":{\"type\":\"string\",\"enum\":[\"enter\"]},\"host_secret_request\":{\"type\":\"boolean\",\"enum\":[true],\"description\":\"Set to true only to request the supported native secret collector. Omit when sending text or Enter.\"}},\"required\":[\"execution_ref\",\"request_key\"]}"),
@@ -29,7 +29,7 @@ pub fn supports(name: []const u8) bool {
     return false;
 }
 pub fn needsShellObservation(failure: anyerror) bool {
-    return failure == error.ShellPromptNotObserved or failure == error.IntegrationUnavailable or failure == error.ShellContextChanged;
+    return failure == error.ShellPromptNotObserved or failure == error.IntegrationUnavailable or failure == error.ShellContextChanged or failure == error.ShellContextRequired;
 }
 
 /// Use only when this invocation is known to have sent no command bytes.
@@ -39,7 +39,7 @@ pub fn rejectedRun(allocator: std.mem.Allocator, invocation: host.Invocation, fa
     const next_tool = if (session_ref != null) try @import("plugin_tools.zig").encodeName(&tool_name, "host.read_terminal") else null;
     const body = try std.json.Stringify.valueAlloc(allocator, .{
         .error_code = @errorName(failure),
-        .message = if (session_ref != null) "命令未发送。先读取同一终端的最新画面和控制状态，按当前执行方式恢复 Shell 就绪后再提交。" else @import("step_failure.zig").explanation(@errorName(failure)),
+        .message = if (session_ref != null and failure == error.ShellContextRequired) "命令未发送。先只读同一 session_ref 的终端画面和控制状态（include_control=true），确认当前仍是原命令要进入的内层 Shell 且已就绪。再将 control.shell_context.id 和 revision 分别作为 shell_id 和 shell_revision，使用新的 request_key 提交；若层级或目标已改变，重新确认，不要改发到父层或原样重试。" else if (session_ref != null) "命令未发送。先读取同一终端的最新画面和控制状态，按当前执行方式恢复 Shell 就绪后再提交。" else @import("step_failure.zig").explanation(@errorName(failure)),
         .state = "cancelled_unsent",
         .side_effect_started = false,
         .local_released = true,
@@ -923,6 +923,49 @@ test "execution authorization rejection retains known unsent facts" {
     try std.testing.expectEqualStrings("host__read_uterminal", hint.value.object.get("next_tool").?.string);
     try std.testing.expectEqualStrings("approved-target", next.get("session_ref").?.string);
     try std.testing.expect(next.get("include_control").?.bool);
+
+    recovery.operation_id = 3;
+    recovery.call_id = "nested-shell-command";
+    recovery.arguments_json = "{\"session_ref\":\"approved-target\",\"command\":\"pwd\",\"request_key\":\"nested-shell\"}";
+    const nested_args = try std.json.parseFromSlice(std.json.Value, a, recovery.arguments_json, .{});
+    defer nested_args.deinit();
+    recovery.arguments = nested_args.value;
+    recovery.arguments_hash = execution.digest(recovery.arguments_json);
+    recovery.canonical_arguments_hash = try @import("canonical_arguments.zig").digest(a, nested_args.value);
+    failure = error.ShellContextRequired;
+    try std.testing.expect(needsShellObservation(failure));
+    var missing_context = (try controller.execute(recovery, 3)).result;
+    defer missing_context.deinit(a);
+    try missing_context.validate(context, 3);
+    try std.testing.expectEqual(.rejected, missing_context.status);
+    try std.testing.expect(!missing_context.receipt.side_effect_started and missing_context.receipt.local_released and !missing_context.receipt.remote_effect_unknown);
+    try std.testing.expectEqual(@as(usize, 0), controller.entries.items.len);
+
+    const rejected_json = missing_context.blocks[0].structured;
+    const nested_hint = try std.json.parseFromSlice(std.json.Value, a, rejected_json, .{});
+    defer nested_hint.deinit();
+    const fields = nested_hint.value.object;
+    try std.testing.expectEqualStrings("ShellContextRequired", fields.get("error_code").?.string);
+    try std.testing.expectEqualStrings("cancelled_unsent", fields.get("state").?.string);
+    try std.testing.expectEqualStrings("host__read_uterminal", fields.get("next_tool").?.string);
+    const next_arguments = fields.get("next_arguments").?.object;
+    try std.testing.expectEqual(@as(usize, 2), next_arguments.count());
+    try std.testing.expectEqualStrings("approved-target", next_arguments.get("session_ref").?.string);
+    try std.testing.expect(next_arguments.get("include_control").?.bool);
+    const message = fields.get("message").?.string;
+    for ([_][]const u8{ "命令未发送", "control.shell_context.id", "shell_revision", "不要改发到父层或原样重试" }) |sample| {
+        try std.testing.expect(std.mem.indexOf(u8, message, sample) != null);
+    }
+
+    const projection = @import("execution_result_projection.zig");
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    try std.testing.expectEqualStrings(rejected_json, try projection.modelContent(arena.allocator(), recovery.tool_id, rejected_json));
+    const card = (try projection.parse(arena.allocator(), recovery.tool_id, recovery.arguments_json, .rejected, missing_context.receipt, rejected_json)).?;
+    try std.testing.expectEqual(.rejected, card.phase());
+    try std.testing.expectEqualStrings("未执行 · 已拒绝", card.statusLabel());
+    try std.testing.expectEqualStrings("命令未派发，没有执行输出。", card.outputLabel().?);
+    try std.testing.expect(card.actionTarget() == null and card.terminal_output.len == 0);
 }
 
 test "execution unknown receipt retains its uncertainty and never becomes a successful RPC" {

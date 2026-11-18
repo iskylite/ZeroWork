@@ -15,7 +15,7 @@ pub fn explanation(code: []const u8) []const u8 {
     const mappings = .{
         .{ "not_dispatched_due_to_new_input", "收到新的引导消息，已跳过旧计划中的本次调用，工具未执行。" },
         .{ "ShellContextExitedWithoutCompletion", "该 Shell 已返回父层，但本条命令没有收到完整结束事件，结果仍待核实。请在原终端查看结果；不要自动重发。" },
-        .{ "ShellContextRequired", "当前位于内层 Shell，尚未确认命令的目标环境。请让 AI 重新检查当前终端后再执行。" },
+        .{ "ShellContextRequired", "命令未发送。请让 AI 重新读取同一终端，确认仍是原目标内层 Shell，再使用读到的 Shell 标识与版本提交。" },
         .{ "ShellContextChanged", "当前 Shell 层级已经变化，本次命令未发送。请重新读取当前 Shell 状态后再执行，避免命令落到错误的主机或用户环境。" },
         .{ "ShellContextLimit", "本次终端已达到可保留的 Shell 实例上限。请结束不再需要的会话，或建立新的终端会话。" },
         .{ "UnsupportedShell", "当前 Shell 暂不支持原地接入。请手动进入 bash 或 zsh，停在空提示符后执行 @shell attach。" },

@@ -1154,13 +1154,26 @@ test "execution result active stop and takeover callbacks receive original full 
 }
 
 test "execution result preflight refusal shows user readable reason without raw host metadata or fabricated execution" {
+    try expectExecutionPreflightRefusal(
+        "{\"error_code\":\"IntegrationUnavailable\",\"side_effect_started\":false,\"local_released\":true,\"remote_effect_unknown\":false}",
+        "当前终端的执行能力不可用。",
+        "未取得输出，无法确认命令是否产生了输出。",
+    );
+    try expectExecutionPreflightRefusal(
+        "{\"error_code\":\"ShellContextRequired\",\"state\":\"cancelled_unsent\",\"side_effect_started\":false,\"local_released\":true,\"remote_effect_unknown\":false}",
+        "命令未发送。请让 AI 重新读取同一终端，确认仍是原目标内层 Shell，再使用读到的 Shell 标识与版本提交。",
+        "命令未派发，没有执行输出。",
+    );
+}
+
+fn expectExecutionPreflightRefusal(body: []const u8, reason: []const u8, output: []const u8) !void {
     const Execution = @import("ui/ai_execution_result_view.zig");
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
     const receipt: @import("ai/host_tools.zig").Receipt = .{ .conversation_id = .generate(), .task_id = .generate(), .operation_id = 42, .binding_revision = 2 };
     var record = executionFixture(.running, "");
     defer record.deinit();
-    record.execution = try facts.execution_projection.parse(arena.allocator(), "host.run_in_terminal", "{\"command\":\"not-sent\"}", .rejected, receipt, "{\"error_code\":\"IntegrationUnavailable\",\"side_effect_started\":false,\"local_released\":true,\"remote_effect_unknown\":false}");
+    record.execution = try facts.execution_projection.parse(arena.allocator(), "host.run_in_terminal", "{\"command\":\"not-sent\"}", .rejected, receipt, body);
     var store = facts.Store.init(a);
     defer store.records.deinit(a);
     try store.records.append(a, &record);
@@ -1178,7 +1191,8 @@ test "execution result preflight refusal shows user readable reason without raw 
         _ = cx.render();
     }
     try std.testing.expectEqualStrings("未执行 · 已拒绝", find(cx.root.?, "ai.execution.result.summary").?.getText().?.content);
-    try std.testing.expectEqualStrings("当前终端的执行能力不可用。", find(cx.root.?, "ai.execution.result.failure").?.getText().?.content);
+    try std.testing.expectEqualStrings(reason, find(cx.root.?, "ai.execution.result.failure").?.getText().?.content);
+    try std.testing.expectEqualStrings(output, find(cx.root.?, "ai.execution.result.output_label").?.getText().?.content);
     try std.testing.expect(find(cx.root.?, "ai.execution.result.target").?.globalRect().w > 0);
     try std.testing.expect(find(cx.root.?, "ai.execution.result.execution_id") == null);
     try std.testing.expect(find(cx.root.?, "ai.execution.result.process") == null);
