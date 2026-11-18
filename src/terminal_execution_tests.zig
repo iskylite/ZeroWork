@@ -638,7 +638,7 @@ test "production execution driver owns journal and renews a real Local lease whi
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
     const context: host_tools.Context = .{ .conversation_id = .generate(), .task_id = .generate(), .binding = .{ .session = @backingInt(ready.owner.session_id) }, .binding_revision = 1, .grant_revision = 1 };
-    const args = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), "{\"session_ref\":\"fixture-authorized-owner\",\"command\":\"/bin/sleep 8\",\"request_key\":\"driver-lease\"}", .{});
+    const args = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), "{\"session_ref\":\"fixture-authorized-owner\",\"command\":\"/bin/sleep 15\",\"request_key\":\"driver-lease\"}", .{});
     const Tool = struct {
         driver: *driver_mod.Driver,
         invocation: host_tools.Invocation,
@@ -683,6 +683,22 @@ test "production execution driver owns journal and renews a real Local lease whi
         pause();
     }
     try std.testing.expect(expiry > 0 and driver.hasWork());
+    // No provider calls is not TaskFinish: terminal authority can renew
+    // until the model actually closes dispatch. Observe a real renewal first.
+    const renew_until = native.zw_local_monotonic_ms() + 7000;
+    var renewed = false;
+    while (native.zw_local_monotonic_ms() < renew_until) {
+        pump.pump();
+        try f.tick();
+        if (f.service.?.executionSnapshot()) |current| {
+            if (current.state == .running and current.lease_expires_at >= expiry + 4000) {
+                renewed = true;
+                break;
+            }
+        } else |_| {}
+        pause();
+    }
+    try std.testing.expect(renewed);
     try driver.finishTask(context);
     const finish_until = native.zw_local_monotonic_ms() + 2000;
     while (native.zw_local_monotonic_ms() < finish_until) {
@@ -695,15 +711,6 @@ test "production execution driver owns journal and renews a real Local lease whi
         pause();
     }
     try std.testing.expect(driver.taskEvidenceFor(context).?.model_done);
-    const renew_until = native.zw_local_monotonic_ms() + 5600;
-    while (native.zw_local_monotonic_ms() < renew_until) {
-        pump.pump();
-        try f.tick();
-        pause();
-    }
-    const renewed = try f.service.?.executionSnapshot();
-    try std.testing.expect(renewed.lease_expires_at >= expiry + 4000);
-    try std.testing.expect(renewed.state == .running);
     try driver.requestTakeover(context, reference);
     const handoff_until = native.zw_local_monotonic_ms() + 2000;
     while (!backend.handed_to_user and native.zw_local_monotonic_ms() < handoff_until) {
