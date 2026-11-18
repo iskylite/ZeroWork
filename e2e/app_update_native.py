@@ -127,6 +127,19 @@ case('data-access-prevents-old-launch-and-compatible-repair-works',changed,mode=
 def crash(c):
  c.prepare();c.commit();c.exit_parent();c.stage('backup_verified');wait(lambda:c.processes[-1].poll() is not None);assert not c.target.exists();c.env.pop('ZW_UPDATE_CRASH_AT_STAGE');c.start();c.stage('healthy');assert version(c.target)=='0.3.1'
 case('crash-after-backup-reconciles-same-transaction',crash,crash='backup_verified')
+def unknown_launch(c):
+ c.prepare();c.commit();c.exit_parent();c.stage('launching_new')
+ assert c.processes[-1].wait(timeout=8)==95
+ c.env.pop('ZW_UPDATE_CRASH_AT_STAGE');c.start().wait(timeout=8)
+ before=c.stage('recovery_unknown_process')
+ assert before['new_pid']==before['new_birth']==0
+ c.request('repair');assert c.start().wait(timeout=8)==0
+ after=c.stage('recovery_unknown_process')
+ assert after['nonce']==before['nonce'] and after['data_state']=='unknown'
+ assert after['new_pid']==after['new_birth']==0 and not (c.txn/'startup.request').exists()
+ assert version(c.target)=='0.3.1' and pathlib.Path(after['backup']).exists()
+case('unknown-launch-stays-fenced-after-repair',unknown_launch,crash='launching_new')
+
 def missing_backup(c):
  c.prepare();c.commit();c.exit_parent();r=c.stage('new_started');shutil.rmtree(r['backup']);c.newstop.touch();r=c.stage('restore_failed');assert version(c.target)=='0.3.1';assert (c.root/'active.json').exists()
 case('restore-failure-preserves-recovery-gate',missing_backup,mode='before-gate-wait')

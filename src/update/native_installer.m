@@ -27,8 +27,18 @@ static void Stage(NSString *stage){record[@"stage"]=stage;ZWWrite(recordFile,rec
 }
 static BOOL ValidApp(NSString *path,NSString *version){@try{ZWVerifyApp(path,version);return YES;}@catch(NSException *e){return NO;}}
 static BOOL Request(NSString *name){NSDictionary *r=ZWRead([directory stringByAppendingPathComponent:name]);return [r[@"nonce"] isEqual:record[@"nonce"]];}
-static void Move(NSString *from,NSString *to){if(rename(from.fileSystemRepresentation,to.fileSystemRepresentation))ZWFail(@"应用目录移动失败");ZWSyncDirectory(from.stringByDeletingLastPathComponent);}
+static void Move(NSString *from,NSString *to){
+    if(rename(from.fileSystemRepresentation,to.fileSystemRepresentation))ZWFail(@"应用目录移动失败");
+    NSString *sourceParent=from.stringByDeletingLastPathComponent,*targetParent=to.stringByDeletingLastPathComponent;
+    ZWSyncDirectory(targetParent);
+    if(![sourceParent isEqual:targetParent])ZWSyncDirectory(sourceParent);
+}
+static void UnknownLaunch(void){
+    record[@"data_state"]=@"unknown";Stage(@"recovery_unknown_process");
+    Surface(@"需要人工确认启动状态",@"安装程序在新版启动握手中断。进程身份尚未确认，禁止恢复旧版或重复启动新版。请保留记录并通过官方发布页修复。");
+}
 static void Restore(NSString *failure){
+    if([@[@"launching_new",@"recovery_unknown_process"] containsObject:record[@"stage"]]){UnknownLaunch();return;}
     NSString *target=record[@"target"],*backup=record[@"backup"];
     if(ZWAlive([record[@"new_pid"] intValue],[record[@"new_birth"] unsignedLongLongValue])){Stage(@"launch_failed_live");Surface(@"新版尚未退出",@"未恢复旧版，也未结束新版进程。请关闭新版后重新运行此安装程序，继续检查恢复条件。");return;}
     // A durable pre-grant marker is authoritative; missing/unknown marker never
@@ -83,9 +93,9 @@ static void LaunchNew(void){
     NSTask *task=[NSTask new];task.executableURL=[NSURL fileURLWithPath:[record[@"target"] stringByAppendingPathComponent:@"Contents/MacOS/ZeroWork"]];
     NSMutableDictionary *environment=[NSProcessInfo.processInfo.environment mutableCopy];environment[@"ZW_UPDATE_TRANSACTION"]=directory.lastPathComponent;environment[@"ZW_UPDATE_NONCE"]=record[@"nonce"];task.environment=environment;
     record[@"new_pid"]=@0;record[@"new_birth"]=@0;Stage(@"launching_new");NSError *error=nil;
-    if(![task launchAndReturnError:&error]){Restore(@"新版应用启动失败。");return;}
+    if(![task launchAndReturnError:&error]){record[@"stage"]=@"new_placed";Restore(@"新版应用启动失败。");return;}
     pid_t pid=task.processIdentifier;uint64_t birth=0;for(int i=0;i<20&&!birth;i++){birth=ZWBirth(pid);if(!birth)usleep(10000);}
-    if(!birth){[task waitUntilExit];Restore(@"新版在启动握手前已退出。");return;}
+    if(!birth){[task waitUntilExit];record[@"stage"]=@"new_placed";Restore(@"新版在启动握手前已退出。");return;}
     record[@"new_pid"]=@(pid);record[@"new_birth"]=@(birth);Stage(@"new_started");ObserveNew();
 }
 static void Install(void){
@@ -99,7 +109,7 @@ static void Install(void){
     if([stage isEqual:@"launching_new"]){
         // Crash between spawn and durable PID publication leaves unknown process
         // identity. Never infer release from a missing PID or launch a duplicate.
-        record[@"data_state"]=@"unknown";Stage(@"recovery_unknown_process");Surface(@"需要人工确认启动状态",@"安装程序在新版启动握手中断。进程身份尚未确认，禁止自动恢复旧版或重复启动新版。请保留记录并安装兼容版本。");return;
+        UnknownLaunch();return;
     }
     if([@[@"incompatible_data",@"recovery_unknown_process"] containsObject:stage]){Surface(@"需要安装兼容版本",@"数据或进程状态无法证明适合旧版。应用备份与记录已保留，请从官方发布页修复。");return;}
     if([stage isEqual:@"restore_failed"]){Restore(@"重新检查恢复条件。");return;}
@@ -134,8 +144,10 @@ static void Run(void){
         record[@"helper_pid"]=@(getpid());record[@"helper_birth"]=@(ZWBirth(getpid()));ZWWrite(recordFile,record);
         if([@[@"healthy",@"old_restored_verified",@"cancelled",@"aborted_before_replace"] containsObject:record[@"stage"]]){Surface(@"此安装事务已结束",@"历史事务不会重新获得安装授权。可关闭此窗口；重新更新时会创建新的事务。");return;}
         if([record[@"decision"] isEqual:@"committed"] && ![record[@"stage"] isEqual:@"waiting_parent"]){
-            if((repairRequested || Request(@"repair.request")) && [@[@"incompatible_data",@"recovery_unknown_process"] containsObject:record[@"stage"]]) {
-                if(ZWAlive([record[@"new_pid"] intValue],[record[@"new_birth"] unsignedLongLongValue]))ZWFail(@"新版仍在运行，请先关闭后修复");
+            if((repairRequested || Request(@"repair.request")) && [record[@"stage"] isEqual:@"incompatible_data"]) {
+                pid_t pid=[record[@"new_pid"] intValue];uint64_t birth=[record[@"new_birth"] unsignedLongLongValue];
+                if(pid<=0 || birth==0){UnknownLaunch();return;}
+                if(ZWAlive(pid,birth)){Surface(@"新版尚未退出",@"请先关闭新版，再继续检查修复条件。");return;}
                 NSString *candidate=[NSDictionary dictionaryWithContentsOfFile:[record[@"target"] stringByAppendingPathComponent:@"Contents/Info.plist"]][@"ZeroWorkReleaseVersion"];
                 if(![candidate isEqual:record[@"version"]] && (!candidate || !zw_update_newer(candidate.UTF8String,[record[@"version"] UTF8String])))ZWFail(@"修复包版本过低，未启动旧应用");
                 ZWVerifyApp(record[@"target"],candidate);record[@"version"]=candidate;record[@"nonce"]=NSUUID.UUID.UUIDString;Stage(@"new_placed");LaunchNew();return;
