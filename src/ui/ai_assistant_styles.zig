@@ -33,6 +33,9 @@ pub fn countBadge(_: *const ui.ThemeTokens) ui.BoxStyle {
 pub fn countBadgeText(_: *const ui.ThemeTokens) ui.TextStyle {
     return .{ .font_size = 9, .font_weight = 700, .line_height = 12.0 / 9.0, .text_align = .center, .color = theme.current().accent_ink };
 }
+pub fn countDot(_: *const ui.ThemeTokens) ui.BoxStyle {
+    return .{ .position = .absolute, .inset = .{ .top = .{ .px = 3 }, .right = .{ .px = 4 } }, .width = .{ .px = 6 }, .height = .{ .px = 6 }, .background = theme.current().accent, .border = .{ .width = 0, .radius = 3 }, .hit_behavior = .pass_through };
+}
 pub fn controlHover(kind: enum { collapse, maximize, close }) ButtonStyle {
     _ = kind;
     return .{ .background = theme.states().hover };
@@ -141,6 +144,7 @@ pub const body_line_height: f32 = 1.65;
 pub const heading_scale_max: f32 = 1.4;
 pub const heading_font_size: f32 = 13;
 pub const heading_max_font_size: f32 = 15.5;
+pub const heading_vertical_margin: f32 = 8;
 
 /// Match the floating shell's lower corners without rounding the divider edge.
 pub fn finishComposer(cx: *ui.Cx, node: *ui.Node) void {

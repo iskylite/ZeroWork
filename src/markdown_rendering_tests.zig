@@ -185,7 +185,10 @@ test "Markdown rendering long headings reflow without overlapping following text
         const rect = heading.globalRect();
         if (width == 180) narrow = rect.h else try std.testing.expect(rect.h < narrow);
         try std.testing.expectApproxEqAbs(@as(f32, 15.5), heading.getText().?.font_size, 0.01);
-        try std.testing.expect(textNode(node, "六级").?.globalRect().y >= rect.y + rect.h);
+        const last_heading = textNode(node, "六级").?.globalRect();
+        const paragraph = textNode(node, "后续正文").?.globalRect();
+        try std.testing.expect(last_heading.y - (rect.y + rect.h) >= 16 - 0.1);
+        try std.testing.expect(paragraph.y - (last_heading.y + last_heading.h) >= 8 - 0.1);
         try std.testing.expect(heading.getLayoutOutput().artifacts.text_layout.?.total_height <= rect.h + 0.1);
     }
 }

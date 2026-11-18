@@ -250,6 +250,50 @@ test "v0.4 task gateway atomic launch idempotency report delivery and worker set
     try std.testing.expectEqual(budget.Status.failed, parent.task_root.?.facts[3].status);
     try std.testing.expect(service.store.records.items[1].binding == null and !service.store.records.items[1].task_pending);
 }
+test "v0.7 send and stop on a settled child reject with a payload instead of outcome_unknown" {
+    var main: Fake = .{};
+    var child: Fake = .{};
+    var service = Runtime.Service.init(a);
+    defer service.deinit();
+    const parent = try service.attach(.{ .session = 11 }, main.backend());
+    const fence = try service.store.create(parent.agent.id);
+    _ = try service.submit(fence, .generate(), .{ .content = "parent" }, null);
+    try started(&main);
+    var factory: Factory = .{ .service = &service, .fake = &child };
+    const env: gateway.Environment = .{ .service = &service, .authority = parent.context.?.authority(), .live = .{ .owner = parent.agent.owner, .members = .{}, .inventory = &.{11} }, .handles = &.{}, .factory = .{ .context = &factory, .install = Factory.install } };
+    var response = try invoke(env, create);
+    defer response.deinit(a);
+    try started(&child);
+    child.release.store(true, .release);
+    const start = (Clock{}).now();
+    while (parent.task_root.?.childrenRunning(parent.context.?.task)) {
+        try service.poll();
+        if ((Clock{}).now() - start > 3 * std.time.ns_per_s) return error.TestWorkerTimeout;
+        (Clock{}).sleep(std.time.ns_per_ms);
+    }
+    try std.testing.expectEqual(budget.Status.succeeded, parent.task_root.?.facts[1].status);
+    // The gateway is resource_write: a bare execute error here would make
+    // tool_loop mark the parent task outcome_unknown, so a settled child
+    // must answer send/stop with a rejected payload the model can act on.
+    const task_ref = try std.fmt.allocPrint(a, "{s}", .{std.fmt.bytesToHex(parent.task_root.?.facts[1].task.bytes, .lower)});
+    defer a.free(task_ref);
+    const stop_json = try std.fmt.allocPrint(a, "{{\"action\":\"stop\",\"task_id\":\"{s}\"}}", .{task_ref});
+    defer a.free(stop_json);
+    var stopped = try invoke(env, stop_json);
+    defer stopped.deinit(a);
+    try std.testing.expectEqual(@import("ai/plugin_tools.zig").Status.rejected, stopped.status);
+    try std.testing.expect(std.mem.indexOf(u8, stopped.blocks[0].structured, "\"error_code\":\"TaskAlreadyFinished\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, stopped.blocks[0].structured, "\"side_effect_started\":false") != null);
+    try std.testing.expect(std.mem.indexOf(u8, stopped.blocks[0].structured, "\"status\":\"succeeded\"") != null);
+    const send_json = try std.fmt.allocPrint(a, "{{\"action\":\"send\",\"task_id\":\"{s}\",\"text\":\"follow-up\",\"request_key\":\"late-send\"}}", .{task_ref});
+    defer a.free(send_json);
+    var late_send = try invoke(env, send_json);
+    defer late_send.deinit(a);
+    try std.testing.expectEqual(@import("ai/plugin_tools.zig").Status.rejected, late_send.status);
+    try std.testing.expect(std.mem.indexOf(u8, late_send.blocks[0].structured, "\"error_code\":\"TaskAlreadyFinished\"") != null);
+    // The settled child stays untouched: no inbox submission, no reopen.
+    try std.testing.expectEqual(@as(usize, 1), child.calls.load(.acquire));
+}
 test "v0.4.3 child receives the current workspace and only explicitly delegated file capability" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -357,6 +401,39 @@ test "v0.4.3 child task rollover cannot restore file writes after downgrade or a
     later.generation = 3;
     later.local_files = .write;
     try std.testing.expectError(error.InvalidTaskFact, root.rollover(next.task, .succeeded, later));
+}
+
+test "v0.7 failed wake acknowledge keeps the batch undelivered without advancing the watermark" {
+    // sweepParentWakes/wakeParentReports rely on these primitive semantics:
+    // a failed fact write (journal broken) must not advance reported_sequence
+    // — the sweep keeps seeing the batch as undelivered — and the caller must
+    // not advance delivered_watermark either, so wait_events can still page
+    // the events the wake notice carried. The one-shot wake marker on the
+    // root (wake_submitted_sequence) is what stops re-injecting this batch.
+    const Failing = struct {
+        fn write(_: *anyopaque, _: budget.Fact) anyerror!void {
+            return error.StorageUnavailable;
+        }
+    };
+    var root = budget.Root.init(a);
+    defer root.deinit();
+    const parent = fact(.generate());
+    try root.add(parent);
+    var child = fact(parent.root);
+    child.task = .generate();
+    child.parent = parent.task;
+    child.seq = 1;
+    child.status = .succeeded;
+    child.event_sequence = 3;
+    try root.add(child);
+    var sentinel: u8 = 0;
+    root.persist = .{ .context = &sentinel, .write = Failing.write };
+    try std.testing.expectError(error.StorageUnavailable, root.acknowledge(child.task, child.event_sequence));
+    root.lock();
+    defer root.mutex.unlock();
+    try std.testing.expectEqual(@as(u64, 0), root.facts[1].reported_sequence);
+    try std.testing.expect(root.facts[1].reported_sequence < root.facts[1].event_sequence);
+    try std.testing.expect(root.failed_storage);
 }
 
 test "v0.4 task gateway storage failure rolls back identity binding first input and root reservation" {

@@ -86,7 +86,7 @@ fn mount(cx: *ui.Cx, scope: *ui.Scope) !*ui.Node {
     reopen.meta.ownership.meta.test_id = "transfer.preview.reopen";
     try root.appendChild(cx.allocator, reopen);
     const presentation = std.meta.stringToEnum(V.Presentation, options.presentation) orelse .global_popover;
-    const panel = try V.mountProjection(cx, scope, .{ .presentation = presentation }, .{ .context = fixture, .action = Fixture.action, .batch = Fixture.batch });
+    const panel = try V.mountProjection(cx, scope, .{ .presentation = presentation, .default_filter = if (presentation == .global_popover) .active else .all }, .{ .context = fixture, .action = Fixture.action, .batch = Fixture.batch });
     fixture.panel = panel;
     if (presentation == .session_tray) {
         panel.setDirectionFilter(.upload);

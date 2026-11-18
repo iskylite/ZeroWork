@@ -29,7 +29,7 @@ const GraphPick = struct {
     agent: id.AgentId,
     revision: u64,
     fn choose(self: *GraphPick) void {
-        self.view.open.set(false);
+        self.view.graph_open.set(false);
         self.view.hooks.select(self.view.hooks.context, self.agent, self.revision);
     }
 };
@@ -61,11 +61,14 @@ pub const View = struct {
     decisions_list: *ui.Node,
     viewport: ui.Size,
     board_scope: ?*ui.Scope = null,
+    graph_open: *ui.Signal(bool),
+    graph_dialog: *ui.Node,
     graph_scope: ?*ui.Scope = null,
     chrome: *ui.Node,
     painted_colors: theme.Colors,
     button: *ui.Node,
     badge: *ui.Node,
+    running_badge: *ui.Node,
     heading_count: *ui.Node,
     heading_title: *ui.Node,
     stall_stop: *ui.Node = undefined,
@@ -136,16 +139,35 @@ pub const View = struct {
         const decisions = try ui.box(cx, S.page(4), .{});
         try board.appendChild(cx.allocator, decisions);
         try scroll.content.appendChild(cx.allocator, board);
-        const graph = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 220 }, .flex_shrink = 0 }, .{});
+        const graph_open = try scope.createSignal(bool, false);
+        const graph_modal = try ui.widgets.Modal(.{ .open = graph_open, .width = @max(0, cx.viewport.width - 24), .max_height = @max(0, cx.viewport.height - 24), .background = theme.current().overlay }).mount(scope, cx);
+        if (!graph_modal.portaled) if (cx.root) |root| try root.appendChild(cx.allocator, graph_modal.overlay);
+        graph_modal.dialog.setStyleInline(cx.allocator, .{ .height = .{ .px = @max(0, cx.viewport.height - 24) } });
+        if (graph_modal.dialog.behavior.interaction.a11y) |*a11y| a11y.label = "关系图";
+        graph_modal.body.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .fill(), .direction = .column, .gap = 8, .padding = .{ .left = 16, .right = 16, .top = 12, .bottom = 12 } });
+        const graph_header = try ui.box(cx, .{ .width = .fill(), .direction = .row, .align_items = .center, .flex_shrink = 0 }, .{});
+        try graph_header.appendChild(cx.allocator, try ui.textStyled(cx, S.name, "关系图"));
+        try graph_header.appendChild(cx.allocator, try ui.spacer(cx));
+        try graph_modal.body.appendChild(cx.allocator, graph_header);
+        const graph_scroll = try ui.widgets.ScrollArea(.{ .direction = .both }).mount(scope, cx);
+        @import("ai_card_scroll.zig").showOverflowScrollbar(graph_scroll);
+        graph_scroll.container.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .fill(), .min_width = 0, .min_height = 0 });
+        graph_scroll.content.setStyleInline(cx.allocator, .{ .width = .{ .fit = .{} }, .height = .{ .fit = .{} } });
+        try graph_modal.body.appendChild(cx.allocator, graph_scroll.container);
+        const graph = try ui.box(cx, .{}, .{});
         graph.meta.ownership.meta.test_id = "ai.children.graph";
-        try scroll.content.appendChild(cx.allocator, graph);
+        try graph_scroll.content.appendChild(cx.allocator, graph);
         const rounds = try ui.box(cx, S.page(8), .{});
         rounds.meta.ownership.meta.test_id = "ai.children.rounds";
         try scroll.content.appendChild(cx.allocator, rounds);
 
+        const running_badge = try Header.mountDotBadge(cx, button, "ai.children.running");
         const badge = try Header.mountCountBadge(cx, button, "ai.children.count");
         badge.setTextColor(theme.current().danger_ink);
-        const self = try scope.createState(View, .{ .cx = cx, .scope = popup.scope, .hooks = hooks, .open = open, .root = popup.wrapper, .content = members, .scroll = scroll, .tabs = tab_row, .decisions_list = decisions, .viewport = cx.viewport, .chrome = popup.chrome, .painted_colors = theme.current(), .button = button, .badge = badge, .heading_count = heading_count, .heading_title = title, .stall_banner = banner_placeholder, .board_list = board, .graph_canvas = graph, .rounds_list = rounds });
+        const self = try scope.createState(View, .{ .cx = cx, .scope = popup.scope, .hooks = hooks, .open = open, .root = popup.wrapper, .content = members, .scroll = scroll, .tabs = tab_row, .decisions_list = decisions, .viewport = cx.viewport, .chrome = popup.chrome, .painted_colors = theme.current(), .button = button, .badge = badge, .running_badge = running_badge, .heading_count = heading_count, .heading_title = title, .stall_banner = banner_placeholder, .board_list = board, .graph_canvas = graph, .graph_open = graph_open, .graph_dialog = graph_modal.dialog, .rounds_list = rounds });
+        const close_graph = try ui.widgets.Button(.{ .label = "关闭", .variant = .ghost, .on_click = cx.on(View, self, closeGraph) }).mount(scope, cx);
+        close_graph.meta.ownership.meta.test_id = "ai.children.graph.close";
+        try graph_header.appendChild(cx.allocator, close_graph);
         // V0.7 §12.2/§14.4: level-2 stall banner. Hidden until the host
         // escalates; carries the 催父/停全部 one-click actions.
         const warning = try ui.iconTint(cx, ui.icons.get("timer").?, theme.current().warn, .{ .width = .{ .px = 14 }, .height = .{ .px = 14 }, .flex_shrink = 0 });
@@ -210,7 +232,17 @@ pub const View = struct {
         tab_button.meta.ownership.meta.test_id = test_id;
         return tab_button;
     }
+    fn closeGraph(self: *View) void {
+        self.graph_open.set(false);
+    }
+
     fn selectPage(self: *View, page: Page) void {
+        if (page == .graph) {
+            self.open.set(false);
+            self.graph_open.set(true);
+            self.cx.requestRedraw();
+            return;
+        }
         if (self.page == page) return;
         self.page = page;
         self.applyPageVisibility();
@@ -227,19 +259,23 @@ pub const View = struct {
         if (self.tab_board) |tab| tab.setDisplay(if (board) .flex else .none);
         if (self.tab_graph) |tab| tab.setDisplay(if (graph) .flex else .none);
         if (self.tab_rounds) |tab| tab.setDisplay(if (rounds) .flex else .none);
-        if (switch (self.page) { .members => false, .board => !board, .graph => !graph, .rounds => !rounds }) self.selectPage(.members);
+        if (switch (self.page) {
+            .members => false,
+            .board => !board,
+            .graph => !graph,
+            .rounds => !rounds,
+        }) self.selectPage(.members);
     }
 
     fn applyPageVisibility(self: *View) void {
         self.content.setDisplay(if (self.page == .members) .flex else .none);
         if (self.board_list) |node| node.setDisplay(if (self.page == .board) .flex else .none);
-        if (self.graph_canvas) |node| node.setDisplay(if (self.page == .graph) .flex else .none);
         if (self.rounds_list) |node| node.setDisplay(if (self.page == .rounds) .flex else .none);
         self.verification_button.setDisplay(if (self.page == .rounds) .flex else .none);
         self.scroll.container.setStyleInline(self.cx.allocator, S.panelBody(self.viewport, self.stall_task != null, self.page == .rounds));
         for ([_]?*ui.Node{ self.tab_members, self.tab_board, self.tab_graph, self.tab_rounds }, 0..) |maybe, index| {
             const tab = maybe orelse continue;
-            const active = index == @intFromEnum(self.page);
+            const active = index == @backingInt(self.page);
             tab.setBackground(if (active) theme.popupSelection() else ui.Color.TRANSPARENT);
             if (tab.behavior.interaction.a11y) |*a11y| a11y.selected = active;
         }
@@ -271,12 +307,13 @@ pub const View = struct {
             try list.appendChild(self.cx.allocator, wrap);
         }
     }
-        /// V0.7 §14.2 Board: render the G8 board post stream (from/#to +
+    /// V0.7 §14.2 Board: render the G8 board post stream (from/#to +
     /// category icon + folded text). Read-only; delivery watermarks stay
     /// owned by the model/panel levels separately (G2).
     pub fn updateBoard(self: *View, rows: []const projection.BoardRow) !void {
         const list = self.board_list orelse return;
         var hash = std.hash.Wyhash.init(0);
+        std.hash.autoHash(&hash, rows.len != 0);
         std.hash.autoHash(&hash, self.board_filter_member);
         std.hash.autoHash(&hash, self.board_filter_ask_only);
         for (rows) |row| {
@@ -316,8 +353,8 @@ pub const View = struct {
             try wrap.appendChild(self.cx.allocator, try ui.textStyled(self.cx, S.name, body));
             try list.appendChild(self.cx.allocator, wrap);
         }
-        if (shown == 0) try list.appendChild(self.cx.allocator, try ui.textStyled(self.cx, S.secondary, if (rows.len == 0) "留言板暂无帖子" else "当前筛选无匹配帖子"));
-        _ = try self.mountBoardFilter(list);
+        if (shown == 0) try list.appendChild(self.cx.allocator, try ui.textStyled(self.cx, S.secondary, if (rows.len == 0) "暂无留言" else "暂无匹配留言"));
+        if (rows.len != 0) try self.mountBoardFilter(list);
     }
     /// §14.2: the filter row (仅看 ask toggle + member reset) rides the top
     /// of the Board page. Mounted dynamically after each rebuild.
@@ -343,14 +380,12 @@ pub const View = struct {
         self.board_fingerprint = 0;
         self.cx.requestRedraw();
     }
-    /// V0.7 §14.2 Graph: deterministic radial layout — parent centered,
-    /// children on a fixed ring (≤16, no physics). Node cards reuse the G3
-    /// rows; edges are the accumulated board traffic (width by volume).
+    /// V0.7 §14.2 Graph: radial layout with readable cards in a scrollable canvas.
     pub fn updateGraph(self: *View, entries: []const projection.Entry, posts: []const projection.BoardRow) !void {
         const canvas = self.graph_canvas orelse return;
         var hash = std.hash.Wyhash.init(0);
         for (entries) |entry| {
-            std.hash.autoHash(&hash, .{ entry.seq, entry.agent, entry.revision, entry.awaiting_approval });
+            std.hash.autoHash(&hash, .{ entry.seq, entry.agent, entry.revision, entry.awaiting_approval, entry.waiting_user, entry.running });
             hash.update(entry.status);
             hash.update(entry.name);
         }
@@ -376,25 +411,34 @@ pub const View = struct {
 
         const scope = try self.scope.childScope();
         self.graph_scope = scope;
-        const center_x = (S.panelWidth(self.viewport) - 16) / 2;
-        const center_y: f32 = 103;
-        const radius: f32 = 75;
-        // Edges: per-member post volume draws a line from the ring node to
-        // the parent. Simple axis-aligned segments (deterministic layout).
-        for (entries[0..@min(entries.len, 16)], 0..) |entry, index| {
+        // §14.2: deterministic ring coordinates cap at 16 members; extra
+        // members stay visible in the member list without inflating the ring.
+        const count = @min(entries.len, 16);
+        var card_width: f32 = 136;
+        for (entries) |entry| {
+            var prefix: [16]u8 = undefined;
+            const number = try std.fmt.bufPrint(&prefix, "#{d}  ", .{entry.seq});
+            const text_width = self.cx.text.measureTextWidth(number, 12, 600, false) +
+                self.cx.text.measureTextWidth(entry.name, 12, 600, false);
+            card_width = @max(card_width, @ceil(text_width) + 28);
+        }
+        const radius = @max(card_width / 2 + 58, (card_width + 24) / (2 * @sin(std.math.pi / @as(f32, @floatFromInt(count)))));
+        const center_x = @max(radius + card_width / 2 + 24, (self.viewport.width - 56) / 2);
+        const center_y = @max(radius + 40, (self.viewport.height - 96) / 2);
+        canvas.setStyleInline(self.cx.allocator, .{ .width = .{ .px = center_x * 2 }, .height = .{ .px = center_y * 2 }, .flex_shrink = 0 });
+        for (entries[0..count], 0..) |entry, index| {
             var volume: usize = 0;
             for (posts) |post| if (post.origin == entry.seq) {
                 volume += 1;
             };
-            if (volume == 0) continue;
             const width: f32 = if (volume >= 4) 4 else if (volume >= 2) 2 else 1;
-            const angle = 2 * std.math.pi * @as(f32, @floatFromInt(index)) / @as(f32, @floatFromInt(@min(entries.len, 16)));
+            const angle = 2 * std.math.pi * @as(f32, @floatFromInt(index)) / @as(f32, @floatFromInt(count));
             const node_x = center_x + radius * @cos(angle);
             const node_y = center_y + radius * @sin(angle);
             // Horizontal + vertical two-segment approximation toward center.
             const h_len = @abs(node_x - center_x);
             const h_x = @min(node_x, center_x);
-            const horizontal = try ui.box(self.cx, .{ .position = .absolute, .inset = .{ .left = .{ .px = h_x }, .top = .{ .px = (node_y + center_y) / 2 } }, .width = .{ .px = h_len }, .height = .{ .px = width }, .background = theme.current().accent, .opacity = 0.35, .flex_shrink = 0 }, .{});
+            const horizontal = try ui.box(self.cx, .{ .position = .absolute, .inset = .{ .left = .{ .px = h_x }, .top = .{ .px = center_y } }, .width = .{ .px = h_len }, .height = .{ .px = width }, .background = theme.current().accent, .opacity = 0.35, .flex_shrink = 0 }, .{});
             try canvas.appendChild(self.cx.allocator, horizontal);
             const v_len = @abs(node_y - center_y);
             if (v_len > 0.5) {
@@ -408,31 +452,21 @@ pub const View = struct {
         try parent_node.appendChild(self.cx.allocator, try ui.textStyled(self.cx, S.name, "协调者"));
         try canvas.appendChild(self.cx.allocator, parent_node);
 
-        const count = @min(entries.len, 16);
         for (entries[0..count], 0..) |entry, index| {
             const angle = 2 * std.math.pi * @as(f32, @floatFromInt(index)) / @as(f32, @floatFromInt(count));
             const x = center_x + radius * @cos(angle);
             const y = center_y + radius * @sin(angle);
             const tint = if (entry.awaiting_approval or entry.waiting_user) colors.warn else if (entry.running) colors.accent else if (std.mem.eql(u8, entry.status, "已完成")) colors.ok else colors.fg_2;
-            const width: f32 = if (count <= 6) 38 else 28;
+            const width = card_width;
             const pick = try scope.createState(GraphPick, .{ .view = self, .agent = entry.agent, .revision = entry.revision });
             const accessible = try std.fmt.allocPrint(scope.allocator, "#{d} {s}，{s}", .{ entry.seq, entry.name, entry.status });
             const node = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = accessible, .base_style = S.graphNode(x, y, width, tint), .on_click = self.cx.on(GraphPick, pick, GraphPick.choose) }).mount(scope, self.cx);
             node.setStyleInline(self.cx.allocator, S.graphNode(x, y, width, tint));
             node.meta.ownership.meta.test_id = "ai.children.graph.member";
-            var number: [16]u8 = undefined;
             const caption = try ui.textStyled(self.cx, S.name, "");
-            try caption.setTextContent(self.cx.allocator, try std.fmt.bufPrint(&number, "#{d}", .{entry.seq}));
+            try caption.setTextContent(self.cx.allocator, try std.fmt.allocPrint(scope.allocator, "#{d}  {s}", .{ entry.seq, entry.name }));
             try node.appendChild(self.cx.allocator, caption);
             try canvas.appendChild(self.cx.allocator, node);
-
-            if (count <= 6) {
-                var style = S.secondary(self.cx.tokens);
-                style.text_align = .center;
-                const label = try ui.text(self.cx, entry.name, style);
-                label.setStyleInline(self.cx.allocator, .{ .position = .absolute, .inset = .{ .left = .{ .px = x - 50 }, .top = .{ .px = y + 17 } }, .width = .{ .px = 100 } });
-                try canvas.appendChild(self.cx.allocator, label);
-            }
         }
     }
     /// V0.7 §14.3 Rounds: boost chain rounds as a vertical timeline of node
@@ -491,12 +525,25 @@ pub const View = struct {
         for (boost.rows) |row| {
             var title: [160]u8 = undefined;
             const card = try ui.box(self.cx, S.timelineCard(false), .{});
-            const phase = switch (row.round.phase) { .implementation => "实现", .challenge => "复审", .repair => "修复" };
+            const phase = switch (row.round.phase) {
+                .implementation => "实现",
+                .challenge => "复审",
+                .repair => "修复",
+            };
             const heading = try std.fmt.bufPrint(&title, "第 {d} 轮 · {s}   #{d} {s}", .{ row.round.number, phase, row.seq, row.label });
             try card.appendChild(self.cx.allocator, try ui.textStyled(self.cx, S.name, heading));
             var status: [100]u8 = undefined;
             const state = switch (row.status) {
-                .succeeded => "已完成", .failed => "失败", .cancelled => "已停止", .outcome_unknown, .interrupted => "待核验", .queued_dependency => "等待前序", .human_wait => "等待用户", .waiting_model => "等待模型", .settling => "收尾中", .waiting_children => "等待子任务", .running => "运行中",
+                .succeeded => "已完成",
+                .failed => "失败",
+                .cancelled => "已停止",
+                .outcome_unknown, .interrupted => "待核验",
+                .queued_dependency => "等待前序",
+                .human_wait => "等待用户",
+                .waiting_model => "等待模型",
+                .settling => "收尾中",
+                .waiting_children => "等待子任务",
+                .running => "运行中",
             };
             const caption = if (row.previous_seq) |seq| try std.fmt.bufPrint(&status, "{s} · 接续 #{d}", .{ state, seq }) else state;
             try card.appendChild(self.cx.allocator, try ui.textStyled(self.cx, S.secondary, caption));
@@ -521,7 +568,7 @@ pub const View = struct {
         ui.widgets.setScrollY(self.scroll.state, self.scroll.content, 0);
         self.cx.requestRedraw();
     }
-        fn urgeParent(self: *View) void {
+    fn urgeParent(self: *View) void {
         if (self.hooks.urge_parent) |urge| urge(self.hooks.context, self.stall_task orelse return);
     }
     fn stopAll(self: *View) void {
@@ -535,6 +582,7 @@ pub const View = struct {
     pub fn updateWithCount(self: *View, entries: []const projection.Entry, running_count: ?usize) !void {
         if (!std.meta.eql(self.viewport, self.cx.viewport)) {
             self.viewport = self.cx.viewport;
+            self.graph_dialog.setStyleInline(self.cx.allocator, .{ .width = .{ .px = @max(0, self.viewport.width - 24) }, .height = .{ .px = @max(0, self.viewport.height - 24) } });
             self.chrome.setStyleInline(self.cx.allocator, S.panel(self.cx.tokens, self.viewport));
             self.scroll.container.setStyleInline(self.cx.allocator, S.panelBody(self.viewport, self.stall_task != null, self.page == .rounds));
             self.graph_fingerprint = 0;
@@ -549,9 +597,11 @@ pub const View = struct {
             for (self.rows.items) |row| row.repaint();
         }
         var count: usize = 0;
+        var active_count: usize = 0;
         var hash = std.hash.Wyhash.init(0);
         for (entries) |entry| {
             count += @intFromBool(entry.running or entry.waiting_user);
+            active_count += @intFromBool(entry.active or entry.waiting_user);
             std.hash.autoHash(&hash, .{ entry.agent, entry.revision, entry.group, entry.running, entry.awaiting_approval, entry.reusable, entry.changed_at_ms });
             hash.update(entry.name);
             hash.update(entry.status);
@@ -565,7 +615,8 @@ pub const View = struct {
             try std.fmt.bufPrint(&count_buffer, "{d} 待审批", .{waiting_approval})
         else if (count != 0)
             try std.fmt.bufPrint(&count_buffer, "{d} 运行中", .{count})
-        else "";
+        else
+            "";
         self.heading_count.setDisplay(if (count_label.len == 0) .none else .flex);
         const stoppable = for (entries) |entry| {
             if (entry.active or entry.running) break true;
@@ -575,6 +626,8 @@ pub const View = struct {
         const label = try std.fmt.bufPrint(&self.a11y_label, "子智能体，{d} 个运行中，{d} 个待审批", .{ count, waiting_approval });
         if (self.button.behavior.interaction.a11y) |*a11y| a11y.label = label;
         try Header.updateCountBadge(self.cx, self.badge, waiting_approval);
+        // The approval number keeps priority over the ambient running dot.
+        Header.updateDotBadge(self.cx, self.running_badge, waiting_approval == 0 and active_count != 0);
         if (!self.open.peek()) {
             self.fingerprint = 0;
             var index = self.rows.items.len;

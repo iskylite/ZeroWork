@@ -24,7 +24,7 @@ pub const WorkspaceSource = struct {
     snapshot: local_workspace.Snapshot,
 };
 pub const Event = struct {
-    kind: enum { create, bind, end_requested, unbind, fork, fork_bound, handoff, environment, checkpoint, presentation, draft, remove, migrate_bound, migrate_closed, child_create, child_bind, remove_family, task_fact, child_launch, child_config, workspace_update, workspace_ack, conversation_model },
+    kind: enum { create, bind, end_requested, unbind, fork, fork_bound, handoff, environment, checkpoint, presentation, draft, remove, migrate_bound, migrate_closed, child_create, child_bind, remove_family, task_fact, child_launch, child_config, workspace_update, workspace_ack, conversation_model, board_post },
     conversation: identity.ConversationId,
     agent: ?identity.AgentId = null,
     owner: ?scope.Owner = null,
@@ -53,6 +53,7 @@ pub const Event = struct {
     workspace_change: ?WorkspaceChange = null,
     workspace_ack_revision: ?u64 = null,
     conversation_model: ?ConversationModel = null,
+    board_post: ?@import("swarm_board.zig").Post = null,
 };
 pub const Persistence = struct {
     context: *anyopaque,
@@ -66,6 +67,29 @@ pub const Persistence = struct {
         finish: *const fn (*anyopaque) anyerror!void,
         release: *const fn (*anyopaque) void,
     };
+};
+/// A replayed board post (V0.7 §11.1): owning strings plus the parent
+/// conversation the root event stream belongs to. Restored posts feed the
+/// Board page and Graph edges after a restart; live delivery state stays on
+/// the executing Root and is never revived from the journal.
+pub const BoardPostOwned = struct {
+    arena: std.heap.ArenaAllocator,
+    conversation: identity.ConversationId,
+    post: @import("swarm_board.zig").Post,
+    pub fn init(a: std.mem.Allocator, conversation: identity.ConversationId, post: @import("swarm_board.zig").Post) !BoardPostOwned {
+        const board = @import("swarm_board.zig");
+        if (post.origin == 0 or post.text.len == 0 or post.text.len > board.max_text_bytes or !std.unicode.utf8ValidateSlice(post.text)) return error.InvalidSessionJournal;
+        if (post.to == .member and post.to.member == 0) return error.InvalidSessionJournal;
+        var arena = std.heap.ArenaAllocator.init(a);
+        errdefer arena.deinit();
+        var copy = post;
+        copy.text = try arena.allocator().dupe(u8, post.text);
+        copy.kind = try arena.allocator().dupe(u8, post.kind);
+        return .{ .arena = arena, .conversation = conversation, .post = copy };
+    }
+    pub fn deinit(self: *BoardPostOwned) void {
+        self.arena.deinit();
+    }
 };
 pub const Record = struct {
     id: identity.ConversationId,
@@ -186,6 +210,9 @@ pub const Store = struct {
     share_storage: ?struct { io: std.Io, dir: std.Io.Dir } = null,
     budget: input.Budget = .{},
     task_facts: std.ArrayList(@import("task_budget.zig").Owned) = .empty,
+    /// V0.7 §11.1: board posts restored from `.board_post` journal events,
+    /// ordered by arrival. Display-only after replay (Board page, Graph).
+    board_posts: std.ArrayList(BoardPostOwned) = .empty,
 
     pub fn init(a: std.mem.Allocator) Store {
         return .{ .allocator = a };
@@ -193,6 +220,8 @@ pub const Store = struct {
     pub fn deinit(self: *Store) void {
         for (self.task_facts.items) |*fact| fact.deinit();
         self.task_facts.deinit(self.allocator);
+        for (self.board_posts.items) |*post| post.deinit();
+        self.board_posts.deinit(self.allocator);
         for (self.records.items) |record| record.deinit(self.allocator);
         for (self.agents.items) |value| {
             self.allocator.free(value.targets);
@@ -226,6 +255,14 @@ pub const Store = struct {
     pub fn persistTask(raw: *anyopaque, fact: @import("task_budget.zig").Fact) !void {
         const self: *Store = @ptrCast(@alignCast(raw));
         try self.save(.{ .kind = .task_fact, .conversation = fact.conversation, .revision = fact.sequence, .task_fact = fact });
+    }
+    /// V0.7 §11.1 board-post hook (Root.board_persist). The post rides the
+    /// parent conversation's journal; a post for an unknown conversation is
+    /// rejected instead of silently escaping the event stream.
+    pub fn persistBoardPost(raw: *anyopaque, conversation: identity.ConversationId, post: @import("swarm_board.zig").Post) !void {
+        const self: *Store = @ptrCast(@alignCast(raw));
+        const record = self.find(conversation) orelse return error.ConversationNotFound;
+        try self.save(.{ .kind = .board_post, .conversation = conversation, .revision = record.revision, .board_post = post });
     }
     /// V0.7 §2.1 replay migration: a delegated fact without a persisted seq
     /// receives the next number in persisted order under its parent task.
@@ -1267,6 +1304,7 @@ pub const Store = struct {
     /// worker. A saved binding is metadata, never recovered execution power.
     pub fn replay(self: *Store, event: Event) !void {
         if (event.workspace_ack_revision != null and event.kind != .workspace_ack) return error.InvalidSessionJournal;
+        if (event.board_post != null and event.kind != .board_post) return error.InvalidSessionJournal;
         if (event.workspace != null or event.workspace_source != null or event.workspace_change != null) switch (event.kind) {
             .workspace_update, .bind, .fork_bound, .child_create, .child_bind, .child_launch => {},
             else => return error.InvalidSessionJournal,
@@ -1371,6 +1409,27 @@ pub const Store = struct {
             } else try self.task_facts.append(self.allocator, owned);
             return;
         }
+        if (event.kind == .board_post) {
+            // V0.7 §11.1: the post rode the parent conversation's root event
+            // stream, so the root fact must already be restored; replay keeps
+            // arrival order for the Board page and Graph edges.
+            const post = event.board_post orelse return error.InvalidSessionJournal;
+            if (event.revision == 0 or event.agent != null or event.owner != null or event.operation != null or event.parent != null or event.source_revision != null or event.turn != 0 or event.messages.len != 0 or event.presentation != null or event.context_usage != null or event.draft != null or event.recoverable != true or event.initial_input != null or event.initial_origin != null or event.child_info != null or event.child_settings != null or event.parent_binding != null or event.targets != null or event.children != null or event.task_fact != null or event.initial_text != null or event.workspace != null or event.workspace_source != null or event.workspace_change != null or event.workspace_ack_revision != null or event.conversation_model != null) return error.InvalidSessionJournal;
+            var root_found = false;
+            for (self.task_facts.items) |saved| {
+                if (saved.fact.parent == null and saved.fact.conversation.eql(event.conversation)) {
+                    root_found = true;
+                    break;
+                }
+            }
+            if (!root_found or self.find(event.conversation) == null) return error.InvalidSessionJournal;
+            var owned = try BoardPostOwned.init(self.allocator, event.conversation, post);
+            errdefer owned.deinit();
+            try self.board_posts.ensureUnusedCapacity(self.allocator, 1);
+            self.board_posts.appendAssumeCapacity(owned);
+            return;
+        }
+        if (event.board_post != null) return error.InvalidSessionJournal;
         if (event.task_fact != null) return error.InvalidSessionJournal;
         if ((event.kind == .conversation_model) != (event.conversation_model != null)) return error.InvalidSessionJournal;
         if (!event.conversation.valid() or event.revision == 0) return error.InvalidSessionJournal;
@@ -1498,7 +1557,7 @@ pub const Store = struct {
                 self.eraseRecord(value.id);
                 return;
             },
-            .task_fact, .child_launch, .child_config, .workspace_update, .workspace_ack => unreachable,
+            .task_fact, .child_launch, .child_config, .workspace_update, .workspace_ack, .board_post => unreachable,
             .remove => {
                 if (value.child != null or self.childCount(value.id) != 0) return error.InvalidSessionJournal;
                 if (value.binding != null) return error.InvalidSessionJournal;

@@ -1456,3 +1456,118 @@ test "AI workspace lifecycle journals a frozen input batch and host notice in on
     try std.testing.expectEqual(@as(usize, 3), recovered.recovery_history.messages.len);
     try std.testing.expectEqual(@FieldType(provider.Message, "origin").host_context_notice, recovered.recovery_history.messages[1].origin);
 }
+
+test "AI session PATCH uncertain child wait stays steerable until the dependency wait ends" {
+    const a = std.testing.allocator;
+    const loop_mod = @import("ai/tool_loop.zig");
+    const budget = @import("ai/task_budget.zig");
+    // The fixture returns an unknown tool outcome (uncertain) while a child
+    // task keeps running, so the turn enters the uncertain dependency wait.
+    // A steer admitted from another thread must be accepted (.accepted) and
+    // break the wait — closing the inbox only happens after the wait.
+    const Fixture = struct {
+        inbox: *input.Inbox,
+        ticket: input.Fence,
+        requests: usize = 0,
+        /// Set inside execute: the dispatch gate has already passed, so the
+        /// steerer thread may now admit without invalidating the dispatch.
+        dispatched: std.atomic.Value(bool) = .init(false),
+        fn chat(raw: *anyopaque, _: provider.ChatRequest, sink: *const fn (*anyopaque, provider.Delta) void, ctx: *anyopaque) !provider.ChatStats {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.requests += 1;
+            if (self.requests == 1) {
+                sink(ctx, .{ .tool_plan = .{ .call_id = "only", .name = "read_terminal", .index = 0, .arguments = "{\"session_ids\":[1]}" } });
+            } else {
+                sink(ctx, .{ .text = "recovered answer" });
+            }
+            sink(ctx, .done);
+            return .{};
+        }
+        fn models(_: *anyopaque, allocator: std.mem.Allocator) ![]provider.ModelInfo {
+            return allocator.alloc(provider.ModelInfo, 0);
+        }
+        fn execute(raw: *anyopaque, _: loop_mod.Invocation, allocator: std.mem.Allocator, _: ?*provider.CancelToken) !loop_mod.Outcome {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.dispatched.store(true, .release);
+            const targets = try allocator.alloc(loop_mod.TargetResult, 1);
+            targets[0] = .{ .session_id = 1, .status = .unknown, .transport = .local, .stdout = try allocator.dupe(u8, ""), .stderr = try allocator.dupe(u8, "") };
+            return .{ .targets = targets };
+        }
+    };
+    const WaitSteerer = struct {
+        inbox: *input.Inbox,
+        ticket: input.Fence,
+        fixture: *Fixture,
+        receipt: ?input.Receipt = null,
+        fn wake(self: *@This()) void {
+            // Admit only after the tool dispatch has crossed its gate (the
+            // fixture sets `dispatched` inside execute), once the uncertain
+            // branch advertises the response phase again and the inbox is
+            // still unclosed. Admitting during the model round would make
+            // planCurrent stale and the tool would never dispatch.
+            const started = std.Io.Clock.Timestamp.now(std.testing.io, .awake);
+            while (!self.fixture.dispatched.load(.acquire)) {
+                if (started.durationTo(std.Io.Clock.Timestamp.now(std.testing.io, .awake)).raw.toMilliseconds() > 3000) break;
+                (@import("ai/retry.zig").Clock{}).sleep(std.time.ns_per_ms);
+            }
+            while (true) {
+                self.inbox.lock();
+                const phase = self.inbox.work_phase;
+                const closing = self.inbox.closing;
+                self.inbox.unlock();
+                if (phase == .response or closing) break;
+                if (started.durationTo(std.Io.Clock.Timestamp.now(std.testing.io, .awake)).raw.toMilliseconds() > 3000) break;
+                (@import("ai/retry.zig").Clock{}).sleep(std.time.ns_per_ms);
+            }
+            self.receipt = self.inbox.admit(self.ticket, identity.SubmissionId.generate(), .{ .content = "steer during child wait" }, .steer) catch null;
+        }
+    };
+    var store = lifecycle.Store.init(a);
+    defer store.deinit();
+    const agent = try store.attach(.{ .session = 1 });
+    const ticket = try store.create(agent.id);
+    const inbox = &store.find(ticket.conversation).?.inbox;
+    const first = try inbox.admit(ticket, identity.SubmissionId.generate(), .{ .content = "start" }, .queue);
+    _ = try inbox.claim(first.id, first.revision, null, 9, .start);
+    // Shared root with one still-running child: the uncertain wait must not
+    // end while the child runs, except through a steering break.
+    var root = budget.Root.init(a);
+    defer root.deinit();
+    const parent_task = identity.TaskId.generate();
+    try root.add(.{ .root = parent_task, .task = parent_task, .agent = .generate(), .conversation = .generate(), .generation = 1 });
+    try root.add(.{ .root = parent_task, .task = identity.TaskId.generate(), .parent = parent_task, .agent = .generate(), .conversation = .generate(), .generation = 1, .seq = 1, .status = .running });
+    var fixture: Fixture = .{ .inbox = inbox, .ticket = ticket };
+    var manager = Manager.init(a);
+    defer manager.deinit();
+    manager.input = inbox;
+    manager.turn_id = 9;
+    manager.scope = .{ .owner = agent.owner, .members = .{ .ids = .{1} ++ @as([15]u64, @splat(0)), .len = 1 } };
+    manager.tool_host = .{ .context = &fixture, .execute = Fixture.execute };
+    manager.shared_task = .{ .root = &root, .task = parent_task };
+    var steerer: WaitSteerer = .{ .inbox = inbox, .ticket = ticket, .fixture = &fixture };
+    const thread = try std.Thread.spawn(.{}, WaitSteerer.wake, .{&steerer});
+    var joined = false;
+    errdefer if (!joined) thread.join();
+    _ = try manager.run(.{ .ctx = &fixture, .chat = Fixture.chat, .models = Fixture.models }, .{ .model = "test", .system = "", .messages = &.{}, .tools = &.{.{ .tool = .read_terminal, .session_ids = &.{1} }}, .run_timeout_ms = 20000 });
+    thread.join();
+    joined = true;
+    try std.testing.expectEqual(@as(usize, 2), fixture.requests);
+    try std.testing.expect(manager.tool_run.?.uncertain);
+    // The steer was admitted during the unclosed wait: accepted into the
+    // live turn, which is exactly what breaks waitForChildren.
+    const receipt = steerer.receipt orelse return error.SteerNotAdmitted;
+    try std.testing.expectEqual(input.Delivery.accepted, receipt.delivery);
+    try std.testing.expectEqual(input.Route.steer, receipt.route);
+    try std.testing.expectEqual(@as(?u64, 9), receipt.turn);
+    // Closing happens after the wait: the still-unconsumed steer pauses
+    // .failure like every other open input at turn close.
+    inbox.lock();
+    const steer_entry = inbox.findLocked(receipt.id).?;
+    try std.testing.expectEqual(input.Pause.failure, steer_entry.receipt.pause.?);
+    inbox.unlock();
+    try std.testing.expect(inbox.closing);
+    // The wait was interrupted, not settled: the child is still running.
+    root.lock();
+    defer root.mutex.unlock();
+    try std.testing.expectEqual(budget.Status.running, root.facts[1].status);
+}

@@ -542,6 +542,31 @@ pub const Manager = struct {
         job.speed_bps = 0;
     }
 
+    /// A terminal receipt can leave the list only once its engine job is gone
+    /// and cleanup is confirmed. Live or retained jobs keep their history.
+    pub fn canDismiss(self: *const Manager, id: JobId) bool {
+        for (self.jobs.items) |job| if (job.id == id) {
+            return terminal(job.state) and job.engine_job == null and job.job_cleanup == .released and job.retained_owner == null;
+        };
+        return false;
+    }
+
+    /// Removes a finished job's process-local receipt and event history.
+    /// The transferred files are never touched; this only clears the list row.
+    pub fn dismiss(self: *Manager, id: JobId) !void {
+        const index = for (self.jobs.items, 0..) |job, i| {
+            if (job.id == id) break i;
+        } else return error.UnknownJob;
+        const job = self.jobs.items[index];
+        if (!terminal(job.state)) return error.InvalidState;
+        if (job.engine_job != null) return error.CleanupPending;
+        try requireReleased(&job);
+        if (job.retained_owner != null) return error.RetainedCleanupRequired;
+        var owned = job.spec;
+        _ = self.jobs.orderedRemove(index);
+        owned.deinit(self.allocator);
+    }
+
     /// Snapshot/decisions always route through this exact active attempt.
     pub fn conflictSnapshot(self: *Manager, allocator: std.mem.Allocator, id: JobId) !?Conflict.OwnedSnapshot {
         const job = self.find(id) orelse return error.UnknownJob;

@@ -46,6 +46,7 @@ pub fn explanation(code: []const u8) []const u8 {
         .{ "ChallengeReportPending", "前序任务尚未成功交付，复审未开始。" },
         .{ "InvalidVerification", "请逐项填写原始要求、检查结果和依据。" },
         .{ "ChildAwaitingUser", "子任务正在等待用户处理，请保留子任务并等待用户决定。" },
+        .{ "TaskAlreadyFinished", "这次任务已经结束，无法继续执行。" },
         .{ "ToolApprovalChanged", "操作条件已变化，原确认已失效。该操作尚未执行。" },
         .{ "ScopeChanged", "原来的操作目标或授权范围已变化，该操作尚未执行。请检查当前范围后重新规划这一步。" },
         .{ "StaleToolAuthority", "目标终端或工具能力已变化，该操作尚未执行。请刷新目标后重新规划这一步。" },

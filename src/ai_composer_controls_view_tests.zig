@@ -138,6 +138,10 @@ test "AI composer orchestration chip keeps send separate and selects a mode at 8
     const execution = f.view.buttons[5].globalRect();
     const usage = f.view.buttons[4].globalRect();
     try std.testing.expectEqual(@as(f32, 24), chip.globalRect().h);
+    // The mode glyph matches the permission/execution chip icons (12px); a
+    // larger 14px box made Swarm read oversized beside its neighbours.
+    try std.testing.expectEqual(@as(f32, 12), f.view.icons[6].style.width.px);
+    try std.testing.expectEqual(@as(f32, 12), f.view.icons[6].style.height.px);
     try std.testing.expect(chip.globalRect().x >= execution.x + execution.w);
     try std.testing.expect(chip.globalRect().x + chip.globalRect().w < usage.x);
     try std.testing.expectEqual(@as(f32, 28), f.view.trailing.globalRect().w);
@@ -155,6 +159,21 @@ test "AI composer orchestration chip keeps send separate and selects a mode at 8
     f.settle();
     try std.testing.expectEqualStrings("Boost", f.view.labels[6].?.getText().?.content);
     try std.testing.expectEqual(ui.icons.get("flame").?.icon_id.?, f.view.icons[6].getIcon().?.icon_id);
+}
+
+test "AI composer send and stop share one trailing slot" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const stop = try ui.widgets.Button(.{ .a11y_label = "停止", .base_style = ui.BoxStyle{ .width = .{ .px = 28 }, .height = .{ .px = 28 }, .padding = .{} } }).mount(f.scope, f.cx);
+    try f.view.trailing.insertChildBefore(f.cx.allocator, stop, f.send);
+    stop.setDisplay(.flex);
+    f.send.setDisplay(.none);
+    f.settle();
+    try std.testing.expectEqual(@as(f32, 28), f.view.trailing.globalRect().w);
+    try std.testing.expectApproxEqAbs(f.view.root.globalRect().x + f.view.root.globalRect().w, stop.globalRect().x + 28, 0.1);
+    try std.testing.expectApproxEqAbs(stop.globalRect().x, f.send.globalRect().x, 0.1);
+    try std.testing.expectApproxEqAbs(stop.globalRect().y, f.send.globalRect().y, 0.1);
 }
 
 test "AI composer grouped model list uses configured capabilities and a captured typed selection awaiting acknowledgement" {

@@ -9,6 +9,8 @@ const budget = @import("ai/task_budget.zig");
 const lifecycle = @import("ai/session_lifecycle.zig");
 const Runtime = @import("ai/session_runtime.zig");
 const gateway = @import("ai/child_gateway.zig");
+const board = @import("ai/swarm_board.zig");
+const input_mod = @import("ai/session_input.zig");
 const Journal = @import("ai/session_journal.zig").Journal;
 const scope = @import("ai/tool_scope.zig");
 const P = @import("ai/provider.zig");
@@ -82,6 +84,8 @@ test "v0.7 @seq、裸 label、agent_id 三向引用解析" {
 const Fake = struct {
     calls: std.atomic.Value(usize) = .init(0),
     release: std.atomic.Value(bool) = .init(false),
+    notice_seen: std.atomic.Value(bool) = .init(false),
+    any_notice: std.atomic.Value(bool) = .init(false),
     fn backend(self: *Fake) Runtime.Backend {
         return .{ .context = self, .prepare = prepare };
     }
@@ -93,6 +97,15 @@ const Fake = struct {
     fn chat(raw: *anyopaque, request: P.ChatRequest, sink: *const fn (*anyopaque, P.Delta) void, output: *anyopaque) !P.ChatStats {
         const self: *Fake = @ptrCast(@alignCast(raw));
         _ = self.calls.fetchAdd(1, .acq_rel);
+        // V0.7 §11.2: capture host context notices; the board-marker subset
+        // keeps its dedicated flag for the board pipeline tests.
+        for (request.messages) |message| {
+            if (message.origin != .host_context_notice) continue;
+            self.any_notice.store(true, .release);
+            if (std.mem.indexOf(u8, message.content, board.board_marker) != null) {
+                self.notice_seen.store(true, .release);
+            }
+        }
         while (!self.release.load(.acquire)) {
             if (request.cancel) |cancel| if (cancel.isCancelled()) return error.Cancelled;
             (Clock{}).sleep(std.time.ns_per_ms);
@@ -324,4 +337,201 @@ test "v0.7 Boost verification waits for settlement and survives journal replay" 
     try std.testing.expectEqual(@as(u8, 1), replayed.rows[0].round.number);
     try std.testing.expect(replayed.parent.?.verification.?[0].passed);
     try std.testing.expect(!replayed.parent.?.verification.?[1].passed);
+}
+
+// V0.7 §11.2 回归：to=@seq 帖子由宿主直投目标成员下一轮（此前成员帖从未投递，
+// 永远留在板上）。与 main.dispatchBoardPost 同一机制：factForSeq 解析目标 →
+// 目标会话 fence → steer 提交（空闲成员入箱即等价唤醒）→ markPostDelivered。
+test "v0.7 to=@seq 直投：空闲成员 steer 入箱即唤醒且标记 delivered" {
+    var main: Fake = .{};
+    var child: Fake = .{};
+    var service = Runtime.Service.init(a);
+    defer service.deinit();
+    const parent = try service.attach(.{ .session = 11 }, main.backend());
+    const fence = try service.store.create(parent.agent.id);
+    _ = try service.submit(fence, .generate(), .{ .content = "parent" }, null);
+    try started(&main);
+    var factory: Factory = .{ .service = &service, .fake = &child };
+    const env: gateway.Environment = .{ .service = &service, .authority = parent.context.?.authority(), .live = .{ .owner = parent.agent.owner, .members = .{}, .inventory = &.{11} }, .handles = &.{.{ .session_id = @fromBackingInt(11), .generation = 2 }}, .factory = .{ .context = &factory, .install = Factory.install } };
+    // 成员 #1 立即开跑；成员 #2 依赖 @1，落排队（queued_dependency）：已绑定、
+    // 无活跃回合——这是产品中唯一稳定的"空闲且可直投"成员状态（子会话落定即
+    // 结束解绑，见 pollRunner 的 auto_end 收尾）。
+    var first = try invoke(env, "{\"action\":\"create\",\"request_key\":\"k1\",\"text\":\"成员一\",\"session_refs\":[],\"reusable\":true}");
+    defer first.deinit(a);
+    try started(&child);
+    var second = try invoke(env, "{\"action\":\"create\",\"request_key\":\"k2\",\"text\":\"成员二\",\"session_refs\":[],\"reusable\":true,\"depends_on\":[\"@1\"]}");
+    defer second.deinit(a);
+    const root = parent.task_root.?;
+    {
+        const gated_start = (Clock{}).now();
+        while (true) {
+            root.lock();
+            const status = root.facts[2].status;
+            root.mutex.unlock();
+            if (status == .queued_dependency) break;
+            try service.poll();
+            if ((Clock{}).now() - gated_start > 3 * std.time.ns_per_s) return error.TestWorkerTimeout;
+            (Clock{}).sleep(std.time.ns_per_ms);
+        }
+    }
+    // #1 的 answer 帖点名 @2：宿主解析成员 2 会话并直投。
+    var post: board.Post = .{ .origin = 1, .to = .{ .member = 2 }, .category = .answer, .text = "给成员 2 的结果摘要", .ts = 1 };
+    const digest = board.textDigest(post.text);
+    @memcpy(post.post_id[0..16], digest[0..16]);
+    try root.postBoard(post);
+    const member = try root.factForSeq(parent.context.?.task, 2);
+    try std.testing.expectEqual(@as(u32, 2), member.seq);
+    const ticket = try service.store.fence(member.conversation);
+    const notice = try std.fmt.allocPrint(a, "{s}\n#{d} {s}: {s}", .{ board.board_marker, post.origin, @tagName(post.category), post.text });
+    defer a.free(notice);
+    const receipt = try service.submit(ticket, id.SubmissionId.generate(), .{ .role = .user, .origin = .host_context_notice, .content = notice }, .steer);
+    // 空闲成员：宿主通知 steer 入箱即等价唤醒（start 路由）。
+    try std.testing.expectEqual(input_mod.Route.start, receipt.route);
+    // 成员 1 落定后依赖解除，成员 2 带着宿主通知进入下一轮模型输入。
+    child.release.store(true, .release);
+    const settle_start = (Clock{}).now();
+    while (root.childrenRunning(parent.context.?.task)) {
+        try service.poll();
+        if ((Clock{}).now() - settle_start > 3 * std.time.ns_per_s) return error.TestWorkerTimeout;
+        (Clock{}).sleep(std.time.ns_per_ms);
+    }
+    const wake_start = (Clock{}).now();
+    while (!child.notice_seen.load(.acquire)) {
+        try service.poll();
+        if ((Clock{}).now() - wake_start > 3 * std.time.ns_per_s) return error.TestWorkerTimeout;
+        (Clock{}).sleep(std.time.ns_per_ms);
+    }
+    // 直投成功后标记 delivered：父侧 deliverSettledReports 不再重复投递。
+    try std.testing.expect(root.markPostDelivered(post.post_id));
+    {
+        root.lock();
+        defer root.mutex.unlock();
+        try std.testing.expect(root.board_posts.items[0].delivered);
+    }
+}
+
+// V0.7 §12.2 一级停滞唤醒回归：目标场景是“父空闲、全子终态”，此时收件箱对
+// .steer 的路由是 .start（routeLocked 只在活跃未关闭回合才回 .steer）——旧的
+// `previewInput != .steer` 门控恰好把目标场景全部拒掉，唤醒永远提交不出去。
+// 宿主侧与 wakeParentReports/wakeForBoardPost 一致：直接 submit（admission 即
+// 验收），通知以 host_context_notice 打标进入父会话下一轮输入。
+test "v0.7 §12.2 停滞唤醒：空闲父会话 steer 入箱即唤醒且宿主通知打标" {
+    var main: Fake = .{};
+    var child: Fake = .{};
+    var service = Runtime.Service.init(a);
+    defer service.deinit();
+    const parent = try service.attach(.{ .session = 11 }, main.backend());
+    const fence = try service.store.create(parent.agent.id);
+    _ = try service.submit(fence, .generate(), .{ .content = "parent" }, null);
+    try started(&main);
+    var factory: Factory = .{ .service = &service, .fake = &child };
+    const env: gateway.Environment = .{ .service = &service, .authority = parent.context.?.authority(), .live = .{ .owner = parent.agent.owner, .members = .{}, .inventory = &.{11} }, .handles = &.{.{ .session_id = @fromBackingInt(11), .generation = 2 }}, .factory = .{ .context = &factory, .install = Factory.install } };
+    var created = try invoke(env, "{\"action\":\"create\",\"request_key\":\"k1\",\"text\":\"成员一\",\"session_refs\":[],\"reusable\":true}");
+    defer created.deinit(a);
+    try started(&child);
+    const parent_task = parent.context.?.task;
+    // 子任务终态、父回合结束：inject_wake 的目标场景（父空闲、全子终态）。
+    child.release.store(true, .release);
+    main.release.store(true, .release);
+    const settle_start = (Clock{}).now();
+    while (parent.task_root.?.childrenRunning(parent_task)) {
+        try service.poll();
+        if ((Clock{}).now() - settle_start > 3 * std.time.ns_per_s) return error.TestWorkerTimeout;
+        (Clock{}).sleep(std.time.ns_per_ms);
+    }
+    // 回归锚点：空闲收件箱对 .steer 的路由是 .start 而非 .steer——
+    // `previewInput != .steer` 门控会在这里拒绝每一次停滞唤醒。
+    const idle_start = (Clock{}).now();
+    while (true) {
+        if ((try service.previewInput(fence, .steer)) == .start) break;
+        try service.poll();
+        if ((Clock{}).now() - idle_start > 3 * std.time.ns_per_s) return error.TestWorkerTimeout;
+        (Clock{}).sleep(std.time.ns_per_ms);
+    }
+    // 直接 submit 即验收：空闲路由 .start 即唤醒，宿主通知打标入箱。
+    const receipt = try service.submit(fence, id.SubmissionId.generate(), .{ .role = .user, .origin = .host_context_notice, .content = "全部子任务已结束，请汇总" }, .steer);
+    try std.testing.expectEqual(input_mod.Route.start, receipt.route);
+    // 唤醒进入父会话下一轮模型输入（请求里带打标的宿主通知）。
+    const wake_start = (Clock{}).now();
+    while (!main.any_notice.load(.acquire)) {
+        try service.poll();
+        if ((Clock{}).now() - wake_start > 3 * std.time.ns_per_s) return error.TestWorkerTimeout;
+        (Clock{}).sleep(std.time.ns_per_ms);
+    }
+    main.release.store(true, .release);
+}
+
+// V0.7 §11.1 回归：board post 以 `.board_post` 事件落 session journal，并在重放
+// 时恢复（Board 页与 Graph 边的板结构不再随重启丢失）。
+test "v0.7 board post 落 journal 并在重放时恢复" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var journal = try Journal.open(a, std.testing.io, tmp.dir, "sessions.jsonl");
+    defer journal.deinit();
+    var store = lifecycle.Store.init(a);
+    defer store.deinit();
+    try journal.bind(&store);
+    const parent_agent = try store.attach(.{ .session = 11 });
+    const ticket = try store.create(parent_agent.id);
+    // Root 挂接与 session_runtime.Service.start 相同的持久化钩子。
+    var root = budget.Root.init(a);
+    defer root.deinit();
+    const parent_task = id.TaskId.generate();
+    try root.add(.{ .root = parent_task, .task = parent_task, .conversation = ticket.conversation, .agent = parent_agent.id, .generation = 1, .request_key = "board-root" });
+    try lifecycle.Store.persistTask(&store, root.facts[0]);
+    root.board_persist = .{ .context = &store, .write = lifecycle.Store.persistBoardPost };
+    var ask: board.Post = .{ .origin = 1, .to = .parent, .category = .ask, .text = "请求确认方案", .ts = 100 };
+    const digest = board.textDigest(ask.text);
+    @memcpy(ask.post_id[0..16], digest[0..16]);
+    try root.postBoard(ask);
+    try root.postBoard(.{ .origin = 2, .to = .all, .category = .note, .text = "广播备注", .ts = 200 });
+    // 直投成功翻转内存 delivered；journal 保存写入时快照（见 restore 语义注释）。
+    try std.testing.expect(root.markPostDelivered(ask.post_id));
+    // 重放到新 Store：帖文、地址、post_id、顺序与所属会话恢复。
+    var replayed = lifecycle.Store.init(a);
+    defer replayed.deinit();
+    try journal.bind(&replayed);
+    try std.testing.expectEqual(@as(usize, 2), replayed.board_posts.items.len);
+    const first = replayed.board_posts.items[0];
+    try std.testing.expect(first.conversation.eql(ticket.conversation));
+    try std.testing.expectEqualStrings("请求确认方案", first.post.text);
+    try std.testing.expectEqual(board.Category.ask, first.post.category);
+    try std.testing.expect(first.post.to == .parent);
+    try std.testing.expectEqual(@as(u32, 1), first.post.origin);
+    try std.testing.expectEqual(@as(i64, 100), first.post.ts);
+    try std.testing.expectEqualSlices(u8, &ask.post_id, &first.post.post_id);
+    const second = replayed.board_posts.items[1];
+    try std.testing.expectEqualStrings("广播备注", second.post.text);
+    try std.testing.expect(second.post.to == .all);
+    // Board 页投影（child_projection.boardRows）包含恢复帖（Graph 边同源）。
+    var service = Runtime.Service.init(a);
+    defer service.deinit();
+    try service.store.board_posts.ensureUnusedCapacity(a, replayed.board_posts.items.len);
+    for (replayed.board_posts.items) |*stored| {
+        const copy = try lifecycle.BoardPostOwned.init(a, stored.conversation, stored.post);
+        service.store.board_posts.appendAssumeCapacity(copy);
+    }
+    const rows = try @import("ai/child_projection.zig").boardRows(a, &service, ticket.conversation);
+    defer a.free(rows);
+    try std.testing.expectEqual(@as(usize, 2), rows.len);
+    try std.testing.expectEqualStrings("协调者", rows[0].to);
+    try std.testing.expectEqualStrings("全体", rows[1].to);
+    // 事实流先行的顺序约束：root fact 尚未持久化时，board_post 重放被拒。
+    var journal_two = try Journal.open(a, std.testing.io, tmp.dir, "order.jsonl");
+    defer journal_two.deinit();
+    var store_two = lifecycle.Store.init(a);
+    defer store_two.deinit();
+    try journal_two.bind(&store_two);
+    const agent_two = try store_two.attach(.{ .session = 12 });
+    const ticket_two = try store_two.create(agent_two.id);
+    var root_two = budget.Root.init(a);
+    defer root_two.deinit();
+    // 仅内存 add（无 journal 事实），帖事件先于任何事实写入。
+    const orphan_task = id.TaskId.generate();
+    try root_two.add(.{ .root = orphan_task, .task = orphan_task, .conversation = ticket_two.conversation, .agent = agent_two.id, .generation = 1, .request_key = "orphan" });
+    root_two.board_persist = .{ .context = &store_two, .write = lifecycle.Store.persistBoardPost };
+    try root_two.postBoard(.{ .origin = 1, .to = .parent, .category = .ask, .text = "无事实先行的帖子", .ts = 1 });
+    var replayed_two = lifecycle.Store.init(a);
+    defer replayed_two.deinit();
+    try std.testing.expectError(error.InvalidSessionJournal, journal_two.bind(&replayed_two));
 }

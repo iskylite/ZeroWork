@@ -179,3 +179,31 @@ test "v0.7 panel pages: tabs gate on children, switch exclusively, stall banner 
     view.setStallTask(null);
     try std.testing.expect(banner.style.display == .none);
 }
+
+test "v0.7 graph ring keeps the deterministic ≤16 member cap" {
+    defer theme.select(.sauber);
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(860, 480);
+    cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
+    const scope = try ui.Scope.init(a, null, cx.owner);
+    defer scope.dispose();
+    defer cx.clearFocus();
+    const button = try ui.widgets.Button(.{ .label = "子智能体" }).mount(scope, cx);
+    try cx.root.?.appendChild(a, button);
+    var selection: Selection = .{};
+    const view = try View.mount(cx, scope, button, .{ .context = &selection, .select = Selection.select });
+    try cx.root.?.appendChild(a, view.root);
+    view.open.set(true);
+    var entries: [20]projection.Entry = undefined;
+    for (&entries, 0..) |*entry, index| {
+        entry.* = .{ .agent = .generate(), .conversation = .generate(), .revision = 1, .seq = @intCast(index + 1), .name = "成员任务", .status = "运行中", .group = .active, .running = true, .reusable = false };
+    }
+    try view.updateGraph(&entries, &.{});
+    // §14.2: 固定环形坐标最多画 16 个成员节点；其余成员留在成员列表页。
+    var members: usize = 0;
+    for (view.graph_canvas.?.children.items) |child| if (child.meta.ownership.meta.test_id) |value| if (std.mem.eql(u8, value, "ai.children.graph.member")) {
+        members += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 16), members);
+}

@@ -584,7 +584,11 @@ pub fn terminal(value: Delivery) bool {
     return value == .consumed or value == .cancelled or value == .failed;
 }
 fn validateMessage(message: provider.Message) !void {
-    if (message.role != .user or message.origin != .user_or_tool or message.tool_calls.len != 0 or message.tool_call_id != null or !std.unicode.utf8ValidateSlice(message.content) or message.images.len +| message.offloaded_images.len > @import("image_attachments.zig").max_count) return error.InvalidSubmission;
+    // Host context notices (board post wakes, stall wakes) ride the same
+    // admission as user input so an idle conversation starts its next round;
+    // consumers classify them by origin, never as user speech.
+    const user_origin = message.origin == .user_or_tool or message.origin == .host_context_notice;
+    if (message.role != .user or !user_origin or message.tool_calls.len != 0 or message.tool_call_id != null or !std.unicode.utf8ValidateSlice(message.content) or message.images.len +| message.offloaded_images.len > @import("image_attachments.zig").max_count) return error.InvalidSubmission;
 }
 fn sameImage(left: @import("image_attachments.zig").ContentRef, right: @import("image_attachments.zig").ContentRef) bool {
     if (left.snapshot == right.snapshot) return true;
@@ -655,4 +659,24 @@ test "reconnect keeps operation observation across transport fences only" {
     fence.environment += 1;
     inbox.changeFence(fence);
     try std.testing.expect(!inbox.operationObservationCurrent(current));
+}
+
+// V0.7 §11.2: host context notices (board post wakes) admit as user-role
+// steer input; idle inboxes route them as a start (the wake), live turns
+// as a steer supersede. Non-user roles and tool-shaped messages stay
+// rejected for both origins.
+test "host context notice admits as steer input and routes start on idle inbox" {
+    const fence: Fence = .{ .agent = .generate(), .conversation = .generate(), .binding = 1, .environment = 1 };
+    var inbox = Inbox.init(std.testing.allocator, fence);
+    defer inbox.deinit();
+    // 空闲收件箱：宿主通知 steer 入箱等价唤醒（start 路由）。
+    const idle = try inbox.admit(fence, .generate(), .{ .role = .user, .origin = .host_context_notice, .content = "notice" }, .steer);
+    try std.testing.expectEqual(Route.start, idle.route);
+    // 活跃轮次内：同源通知走 steer 取代。
+    inbox.active_turn = 3;
+    const live = try inbox.admit(fence, .generate(), .{ .role = .user, .origin = .host_context_notice, .content = "notice 2" }, .steer);
+    try std.testing.expectEqual(Route.steer, live.route);
+    // 非用户角色与带 tool 形状的宿主通知仍拒绝。
+    try std.testing.expectError(error.InvalidSubmission, inbox.admit(fence, .generate(), .{ .role = .assistant, .origin = .host_context_notice, .content = "x" }, .steer));
+    try std.testing.expectError(error.InvalidSubmission, inbox.admit(fence, .generate(), .{ .role = .user, .origin = .host_context_notice, .content = "x", .tool_call_id = "t" }, .steer));
 }

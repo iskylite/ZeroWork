@@ -846,12 +846,13 @@ test "terminal surface native input queues once across busy service and exposes 
     try view.pasteTerminalText(owner, "a\nb");
     try std.testing.expect(surface.pending_paste != null and surface.modal_open.?.get());
     const before = transport.written.items.len;
-    _ = view.root.behavior.events.on_key_down.?(.@"return", .{}, view.root.behavior.events.key_context);
-    try std.testing.expectEqual(before, transport.written.items.len);
-    try std.testing.expect(surface.pending_paste != null);
+    cx.handleKeyDown(.@"return", .{});
+    try std.testing.expectEqual(before + "a\nb".len, transport.written.items.len);
+    try std.testing.expect(std.mem.endsWith(u8, transport.written.items, "a\nb"));
+    try std.testing.expect(surface.pending_paste == null and !surface.modal_open.?.get());
     transport.read_only = true;
     _ = try view.refreshTerminalService(owner, false);
-    try std.testing.expectEqual(before, transport.written.items.len);
+    try std.testing.expectEqual(before + "a\nb".len, transport.written.items.len);
     try std.testing.expect(view.terminalSnapshot(owner).?.read_only);
     try std.testing.expectError(error.ReadOnlyTerminal, surface.queueText("no"));
 }

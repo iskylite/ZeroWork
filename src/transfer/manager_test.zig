@@ -104,6 +104,42 @@ fn spec(source: []const u8) transfer.JobSpec {
     return .{ .direction = .upload, .sources = &source_slot, .remote_dir = "/srv", .local_dir = "/tmp" };
 }
 
+test "manager dismisses only finished receipts and keeps live jobs addressable" {
+    var fake = FakeEngine{ .allocator = std.testing.allocator };
+    defer fake.deinit();
+    var manager = try transfer.Manager.init(std.testing.allocator, fake.interface(), 2, .{});
+    defer manager.deinit();
+    const live = try manager.enqueue(.{ .direction = .upload, .sources = &.{"live"}, .remote_dir = "/srv", .local_dir = "/tmp" });
+    const done = try manager.enqueue(.{ .direction = .upload, .sources = &.{"done"}, .remote_dir = "/srv", .local_dir = "/tmp" });
+    try std.testing.expect(live != done);
+    manager.tick(0);
+    try std.testing.expectEqual(@as(usize, 2), manager.count());
+
+    // A running job keeps its row: dismiss refuses without touching progress.
+    try std.testing.expect(!manager.canDismiss(live));
+    try std.testing.expectError(error.InvalidState, manager.dismiss(live));
+    try std.testing.expect(manager.progress(live) != null);
+
+    // An engine receipt alone is not enough; the engine job must also be
+    // released before the row can leave the list.
+    const done_engine = manager.engineJob(done).?;
+    try fake.push(.{ .job = done_engine, .done_bytes = 4, .total_bytes = 4, .state = .succeeded, .job_cleanup = .awaiting });
+    manager.tick(1);
+    try std.testing.expect(!manager.canDismiss(done));
+    try std.testing.expectError(error.InvalidState, manager.dismiss(done));
+    try std.testing.expectEqual(@as(usize, 2), manager.count());
+
+    try fake.push(.{ .job = done_engine, .done_bytes = 4, .total_bytes = 4, .state = .succeeded, .job_cleanup = .released });
+    manager.tick(2);
+    try std.testing.expectEqual(transfer.State.succeeded, manager.progress(done).?.state);
+    try manager.dismiss(done);
+    try std.testing.expectEqual(@as(usize, 1), manager.count());
+    try std.testing.expect(manager.progress(done) == null);
+    try std.testing.expectError(error.UnknownJob, manager.dismiss(done));
+    // The live job is untouched by another row's dismissal.
+    try std.testing.expect(manager.progress(live) != null);
+}
+
 test "manager enforces FIFO concurrency and starts next completion" {
     var fake: FakeEngine = .{ .allocator = std.testing.allocator };
     defer fake.deinit();

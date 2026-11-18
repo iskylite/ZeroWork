@@ -8,7 +8,7 @@ pub const confirmation_chrome_height: f32 = 48 + 8 + 16 + 10 + 34;
 pub const row_height: f32 = 76;
 pub const row_pitch: f32 = 84;
 pub const list_scroll_gutter: f32 = 14;
-const task_content_inset: f32 = 10;
+pub const task_content_inset: f32 = 10;
 pub const detail_height: f32 = 176;
 pub fn panel(window: bool) ui.BoxStyle {
     return .{ .width = .{ .px = if (window) 840 else 620 }, .height = .{ .px = if (window) 578 else 330 }, .direction = .column, .padding = .{ .top = 17, .left = 14, .right = 14, .bottom = if (window) 16 else 18 }, .background = theme.current().overlay, .glass = theme.overlayGlass(), .border = .{ .radius = 14 }, .overflow = .hidden, .flex_shrink = 0 };
@@ -33,6 +33,14 @@ pub fn flexibleLabel() ui.BoxStyle {
 }
 pub fn icon(size: f32) ui.Style {
     return .{ .width = .{ .px = size }, .height = .{ .px = size }, .flex_shrink = 0 };
+}
+pub fn ownerTag(width: f32) ui.BoxStyle {
+    var style = row(16, 0);
+    style.width = .{ .px = width };
+    style.padding = .{ .left = 6, .right = 6 };
+    style.background = theme.popupAction();
+    style.border = .{ .radius = 5 };
+    return style;
 }
 pub fn action(size: f32) ui.BoxStyle {
     return .{ .width = .{ .px = size }, .height = .{ .px = size }, .padding = .{}, .align_items = .center, .justify = .center, .background = ui.Color.TRANSPARENT, .border = .{ .radius = 7 }, .flex_shrink = 0 };

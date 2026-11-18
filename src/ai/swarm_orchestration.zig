@@ -16,21 +16,9 @@ pub const GatewayRole = enum { planner, worker, batch };
 pub const default_boost_max_rounds: u8 = 5;
 pub const max_boost_rounds: u8 = 8;
 
-/// 解析 depends_on 引用列表（@seq 形态；宿主解析裸 label/agent_id 同
-/// child_gateway 的 G1 规则）。0 与非正数拒绝。
-pub fn parseDependencies(items: []const []const u8, seen: []u32) error{InvalidArguments}![]const u32 {
-    if (items.len > seen.len) return error.InvalidArguments;
-    for (items, 0..) |item, i| {
-        if (item.len < 2 or item[0] != '@') return error.InvalidArguments;
-        const number = std.fmt.parseInt(u32, item[1..], 10) catch return error.InvalidArguments;
-        if (number == 0) return error.InvalidArguments;
-        for (seen[0..i]) |prior| if (prior == number) return error.InvalidArguments;
-        seen[i] = number;
-    }
-    return seen[0..items.len];
-}
-
 /// 环检测：dependencies 中含自身（self_seq）即闭环。
+/// depends_on/challenge_target 引用的三向解析（@seq / 32 位任务 ID / 唯一裸
+/// label）统一在 child_gateway.resolveChildTask 按 §2.1 规则完成。
 pub fn containsSelf(dependencies: []const u32, self_seq: u32) error{DependencyCycle}!void {
     for (dependencies) |dep| if (dep == self_seq) return error.DependencyCycle;
 }
@@ -75,15 +63,7 @@ pub fn allowsRound(current: u8, declared_max: u8) bool {
     return current < ceiling;
 }
 
-test "v0.7 depends_on parsing rejects zero duplicates and malformed refs" {
-    var buffer: [16]u32 = undefined;
-    const ok = try parseDependencies(&.{ "@1", "@3" }, &buffer);
-    try std.testing.expectEqual(@as(usize, 2), ok.len);
-    try std.testing.expectEqual(@as(u32, 1), ok[0]);
-    try std.testing.expectError(error.InvalidArguments, parseDependencies(&.{"@0"}, &buffer));
-    try std.testing.expectError(error.InvalidArguments, parseDependencies(&.{ "@1", "@1" }, &buffer));
-    try std.testing.expectError(error.InvalidArguments, parseDependencies(&.{"3"}, &buffer));
-    try std.testing.expectError(error.InvalidArguments, parseDependencies(&.{"@x"}, &buffer));
+test "v0.7 depends_on self-cycle detection" {
     // 闭包含自身 → DependencyCycle。
     try std.testing.expectError(error.DependencyCycle, containsSelf(&.{ 1, 2 }, 2));
     try containsSelf(&.{ 1, 3 }, 2);

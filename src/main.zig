@@ -579,6 +579,9 @@ const AiHost = struct {
     pending_view: ?*@import("ui/ai_pending_view.zig").View = null,
     pending_action: ?struct { ticket: @import("ui/ai_pending_view.zig").Ticket, action: @import("ui/ai_pending_view.zig").Action, text: ?[]u8 } = null,
     send_hint: ?*ui.Signal([]const u8) = null,
+    /// Send tooltip trigger/wrapper; hidden while Stop owns the shared slot.
+    send_hint_wrapper: ?*ui.Node = null,
+    send_hint_open: ?*ui.Signal(bool) = null,
     followup_hash: ?u64 = null,
     compaction_agent: ?@import("host/identity.zig").AgentId = null,
     lifecycle_command: ?@import("ai/conversation_commands.zig").Command = null,
@@ -1006,16 +1009,21 @@ const AiHost = struct {
         const root = runner.task_root orelse return;
         if (!root.stall_escalated or !runner.context.?.task.eql(task)) return;
         const fence = shared_host.service.store.fence(runner.context.?.fence.conversation) catch return;
-        if ((shared_host.service.previewInput(fence, .steer) catch return) != .steer) {
-            if (self.feedback) |view| view.show("当前任务无法接收提醒", .warning);
-            return;
-        }
-        _ = shared_host.service.submit(fence, @import("host/identity.zig").SubmissionId.generate(), .{ .content = "请检查集群状态并汇总当前进展。" }, .steer) catch {
+        // Admission is the acceptance check (same as wakeParentReports): the
+        // escalated state is usually a finished parent turn, whose idle
+        // steer route is .start, not .steer — a route gate would reject the
+        // wake exactly when the 催父 button exists.
+        _ = shared_host.service.submit(fence, @import("host/identity.zig").SubmissionId.generate(), .{
+            .role = .user,
+            .origin = .host_context_notice,
+            .content = "请检查集群状态并汇总当前进展。",
+        }, .steer) catch {
             if (self.feedback) |view| view.show("提醒发送失败，请重试", .warning);
             return;
         };
         root.stall_escalated = false;
         root.stall_since_ms = null;
+        root.stall_wake_ms = null;
         if (self.feedback) |view| view.show("已提醒协调者", .completion);
         self.cx.requestRedraw();
     }
@@ -1030,6 +1038,7 @@ const AiHost = struct {
         if (result.failed == 0) {
             root.stall_escalated = false;
             root.stall_since_ms = null;
+            root.stall_wake_ms = null;
         }
         var buffer: [144]u8 = undefined;
         if (self.feedback) |view| view.show(if (result.failed != 0)
@@ -1039,6 +1048,143 @@ const AiHost = struct {
         else
             "本任务没有可停止的子任务", if (result.failed == 0) .completion else .warning);
         self.cx.requestRedraw();
+    }
+
+    /// V0.7 §12.2: submit terminal child reports into a parent conversation
+    /// that no longer has an active turn. The report is admitted as a host
+    /// context notice; a .steer submission starts an idle parent turn or
+    /// joins the current one. Child facts are acknowledged only after the
+    /// inbox accepted the notice, so a failed submit retries on the next
+    /// sweep. The delivered watermark only follows a successful acknowledge:
+    /// a failed fact write keeps those events wait_events-visible. The batch
+    /// is recorded as woken regardless (wake_submitted_sequence), so a
+    /// persist-broken batch is not re-injected on every sweep.
+    fn wakeParentReports(self: *AiHost, shared_host: *@import("ai/attached_service.zig").Host, root: *@import("ai/task_budget.zig").Root, parent: @import("ai/task_budget.zig").Fact, batch: u64) void {
+        const swarm_wake = @import("ai/swarm_wake.zig");
+        var report = (swarm_wake.build(self.allocator, root, parent) catch return) orelse return;
+        defer report.deinit();
+        const service = &shared_host.service;
+        const ticket = service.store.fence(parent.conversation) catch return;
+        _ = service.submit(ticket, @import("host/identity.zig").SubmissionId.generate(), .{
+            .role = .user,
+            .origin = .host_context_notice,
+            .content = report.text,
+        }, .steer) catch return;
+        for (report.acks) |ack| {
+            if (root.acknowledge(ack.task, ack.event_sequence)) {
+                root.advanceDeliveredWatermark(ack.event_sequence);
+            } else |_| {}
+        }
+        root.wake_submitted_sequence = batch;
+    }
+
+    /// Sweep every parent fact, not only the latest request's root fact. This
+    /// is what prevents a child that outlived its parent turn from becoming
+    /// invisible: once all of its children are terminal and undelivered, the
+    /// parent conversation receives a host notice even if the old task fact is
+    /// already outcome_unknown or succeeded.
+    fn sweepParentWakes(self: *AiHost, shared_host: *@import("ai/attached_service.zig").Host) void {
+        const budget = @import("ai/task_budget.zig");
+        for (shared_host.service.task_roots.items) |root| {
+            var parents: std.ArrayList(budget.Fact) = .empty;
+            defer parents.deinit(self.allocator);
+            root.lock();
+            for (root.facts[0..root.count]) |fact| {
+                if (fact.parent != null) continue;
+                parents.append(self.allocator, fact) catch {
+                    root.mutex.unlock();
+                    return;
+                };
+            }
+            root.mutex.unlock();
+
+            for (parents.items) |parent| {
+                // A live turn with this exact task already owns delivery via
+                // turn_manager.deliverSettledReports. Do not duplicate it.
+                // pending_commit/pending_notify still own the inbox the same
+                // way (same busy rule as Service.pump): a .steer injected in
+                // this window would be accepted into the already-joined turn
+                // and paused by inbox.finish, stranding it. The next sweep
+                // injects once the runtime has settled.
+                const parent_runner = shared_host.service.runnerFor(parent.agent) orelse continue;
+                var active = false;
+                if (parent_runner.context) |context| {
+                    if (parent_runner.thread != null and context.task.eql(parent.task)) active = true;
+                }
+                if (parent_runner.pending_commit or parent_runner.pending_notify) active = true;
+                if (active) continue;
+
+                var any_child = false;
+                var all_terminal = true;
+                var undelivered = false;
+                var undelivered_top: u64 = 0;
+                root.lock();
+                for (root.facts[0..root.count]) |fact| {
+                    if (fact.parent == null or !fact.parent.?.eql(parent.task)) continue;
+                    any_child = true;
+                    if (!budget.terminal(fact.status)) {
+                        all_terminal = false;
+                    } else if (fact.seq != 0 and fact.reported_sequence < fact.event_sequence) {
+                        undelivered = true;
+                        if (fact.event_sequence > undelivered_top) undelivered_top = fact.event_sequence;
+                    }
+                }
+                root.mutex.unlock();
+                if (!any_child or !all_terminal or !undelivered) continue;
+                // One-shot per batch: when the top undelivered event did not
+                // change since the last wake submission, the notice was
+                // already injected and only its fact acks failed (journal
+                // write errors); re-submitting would spam the inbox every
+                // sweep. A changed batch (new events, or renumbered events
+                // after resumeAnswer) wakes again.
+                if (root.wake_submitted_sequence == undelivered_top) continue;
+                self.wakeParentReports(shared_host, root, parent, undelivered_top);
+            }
+        }
+    }
+
+    /// V0.7 §11.2: deliver a parent-targeted board post directly to the parent
+    /// inbox instead of waiting for a future parent turn that may never start.
+    /// The stored board row remains visible; markPostDelivered prevents the
+    /// turn_manager pipeline from delivering the same post a second time.
+    fn wakeForBoardPost(self: *AiHost, post: @import("ai/swarm_board.zig").Post) bool {
+        const shared_host = self.shared_service orelse return false;
+        const runner = self.attached_runner orelse return false;
+        const context = runner.context orelse return false;
+        const service = &shared_host.service;
+        const ticket = service.store.fence(context.fence.conversation) catch return false;
+        const text = std.fmt.allocPrint(self.allocator, "{s}\n#{d} {s}: {s}", .{
+            @import("ai/swarm_board.zig").board_marker, post.origin, @tagName(post.category), post.text,
+        }) catch return false;
+        defer self.allocator.free(text);
+        _ = service.submit(ticket, @import("host/identity.zig").SubmissionId.generate(), .{
+            .role = .user,
+            .origin = .host_context_notice,
+            .content = text,
+        }, .steer) catch return false;
+        return true;
+    }
+
+    /// V0.7 §11.2: deliver a member-targeted board post into the target
+    /// member's next round. An idle member's steer admission routes as a
+    /// start (the wake), a running member is superseded into its next round;
+    /// either way the submission rides the member's own request budget. The
+    /// stored board row stays visible; markPostDelivered prevents the
+    /// turn_manager pipeline from delivering the same post a second time.
+    fn wakeMemberForBoardPost(self: *AiHost, post: @import("ai/swarm_board.zig").Post, conversation: @import("host/identity.zig").ConversationId) bool {
+        const shared_host = self.shared_service orelse return false;
+        const service = &shared_host.service;
+        const ticket = service.store.fence(conversation) catch return false;
+        const text = std.fmt.allocPrint(self.allocator, "{s}\n#{d} {s}: {s}", .{
+            @import("ai/swarm_board.zig").board_marker, post.origin, @tagName(post.category), post.text,
+        }) catch return false;
+        defer self.allocator.free(text);
+        _ = service.submit(ticket, @import("host/identity.zig").SubmissionId.generate(), .{
+            .role = .user,
+            .origin = .host_context_notice,
+            .content = text,
+        }, .steer) catch return false;
+        return true;
     }
 
     fn childApprovalSelected(raw: *anyopaque, agent: @import("host/identity.zig").AgentId) void {
@@ -1061,7 +1207,7 @@ const AiHost = struct {
         self.cx.requestRedraw();
     }
 
-        fn childSelected(raw: *anyopaque, agent: @import("host/identity.zig").AgentId, revision: u64) void {
+    fn childSelected(raw: *anyopaque, agent: @import("host/identity.zig").AgentId, revision: u64) void {
         const self: *AiHost = @ptrCast(@alignCast(raw));
         self.child_open_requested = .{ .agent = agent, .revision = revision, .parent = self.child_list_parent orelse if (self.assistant_states.?.find(self.display_conversation orelse return)) |state| state.conversation_id else null };
         self.cx.requestRedraw();
@@ -1147,7 +1293,7 @@ const AiHost = struct {
             };
             std.mem.sort(@import("ai/child_projection.zig").Entry, rows, {}, @import("ai/child_projection.zig").less);
             try view.updateWithCount(rows, running_count);
-            if (!view.open.peek()) {
+            if (!view.open.peek() and !view.graph_open.peek()) {
                 self.child_list_parent = null;
                 return;
             }
@@ -1178,7 +1324,6 @@ const AiHost = struct {
             try view.updateDecisions(decision_rows);
             try view.updateGraph(rows, board_rows);
             if (panel_mode == .boost) try view.updateRounds(boost);
-
         }
     }
 
@@ -1390,12 +1535,16 @@ const AiHost = struct {
         _ = try self.bindAttached(current_owner);
         if (self.display_owner) |owner| if (Owner.eql(owner, current_owner) and self.display_conversation == selected_id) return;
         if (self.composer_controls) |controls| controls.dismiss();
-        if (self.children_view) |view| view.open.set(false);
+        if (self.children_view) |view| {
+            view.open.set(false);
+            view.graph_open.set(false);
+        }
         self.child_approval_selection = null;
         self.reveal_child_approval = false;
         if (self.gestures) |gestures| gestures.cancel();
         if (self.compaction.job != null) self.compaction.cancel();
         const was_visible = self.controller.model.visible;
+        const keep_pinned = was_visible and self.dock.mode == .pinned;
         if (self.assistant_states == null) self.assistant_states = &(try self.shared()).presentations;
         const store = self.assistant_states.?;
         // Reserve the destination before moving any live state. Allocation
@@ -1470,6 +1619,10 @@ const AiHost = struct {
         const current_maximized = self.controller.model.maximized;
         self.controller.model = saved.model;
         if (owner_changed) {
+            if (keep_pinned) {
+                self.controller.model.visible = true;
+                self.controller.model.expanded = true;
+            }
             if (self.controller.model.visible) self.dock.pin() else self.dock.hide();
         } else {
             // Changing AI conversations within one attachment keeps the panel
@@ -3056,12 +3209,19 @@ const AiHost = struct {
         self.updatePresentation();
         if (self.stop_button) |button| {
             const busy = self.execution().thread_state.load(.acquire) == 1 and self.requestDisplayed();
+            // Send and Stop occupy the same 28px slot: a running turn swaps
+            // Send for Stop in place and restores Send when the turn ends.
             button.setDisplay(if (busy) .flex else .none);
             button.setOpacityRaw(if (busy) 1 else 0);
             button.setHitTestVisible(busy);
+            if (self.send_hint_wrapper) |wrapper| {
+                wrapper.setDisplay(if (busy) .none else .flex);
+                wrapper.setHitTestVisible(!busy);
+            }
+            if (busy) if (self.send_hint_open) |open| open.set(false);
             if (self.send_button) |send| {
-                send.setOpacityRaw(1);
-                send.setHitTestVisible(true);
+                send.setOpacityRaw(if (busy) 0 else 1);
+                send.setHitTestVisible(!busy);
             }
         }
         self.promptChanged(self.prompt.get());
@@ -8507,7 +8667,7 @@ const AiHost = struct {
                 if (request.effort) |effort| {
                     try ai_provider_config.validateEffort(ai, selection, effort);
                 } else if (template) |item| {
-                    const slot = @intFromEnum(role);
+                    const slot = @backingInt(role);
                     const preferred = if (item.models[slot] != null and configured == null)
                         source.controls.effort
                     else
@@ -8646,30 +8806,51 @@ const AiHost = struct {
         const origin = invocation.context.child_origin orelse return error.ChildCannotPost;
         const parent = self.child_parent orelse return error.ScopeChanged;
         const root = parent.attached_runner.?.task_root orelse return error.ScopeChanged;
-        const seq: u32 = blk: {
+        // The posting member's fact carries the author seq and scopes @seq
+        // resolution to the same parent task (V0.7 §2.1).
+        const origin_fact: @import("ai/task_budget.zig").Fact = blk: {
             root.lock();
             defer root.mutex.unlock();
             for (root.facts[0..root.count]) |fact| {
-                if (fact.parent != null and fact.agent.eql(origin.agent)) break :blk fact.seq;
+                if (fact.parent != null and fact.agent.eql(origin.agent)) break :blk fact;
             }
             return error.ScopeChanged;
         };
+        const seq: u32 = origin_fact.seq;
         var post: board.Post = .{ .origin = seq, .to = parsed.to, .category = parsed.category, .text = parsed.text, .ts = @import("platform/realtime.zig").milliseconds(undefined) };
         const digest = board.textDigest(parsed.text);
         @memcpy(post.post_id[0..16], digest[0..16]);
         const auto_reply: ?[]const u8 = if (parsed.category == .ask) blk: {
             root.lock();
             defer root.mutex.unlock();
-            // Debounce per member: stored on the root (index = seq-1, ≤16).
-            var counts: [16]u32 = undefined;
-            const slot = if (seq == 0 or seq > 16) return error.ScopeChanged else seq - 1;
-            @memcpy(&counts, &root.board_ask_counts);
-            counts[slot] += 1;
-            @memcpy(&root.board_ask_counts, &counts);
-            if (counts[slot] >= 4) break :blk "按当前最佳判断继续";
+            // Debounce per member keyed by display seq (never recycled, §2.1).
+            // The guard only rejects a non-delegated author; a seq past the
+            // 16-active-children window still owns its counter.
+            if (seq == 0) return error.ScopeChanged;
+            const entry = try root.board_ask_counts.getOrPut(root.allocator, seq);
+            if (!entry.found_existing) entry.value_ptr.* = 0;
+            entry.value_ptr.* += 1;
+            if (entry.value_ptr.* >= 4) break :blk "按当前最佳判断继续";
             break :blk null;
         } else null;
         try root.postBoard(post);
+        // V0.7 §11.2 delivery rules (board.deliversToRoot): a parent post
+        // wakes the parent now, a member post wakes its target now, @all
+        // stays board-only. markPostDelivered prevents a duplicate delivery
+        // through turn_manager.deliverSettledReports; a failed delivery
+        // leaves the undelivered row on the board for history.
+        switch (board.deliversToRoot(post)) {
+            .parent_next_round => {
+                if (parent.wakeForBoardPost(post)) _ = root.markPostDelivered(post.post_id);
+            },
+            .member_next_round => {
+                const target: ?@import("ai/task_budget.zig").Fact = root.factForSeq(origin_fact.parent.?, parsed.to.member) catch null;
+                if (target) |member| {
+                    if (parent.wakeMemberForBoardPost(post, member.conversation)) _ = root.markPostDelivered(post.post_id);
+                }
+            },
+            .board_only => {},
+        }
         if (parsed.category == .ask and auto_reply == null) {
             // ask 打断父依赖等待循环（§11.2）：由父 runner 的等待轮询在
             // needsChildren 检查后走 deliverSettledReports 时发现新帖。
@@ -10390,14 +10571,15 @@ const AiHost = struct {
 
     /// UI-thread poll: one after-layout hook, self-scheduling only while a
     /// request is in flight.
-    /// V0.7 §12.2: deterministic host stall sweep. Injects the "all children
-    /// settled, summarize" wake when a parent idles with every child in a
-    /// terminal state; deferring rules for board posts follow the same G8
-    /// delivery pipeline inside the waiting loop. No model is consulted.
-    /// V0.7 §12.2/§12.3: deterministic stall sweep with configured
-    /// thresholds. Level 1 wakes the parent (G2 delivery); level 2 raises
-    /// the panel stall banner with the 催父/停全部 actions after the parent
-    /// stays idle past swarm_stall_parent_minutes.
+    /// V0.7 §12.2: deterministic stall sweep driven by swarm_prompts.detect
+    /// with the configured thresholds (zero token, no model consulted).
+    /// Level 1 injects the "请汇总"/"集群停滞" wake into an idle parent
+    /// conversation through the steer channel; level 2 raises the panel stall
+    /// banner with the 催父/停全部 actions after the parent stays idle past
+    /// swarm_stall_parent_minutes. Delivery ownership stays with the live
+    /// parent turn's dependency wait (G2) and the sweepParentWakes/
+    /// wakeForBoardPost pipelines: the wake is injected only when nothing
+    /// else will deliver this window.
     fn sweepStalls(self: *AiHost, shared_host: *@import("ai/attached_service.zig").Host) void {
         const swarm_prompts = @import("ai/swarm_prompts.zig");
         const budget = @import("ai/task_budget.zig");
@@ -10408,35 +10590,106 @@ const AiHost = struct {
             .stuck_minutes = 10,
         };
         const now = @import("platform/realtime.zig").milliseconds(undefined);
+        // Wakes are collected under the root lock but submitted after it is
+        // released: submit can pump a worker step that re-enters the same
+        // Root mutex (same discipline as stallUrgeParent/wakeParentReports).
+        const PendingWake = struct {
+            root: *budget.Root,
+            conversation: @import("host/identity.zig").ConversationId,
+            text: []const u8,
+        };
+        var pending_wakes: [8]PendingWake = undefined;
+        var pending_count: usize = 0;
         for (shared_host.service.task_roots.items) |root| {
             var parent_active = false;
             var any_running = false;
             var any_human_wait = false;
             var all_terminal = true;
             var undelivered = false;
+            var board_pending = false;
+            var has_child = false;
+            var child_stuck_minutes: u32 = 0;
             var root_task: ?@import("host/identity.zig").TaskId = null;
+            var parent_fact: ?budget.Fact = null;
             root.lock();
             defer root.mutex.unlock();
             for (root.facts[0..root.count]) |fact| {
                 if (fact.parent == null) {
                     root_task = fact.task;
                     parent_active = !budget.terminal(fact.status);
+                    parent_fact = fact;
                     continue;
                 }
+                has_child = true;
                 if (!budget.terminal(fact.status)) {
                     all_terminal = false;
-                    if (fact.status == .human_wait) any_human_wait = true else any_running = true;
+                    if (fact.status == .human_wait) any_human_wait = true else {
+                        any_running = true;
+                        const stuck = @divTrunc(now -| fact.changed_at_ms, 60000);
+                        if (stuck > 0 and stuck > child_stuck_minutes) child_stuck_minutes = @intCast(stuck);
+                    }
                 } else if (fact.reported_sequence < fact.event_sequence) undelivered = true;
             }
-            if (!parent_active or root_task == null) {
+            for (root.board_posts.items) |post| {
+                if (!post.delivered) {
+                    board_pending = true;
+                    break;
+                }
+            }
+            if (!parent_active or root_task == null or parent_fact == null) {
                 root.stall_since_ms = null;
                 root.stall_escalated = false;
+                root.stall_wake_ms = null;
                 continue;
             }
+            // The stall rules only address swarm roots; a plain conversation
+            // without delegated children is never woken or escalated.
+            if (!has_child) continue;
+            // A live turn owning this exact parent task delivers settled
+            // reports itself through its dependency wait (G2), mirroring the
+            // sweepParentWakes active check. The pending_commit/pending_notify
+            // windows belong to the settling turn the same way: a stall wake
+            // would be accepted into the already-joined turn and paused by
+            // inbox.finish.
+            var parent_turn_active = false;
+            if (shared_host.service.runnerFor(parent_fact.?.agent)) |parent_runner| {
+                if (parent_runner.context) |context| {
+                    if (parent_runner.thread != null and context.task.eql(parent_fact.?.task)) parent_turn_active = true;
+                }
+                if (parent_runner.pending_commit or parent_runner.pending_notify) parent_turn_active = true;
+            }
+            const idle_now = !any_running and !any_human_wait and !undelivered and !board_pending;
+            // Track the stall window for the §12.2 rows that wake or escalate:
+            // every child terminal, or the all-idle level-1 idle state.
+            if (all_terminal or idle_now) {
+                if (root.stall_since_ms == null) {
+                    root.stall_since_ms = now;
+                    root.stall_wake_ms = null;
+                }
+            } else {
+                root.stall_since_ms = null;
+                root.stall_escalated = false;
+                root.stall_wake_ms = null;
+            }
+            const minutes_idle: u32 = @intCast(@max(0, @divTrunc(now -| (root.stall_since_ms orelse now), 60000)));
+            const parent_woken_minutes: u32 = @intCast(@max(0, @divTrunc(now -| (root.stall_wake_ms orelse root.stall_since_ms orelse now), 60000)));
+            const action = swarm_prompts.detect(config, .{
+                .any_child_running = any_running,
+                .any_child_human_wait = any_human_wait,
+                .all_children_terminal = all_terminal and has_child,
+                .undelivered_events = undelivered,
+                .task_finished = false,
+                .new_board_posts = board_pending,
+                .minutes_idle = minutes_idle,
+                .parent_woken_minutes = parent_woken_minutes,
+                .child_stuck_minutes = child_stuck_minutes,
+            });
             // V0.7 §12.2 "疑似卡住": a child is running but its counters
-            // have not changed for stuck_minutes. Mark the row (via the
-            // fact summary suffix); never auto-intervene.
-            if (any_running) {
+            // have not changed for stuck_minutes. detect() selects the action
+            // from the slowest running child; this per-row pass realizes it —
+            // mark the row (via the fact summary suffix), clear recovered
+            // rows; never auto-intervene.
+            if (action == .mark_child_stuck or any_running) {
                 for (root.facts[0..root.count]) |fact| {
                     if (fact.parent == null or budget.terminal(fact.status) or fact.status != .running) continue;
                     const idle = now -| fact.changed_at_ms;
@@ -10448,12 +10701,26 @@ const AiHost = struct {
                     }
                 }
             }
-            // Level 1: all children settled, parent has not finished — the
-            // parent's dependency wait already delivers on its next tick;
-            // track the idle window for level 2.
-            if (all_terminal and root.count >= 2) {
-                if (root.stall_since_ms) |started| {
-                    if (!root.stall_escalated and @divTrunc(now -| started, 60000) >= config.parent_minutes) {
+            switch (action) {
+                .none, .mark_child_stuck => {},
+                .inject_wake => {
+                    // §12.2 level 1. Delivery ownership first: a live parent
+                    // turn receives settle reports through its dependency wait
+                    // (G2), undelivered reports ride sweepParentWakes below
+                    // and board posts ride wakeForBoardPost. Inject the
+                    // deterministic wake only when nothing else will deliver,
+                    // and only once per stall window.
+                    if (!parent_turn_active and !undelivered and !board_pending and root.stall_wake_ms == null and pending_count < pending_wakes.len) {
+                        pending_wakes[pending_count] = .{
+                            .root = root,
+                            .conversation = parent_fact.?.conversation,
+                            .text = if (all_terminal) "全部子任务已结束，请汇总" else "集群停滞，请检查",
+                        };
+                        pending_count += 1;
+                    }
+                },
+                .escalate_parent => {
+                    if (!root.stall_escalated) {
                         root.stall_escalated = true;
                         self.cx.scheduleRedrawAfterNs(16 * std.time.ns_per_ms);
                         // §12.2 level 2: desktop notification; the
@@ -10475,16 +10742,28 @@ const AiHost = struct {
                             }
                         }
                     }
-                } else root.stall_since_ms = now;
-                continue;
-            }
-            if (any_running or any_human_wait or undelivered or root.board_posts.items.len != 0) {
-                root.stall_since_ms = null;
-                root.stall_escalated = false;
+                },
             }
         }
+        for (pending_wakes[0..pending_count]) |pending| {
+            const fence = shared_host.service.store.fence(pending.conversation) catch continue;
+            // Admission is the acceptance check (same as wakeParentReports):
+            // a .steer submission never queues — it joins a live turn (.steer)
+            // or starts an idle one (.start). The idle-start route is the
+            // inject_wake target scenario, not a rejection.
+            _ = shared_host.service.submit(fence, @import("host/identity.zig").SubmissionId.generate(), .{
+                .role = .user,
+                .origin = .host_context_notice,
+                .content = pending.text,
+            }, .steer) catch continue;
+            pending.root.stall_wake_ms = now;
+        }
+        // Orphaned children: the old parent task may already be terminal and
+        // its runner may be gone. Deliver terminal reports into the parent
+        // conversation directly instead of relying on a turn_manager wait.
+        self.sweepParentWakes(shared_host);
     }
-        const PollHook = struct {
+    const PollHook = struct {
         host: *AiHost,
 
         fn cleanup(self: *PollHook) void {
@@ -17503,7 +17782,6 @@ fn mountAssistantConversation(ai_host: *AiHost, scope: *ui.Scope, ai_card_box: *
     try ai_input_row.appendChild(cx.allocator, ai_host.skill_picker.?.popup.wrapper);
     const composer_controls = try @import("ui/ai_composer_controls_view.zig").View.mount(cx, scope, .{ .context = ai_host, .action = AiHost.composerAction, .open_settings = AiHost.composerSettings, .models_opened = AiHost.composerModelsOpened });
     ai_host.composer_controls = composer_controls;
-    composer_controls.separate_actions = true;
     const ai_controls = composer_controls.trailing;
     const ai_send_base = try scope.createSignal(ai_styles.ButtonStyle, ai_styles.primary());
     ai_host.send_base = ai_send_base;
@@ -17528,6 +17806,8 @@ fn mountAssistantConversation(ai_host: *AiHost, scope: *ui.Scope, ai_card_box: *
     send_tooltip.wrapper.meta.ownership.meta.test_id = "ai.send.hint";
     send_tooltip.content.meta.ownership.meta.test_id = "ai.send.tooltip";
     send_tooltip.trigger.setStyleInline(cx.allocator, .{ .position = .relative, .width = .{ .px = 28 }, .height = .{ .px = 28 }, .flex_shrink = 0 });
+    ai_host.send_hint_wrapper = send_tooltip.wrapper;
+    ai_host.send_hint_open = send_tooltip.open;
     composer_controls.followup_send = ai_send;
     try send_tooltip.trigger.appendChild(cx.allocator, ai_send);
     try ai_controls.appendChild(cx.allocator, send_tooltip.wrapper);
@@ -18160,7 +18440,7 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     nav_host.transfer_host = transfer_host;
     menu_host.transfer_host = transfer_host;
     file_application.setTransferHandler(.{ .context = transfer_host, .submit = TransferHost.showFileTransfer, .confirm = TransferHost.confirmFileTransfer, .export_start = TransferHost.exportFileTransfer, .export_poll = TransferHost.pollFileExport, .export_cancel = TransferHost.cancelFileExport });
-    const download_list = try transfer_manager_view.mountGlobalPopover(cx, scope, transfer_host.manager, .{ .context = transfer_host, .action = TransferHost.managerAction, .resolve_conflict = TransferHost.managerConflictAction, .owner = TransferHost.jobOwner, .owner_label = TransferHost.jobOwnerLabel, .scope_choices = TransferHost.transferScopeChoices, .can_reveal = TransferHost.canReveal });
+    const download_list = try transfer_manager_view.mountGlobalPopover(cx, scope, transfer_host.manager, .{ .context = transfer_host, .action = TransferHost.managerAction, .batch = TransferHost.managerBatchAction, .resolve_conflict = TransferHost.managerConflictAction, .owner = TransferHost.jobOwner, .owner_label = TransferHost.jobOwnerLabel, .scope_choices = TransferHost.transferScopeChoices, .can_reveal = TransferHost.canReveal, .can_dismiss = TransferHost.canDismissTransfer });
     transfer_host.manager_panel = download_list;
     download_list.hooks.closed = TransferHost.managerClosed;
     try background_view.isolate(download_list.scope, download_list.root);
@@ -20091,16 +20371,20 @@ const TransferHost = struct {
     }
 
     fn managerAction(raw: *anyopaque, id: transfer_mod.JobId, action: transfer_manager_view.Action) void {
+        _ = applyManagerAction(raw, id, action);
+    }
+
+    fn applyManagerAction(raw: *anyopaque, id: transfer_mod.JobId, action: transfer_manager_view.Action) bool {
         const self: *TransferHost = @ptrCast(@alignCast(raw));
         if (action == .reveal) {
-            const progress = self.manager.progress(id) orelse return;
+            const progress = self.manager.progress(id) orelse return false;
             if (!canReveal(raw, id)) {
                 self.workspace.status("原任务位置当前不可用");
-                return;
+                return false;
             }
-            self.reveal_requested = .{ .job = id, .attempt = progress.attempt, .owner = jobOwner(raw, id) orelse return };
+            self.reveal_requested = .{ .job = id, .attempt = progress.attempt, .owner = jobOwner(raw, id) orelse return false };
             self.cx.requestRedraw();
-            return;
+            return true;
         }
         // Exported checkpoints move exactly once while their former native
         // route is retiring. Preserve a cancel made in that interval and
@@ -20108,64 +20392,77 @@ const TransferHost = struct {
         for (self.tasks.retained_closes.items) |record| if (!record.complete) {
             for (record.jobs) |job| if (job.job_id == id) {
                 if (action == .cancel) {
-                    for (record.deferred_cancel.items) |queued| if (queued == id) return;
+                    for (record.deferred_cancel.items) |queued| if (queued == id) return true;
                     record.deferred_cancel.append(self.allocator, id) catch |err| {
                         self.workspace.statusFailure(@errorName(err));
-                        return;
+                        return false;
                     };
                     self.workspace.status("正在取消任务");
                     self.cx.scheduleRedrawAfterNs(16 * std.time.ns_per_ms);
+                    return true;
                 } else self.workspace.status("任务状态正在同步，请稍后重试");
-                return;
+                return false;
             };
         };
         if (self.manager.retainedOwner(id) != null and self.manager.engineJob(id) == null) {
-            const progress = self.manager.progress(id) orelse return;
+            const progress = self.manager.progress(id) orelse return false;
             switch (action) {
-                .resume_transfer, .retry => self.resumeRetained(id) catch |err| self.workspace.statusFailure(@errorName(err)),
+                .resume_transfer, .retry => self.resumeRetained(id) catch |err| {
+                    self.workspace.statusFailure(@errorName(err));
+                    return false;
+                },
                 .cancel => {
                     if (progress.attempt == 0) {
-                        self.manager.retainedCancelReceipt(id, progress.attempt, self.manager.retainedOwner(id).?, .released) catch |err| self.workspace.statusFailure(@errorName(err));
+                        self.manager.retainedCancelReceipt(id, progress.attempt, self.manager.retainedOwner(id).?, .released) catch |err| {
+                            self.workspace.statusFailure(@errorName(err));
+                            return false;
+                        };
                     } else {
                         self.retained_store.cancel(id, progress.attempt) catch |err| {
                             self.workspace.statusFailure(@errorName(err));
-                            return;
+                            return false;
                         };
-                        self.manager.retainedCancelReceipt(id, progress.attempt, self.manager.retainedOwner(id).?, .awaiting) catch |err| self.workspace.statusFailure(@errorName(err));
+                        self.manager.retainedCancelReceipt(id, progress.attempt, self.manager.retainedOwner(id).?, .awaiting) catch |err| {
+                            self.workspace.statusFailure(@errorName(err));
+                            return false;
+                        };
                     }
                 },
-                else => {},
+                else => return false,
             }
             self.manager_last_refresh_ms = 0;
             self.cx.requestRedraw();
-            return;
+            return true;
         }
         if (action == .resume_transfer or action == .retry) {
-            const progress = self.manager.progress(id) orelse return;
+            const progress = self.manager.progress(id) orelse return false;
             if (progress.attempt == 0 and (progress.state == .paused or (progress.state == .failed and progress.startup_failure != null))) if (self.manager.transferBinding(id)) |binding| if (!self.application.sessions.bindingIsLive(binding)) {
-                const owner = jobOwner(self, id) orelse return;
+                const owner = jobOwner(self, id) orelse return false;
                 const start = self.ensureAuxiliary(owner) catch |err| {
                     self.workspace.statusFailure(if (err == error.CleanupNotReleased) "旧传输连接正在清理，请稍后重试" else @errorName(err));
-                    return;
+                    return false;
                 };
-                self.manager.rebindWaitingDraft(id, start.binding) catch |err| self.workspace.statusFailure(@errorName(err));
+                self.manager.rebindWaitingDraft(id, start.binding) catch |err| {
+                    self.workspace.statusFailure(@errorName(err));
+                    return false;
+                };
                 self.cx.requestRedraw();
-                return;
+                return true;
             };
         }
         if (action == .retry or action == .resume_transfer) {
             const original = jobOwner(raw, id) orelse {
                 self.workspace.status("任务归属已失效");
-                return;
+                return false;
             };
             if (self.manager.transferBinding(id)) |binding| {
                 if (!self.application.sessions.bindingIsLive(binding) or (binding.resource_owner == .session and !binding.resource_owner.session.eql(original)) or (binding.resource_owner == .retained_transfer and (binding.origin_session == null or !binding.origin_session.?.eql(original)))) {
                     self.workspace.status("任务所属文件连接已失效");
-                    return;
+                    return false;
                 }
             } else {
                 self.workspace.status("任务缺少有效传输服务，请新建传输");
-                return;
+                return false;
             }
         }
         switch (action) {
@@ -20173,16 +20470,82 @@ const TransferHost = struct {
                 self.conflict_job = id;
                 self.conflict_manual = true;
                 self.conflict_presented = false;
-                self.refreshConflict() catch |err| self.workspace.statusFailure(@errorName(err));
+                self.refreshConflict() catch |err| {
+                    self.workspace.statusFailure(@errorName(err));
+                    return false;
+                };
             },
-            .pause => self.manager.pause(id) catch |err| self.workspace.status(if (err == error.UnsupportedPause) "当前连接不支持暂停" else @errorName(err)),
-            .resume_transfer => self.manager.resumeJob(id) catch |err| self.workspace.status(if (err == error.UnsupportedResume or err == error.SafeResumeUnavailable) "当前任务不支持安全续传" else @errorName(err)),
-            .cancel => self.manager.cancel(id) catch |err| self.workspace.statusFailure(@errorName(err)),
-            .retry => self.manager.retry(id) catch |err| self.workspace.statusFailure(@errorName(err)),
-            else => {},
+            .pause => self.manager.pause(id) catch |err| {
+                self.workspace.status(if (err == error.UnsupportedPause) "当前连接不支持暂停" else @errorName(err));
+                return false;
+            },
+            .resume_transfer => self.manager.resumeJob(id) catch |err| {
+                self.workspace.status(if (err == error.UnsupportedResume or err == error.SafeResumeUnavailable) "当前任务不支持安全续传" else @errorName(err));
+                return false;
+            },
+            .cancel => self.manager.cancel(id) catch |err| {
+                self.workspace.statusFailure(@errorName(err));
+                return false;
+            },
+            .retry => self.manager.retry(id) catch |err| {
+                self.workspace.statusFailure(@errorName(err));
+                return false;
+            },
+            else => return false,
         }
         self.manager_last_refresh_ms = 0;
         self.cx.requestRedraw();
+        return true;
+    }
+
+    /// Batch entry reuses the exact single-task path for each frozen target so
+    /// retained closes, rebinds and receipts stay identical to row actions.
+    fn managerBatchAction(raw: *anyopaque, targets: []const transfer_manager_view.Target, action: transfer_manager_view.TaskAction) !void {
+        const self: *TransferHost = @ptrCast(@alignCast(raw));
+        var applied: usize = 0;
+        var skipped: usize = 0;
+        for (targets) |target| {
+            const progress = self.manager.progress(target.job) orelse {
+                skipped += 1;
+                continue;
+            };
+            if (progress.attempt != target.attempt) {
+                skipped += 1;
+                continue;
+            }
+            switch (action) {
+                .dismiss => {
+                    if (self.manager.dismiss(target.job)) {
+                        applied += 1;
+                    } else |_| {
+                        skipped += 1;
+                    }
+                },
+                else => {
+                    const accepted = applyManagerAction(raw, target.job, switch (action) {
+                        .pause => .pause,
+                        .resume_transfer => .resume_transfer,
+                        .cancel => .cancel,
+                        else => continue,
+                    });
+                    if (accepted) applied += 1 else skipped += 1;
+                },
+            }
+        }
+        if (applied > 0 and skipped > 0) {
+            var buffer: [128]u8 = undefined;
+            const message = std.fmt.bufPrint(&buffer, "已处理 {d} 项，{d} 项当前不可操作", .{ applied, skipped }) catch "部分任务已处理";
+            self.workspace.status(message);
+        } else if (skipped > 0 and applied == 0) {
+            self.workspace.status("所选任务当前不支持该操作");
+        }
+        self.manager_last_refresh_ms = 0;
+        self.cx.requestRedraw();
+    }
+
+    fn canDismissTransfer(raw: *anyopaque, job_id: transfer_mod.JobId) bool {
+        const self: *TransferHost = @ptrCast(@alignCast(raw));
+        return self.manager.canDismiss(job_id);
     }
 
     fn conflictDecision(raw: *anyopaque, request: transfer_mod.Conflict.Request) !void {

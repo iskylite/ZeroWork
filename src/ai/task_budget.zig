@@ -184,6 +184,13 @@ pub const Owned = struct {
     }
 };
 pub const Persist = struct { context: *anyopaque, write: *const fn (*anyopaque, Fact) anyerror!void };
+/// Durable board-post hook (V0.7 §11.1 写入即落板): each post rides the
+/// session journal as a `.board_post` event and is restored on replay. The
+/// conversation is the parent record the root's event stream belongs to.
+pub const BoardPersist = struct {
+    context: *anyopaque,
+    write: *const fn (*anyopaque, conversation: id.ConversationId, post: @import("swarm_board.zig").Post) anyerror!void,
+};
 pub const Root = struct {
     allocator: std.mem.Allocator,
     arena: std.heap.ArenaAllocator,
@@ -198,6 +205,7 @@ pub const Root = struct {
     revision: u64 = 0,
     last_ns: i128,
     persist: ?Persist = null,
+    board_persist: ?BoardPersist = null,
     failed_storage: bool = false,
     cancelled: bool = false,
     /// Per-parent-task seq allocation watermark (V0.7 §2.1). Destroyed
@@ -212,10 +220,12 @@ pub const Root = struct {
     /// same delivery watermark as settle reports; stage-3 UI reads them via
     /// the same cursor.
     board_posts: std.ArrayList(@import("swarm_board.zig").Post) = .empty,
-    /// V0.7 §11.2 ask debounce counters per member (index = seq-1, ≤16).
-    /// The 4th consecutive ask gets an automatic best-judgment reply; the
-    /// counter clears when the member settles.
-    board_ask_counts: [16]u32 = @splat(0),
+    /// V0.7 §11.2 ask debounce counters keyed by the member's display seq.
+    /// Seq is never recycled (§2.1), so it identifies the member for the
+    /// root's lifetime without a ≤16 slot cap; the 4th consecutive ask gets
+    /// an automatic best-judgment reply and the entry clears when the member
+    /// settles.
+    board_ask_counts: std.AutoHashMapUnmanaged(u32, u32) = .empty,
     /// V0.7 §10.2/G4: Auto upgrade decisions on the task event stream. Each
     /// entry records the triggering signal and the hit substance condition;
     /// the panel renders them as an explainable "why this ran in parallel"
@@ -227,6 +237,19 @@ pub const Root = struct {
     orchestration_mode: ?@import("swarm_mode.zig").Mode = null,
     stall_since_ms: ?i64 = null,
     stall_escalated: bool = false,
+    /// V0.7 §12.2: when the host injected the level-1 wake ("请汇总"/"集群
+    /// 停滞") into the parent conversation during this stall window. Drives
+    /// wake dedupe and the level-2 countdown ("父被唤醒 M 分钟无动作").
+    /// Runtime sweep state only; never persisted or replayed.
+    stall_wake_ms: ?i64 = null,
+    /// V0.7 §12.2 orphan sweep (sweepParentWakes/wakeParentReports): the top
+    /// child event_sequence of the last wake batch submitted into the parent
+    /// conversation. The same undelivered batch is injected once even when
+    /// its follow-up fact acks keep failing (journal write errors would
+    /// otherwise re-inject it on every sweep); a changed batch (new events,
+    /// or renumbered events after resumeAnswer) wakes again.
+    /// Runtime sweep state only; never persisted or replayed.
+    wake_submitted_sequence: u64 = 0,
     pub fn init(a: std.mem.Allocator) Root {
         return .{ .allocator = a, .arena = .init(a), .last_ns = (Clock{}).now() };
     }
@@ -234,6 +257,7 @@ pub const Root = struct {
         self.display_facts.deinit(self.allocator);
         for (self.board_posts.items) |post| self.allocator.free(post.text);
         self.board_posts.deinit(self.allocator);
+        self.board_ask_counts.deinit(self.allocator);
         for (self.decisions.items) |decision| self.allocator.free(decision.reason);
         self.decisions.deinit(self.allocator);
         self.arena.deinit();
@@ -259,7 +283,7 @@ pub const Root = struct {
         for (self.decisions.items, 0..) |decision, i| copy[i] = .{ .at_ms = decision.at_ms, .reason = decision.reason };
         return copy;
     }
-        /// V0.7 §11: append a board post to this root's event stream. The post
+    /// V0.7 §11: append a board post to this root's event stream. The post
     /// text is owned by the root after this call. Delivery follows the §11.2
     /// rules: parent/member-targeted posts surface in the next model round;
     /// @all posts stay board-only.
@@ -269,7 +293,32 @@ pub const Root = struct {
         var owned = post;
         owned.text = try self.allocator.dupe(u8, post.text);
         errdefer self.allocator.free(owned.text);
+        // 写入即落板：the journal write precedes the in-memory append so an
+        // acknowledged post is durable. A failed write fails the request like
+        // a fact write and halts further storage (same contract as write()).
+        if (self.board_persist) |hook| {
+            const root_fact = for (self.facts[0..self.count]) |fact| {
+                if (fact.parent == null) break fact;
+            } else return error.InvalidTaskFact;
+            hook.write(hook.context, root_fact.conversation, owned) catch |err| {
+                self.failed_storage = true;
+                return err;
+            };
+        }
         try self.board_posts.append(self.allocator, owned);
+    }
+    /// Mark one stored post as already delivered directly to the parent inbox.
+    /// Returns false when the post is absent (for example after a prior delivery).
+    pub fn markPostDelivered(self: *Root, post_id: [16]u8) bool {
+        self.lock();
+        defer self.mutex.unlock();
+        for (self.board_posts.items) |*post| {
+            if (std.mem.eql(u8, &post.post_id, &post_id)) {
+                post.delivered = true;
+                return true;
+            }
+        }
+        return false;
     }
     /// Board posts not yet consumed into the model transcript, ordered by
     /// arrival. The caller copies what it needs; entries stay retained.
@@ -616,7 +665,7 @@ pub const Root = struct {
         self.facts[i] = try self.write(fact);
         if (fact.parent == null and (status == .failed or status == .cancelled or status == .interrupted)) self.cancelled = true;
         // V0.7 §11.2: a settled member's ask debounce counter clears.
-        if (fact.parent != null and fact.seq != 0 and fact.seq <= 16) self.board_ask_counts[fact.seq - 1] = 0;
+        if (fact.parent != null and fact.seq != 0) _ = self.board_ask_counts.remove(fact.seq);
     }
     pub fn usage(self: *Root, task: id.TaskId, stats: ?provider.ChatStats) !void {
         self.lock();

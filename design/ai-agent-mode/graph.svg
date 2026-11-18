@@ -1,90 +1,25 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="360" height="420" viewBox="0 0 360 420" xml:lang="zh-CN">
-  <title>子智能体面板 · Graph 径向关系图（新增视图）</title>
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="480" viewBox="0 0 800 480" xml:lang="zh-CN">
+  <title>关系图</title>
   <style>
-    text { font-family: Inter, "PingFang SC", sans-serif; fill: #f4f4f5; dominant-baseline: central; }
-    .secondary { fill: #a1a1aa; }
-    .panel { fill: #1b1b1f; }
-    .detail { fill: #202026; }
-    .node { fill: #26262c; }
-    .node-sel { fill: #2b2b47; }
-    .icon { fill: none; stroke: #a1a1aa; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
-    .icon-acc { stroke: #8c8ef5; }
-    .ring-run { stroke: #6366f1; }
-    .ring-user { stroke: #f59e0b; }
-    .ring-ok { stroke: #22c55e; }
-    .ring-unc { stroke: #f36e6e; stroke-dasharray: 3 2.5; }
-    .edge { fill: none; stroke: #6366f1; stroke-opacity: .45; }
+    text { font: 600 12px -apple-system, "PingFang SC", sans-serif; fill: #e4e8d7; dominant-baseline: central; }
+    .card { fill: #2d362d; stroke: #acbf85; }
   </style>
-
-  <defs>
-    <symbol id="logo" viewBox="0 0 20 20">
-      <rect x="2" y="4" width="16" height="12" rx="3"/>
-      <path d="M6 12l2.4-3 2 2.2L13 8.4l1.6 2" fill="none" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
-    </symbol>
-  </defs>
-
-  <rect width="360" height="420" rx="12" class="panel"/>
-
-  <g id="edges">
-    <path class="edge" stroke-width="1.5" d="M170 150L104 220"/>
-    <path class="edge" stroke-width="4" d="M170 150L236 220"/>
-    <path class="edge" stroke-width="2" d="M170 150L318 220"/>
-    <path class="edge" stroke-width="1.5" d="M170 150L170 330"/>
-    <path class="edge" stroke-width="1" stroke-opacity=".3" d="M236 220L170 330"/>
-    <path class="edge" stroke-width="3" d="M104 220L236 220"/>
+  <rect width="800" height="480" rx="8" fill="#2d362d"/>
+  <g id="header">
+    <text x="16" y="26">关系图</text>
+    <text x="784" y="26" text-anchor="end">关闭</text>
   </g>
-
-  <g id="parent">
-    <circle cx="170" cy="150" r="30" fill="#26262c" stroke="#6366f1" stroke-width="2"/>
-    <circle cx="170" cy="150" r="36" fill="none" stroke="#6366f1" stroke-opacity=".25" stroke-width="1"/>
-    <use href="#logo" x="159" y="137" width="22" height="22" class="icon icon-acc"/>
-    <text x="170" y="192" font-size="10.5" font-weight="600" text-anchor="middle">协调者</text>
-    <text x="170" y="206" font-size="9.5" text-anchor="middle" class="secondary">GLM-5.3</text>
+  <g id="relationships">
+    <path d="M274 259H526" stroke="#acbf85" stroke-opacity=".35"/>
   </g>
-
-  <g id="children">
-    <g transform="translate(104 220)">
-      <circle class="node" r="21"/>
-      <circle r="25" fill="none" class="ring-unc" stroke-width="2"/>
-      <use href="#logo" x="-10" y="-12" width="20" height="20" class="icon"/>
-      <text x="0" y="38" font-size="10" font-weight="500" text-anchor="middle">#0 查磁盘占用</text>
-      <text x="0" y="50" font-size="9" text-anchor="middle" class="secondary">未核验</text>
-    </g>
-
-    <g transform="translate(236 220)">
-      <circle class="node-sel" r="21"/>
-      <circle r="25" fill="none" class="ring-run" stroke-width="2"/>
-      <use href="#logo" x="-10" y="-12" width="20" height="20" class="icon icon-acc"/>
-      <text x="0" y="38" font-size="10" font-weight="500" text-anchor="middle">#2 查 db-01 磁盘</text>
-      <text x="0" y="50" font-size="9" text-anchor="middle" class="secondary">运行中</text>
-    </g>
-
-    <g transform="translate(318 220)">
-      <circle class="node" r="21"/>
-      <circle r="25" fill="none" class="ring-user" stroke-width="2"/>
-      <use href="#logo" x="-10" y="-12" width="20" height="20" class="icon"/>
-      <text x="0" y="38" font-size="10" font-weight="500" text-anchor="middle">#3 查 cache-01</text>
-      <text x="0" y="50" font-size="9" text-anchor="middle" class="secondary">等待审批</text>
-    </g>
-
-    <g transform="translate(170 330)">
-      <circle class="node" r="21"/>
-      <circle r="25" fill="none" class="ring-ok" stroke-width="2"/>
-      <use href="#logo" x="-10" y="-12" width="20" height="20" class="icon"/>
-      <text x="0" y="38" font-size="10" font-weight="500" text-anchor="middle">#1 查 web-01 日志</text>
-      <text x="0" y="50" font-size="9" text-anchor="middle" class="secondary">已完成</text>
-    </g>
+  <g id="coordinator" text-anchor="middle">
+    <rect class="card" x="366" y="245" width="68" height="28" rx="14"/>
+    <text x="400" y="259">协调者</text>
   </g>
-
-  <g id="hover-tip" transform="translate(192 52)">
-    <rect width="150" height="42" rx="8" fill="#1b1b1f" stroke="#6366f1" stroke-opacity=".4"/>
-    <text x="10" y="15" font-size="10" font-weight="500">协调者 → #2 · 5 条</text>
-    <text x="10" y="31" font-size="9.5" class="secondary">最新：分片参数已确认…</text>
-  </g>
-
-  <g id="detail" transform="translate(192 360)">
-    <rect class="detail" width="150" height="46" rx="9"/>
-    <text x="14" y="16" font-size="10.5" font-weight="600">#2 查 db-01 磁盘</text>
-    <text x="14" y="34" font-size="9.5" class="secondary">打开对话 · 调整模型</text>
+  <g id="members" text-anchor="middle">
+    <rect class="card" x="206" y="245" width="136" height="28" rx="14"/>
+    <text x="274" y="259">#5  audit-session-5</text>
+    <rect class="card" x="458" y="245" width="136" height="28" rx="14"/>
+    <text x="526" y="259">#10  audit-session-10</text>
   </g>
 </svg>

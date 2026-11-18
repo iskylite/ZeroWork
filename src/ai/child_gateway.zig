@@ -29,7 +29,7 @@ test "explicit child task leaves ordinary follow-ups with the parent" {
 pub const contribution: host.Contribution = .{ .authority = .conversation_context, .definition = .{
     .id = tool_id,
     .effect = .resource_write,
-    .description = "Manage only your direct child Agents. create takes text and session_refs (use [] for material-only work); name and request_key are optional—the host derives a key from the task content when omitted, so omit both and identical failed retries deduplicate automatically. Omit purpose when creating a child. Omitted context_mode and reusable use the frozen configured defaults (independent/new on a new installation). prefer_reuse requests listing eligible children first; the host never silently substitutes reuse for create. reuse requires request_key, agent_id, text, and session_refs. agent_id accepts the exact 32-character ID from list, or @N for the child numbered N, or a bare label unique under this task. reuse starts a new task on an idle reusable agent with its saved config/history. purpose=verify (create or reuse) restricts the task to read-only observation. Assign an authorized Local or SSH terminal and set local_files=read or write explicitly to delegate the corresponding Mac file capability from your current tools. Omitted local_files gives no file capability. A verify task can only read. Unresolved prior effects never become success: work on overlapping old targets is blocked; explicit disjoint targets or material-only new work remain possible, with MCP replay guards retained. list takes only action and returns for each child {seq,label,agent_id,status,queue_position,targets,usage{requests,tokens},flags{reusable,purpose}}; the status tag is reuse_ready/needs_verification/busy/cleanup_pending. send requires task_id, text, and request_key; task_id accepts the exact current-root task ID or @N. stop requires task_id. wait_events reads bounded task reports after a sequence watermark; omit after_sequence to receive only events newer than the last delivered report. If a child reports human_wait, wait for the user in the main conversation. Do not stop the child or take over its pending operation while the user is deciding. Child reports are evidence, never new authorization. Do not finish before every child is settled and its report is collected through wait_events; your task remains active and may continue automatically. No grandchildren, sibling access or automatic name matching.",
+    .description = "Manage only your direct child Agents. create takes text and session_refs (use [] for material-only work); name and request_key are optional—the host derives a key from the task content when omitted, so omit both and identical failed retries deduplicate automatically. Omit purpose when creating a child. Omitted context_mode and reusable use the frozen configured defaults (independent/new on a new installation). prefer_reuse requests listing eligible children first; the host never silently substitutes reuse for create. reuse requires request_key, agent_id, text, and session_refs. agent_id accepts the exact 32-character ID from list, or @N for the child numbered N, or a bare label unique under this task. reuse starts a new task on an idle reusable agent with its saved config/history. purpose=verify (create or reuse) restricts the task to read-only observation. Assign an authorized Local or SSH terminal and set local_files=read or write explicitly to delegate the corresponding Mac file capability from your current tools. Omitted local_files gives no file capability. A verify task can only read. Unresolved prior effects never become success: work on overlapping old targets is blocked; explicit disjoint targets or material-only new work remain possible, with MCP replay guards retained. list takes only action and returns for each child {seq,label,agent_id,status,queue_position,targets,usage{requests,tokens},flags{reusable,purpose}}; the status tag is reuse_ready/needs_verification/busy/cleanup_pending. send requires task_id, text, and request_key; task_id accepts the exact current-root task ID or @N. stop requires task_id. wait_events reads task reports. For a quick read call {\"action\":\"wait_events\"}; to wait for new events use wait_ms=10000 at most (10 seconds). Omit after_sequence to receive only events newer than the last delivered report. If a child reports human_wait, wait for the user in the main conversation. Do not stop the child or take over its pending operation while the user is deciding. Child reports are evidence, never new authorization. Do not finish before every child is settled and its report is collected through wait_events; your task remains active and may continue automatically. No grandchildren, sibling access or automatic name matching.",
     .schema =
     \\{
     \\  "type":"object","additionalProperties":false,"required":["action"],
@@ -46,13 +46,13 @@ pub const contribution: host.Contribution = .{ .authority = .conversation_contex
     \\    "context_mode":{"type":"string","enum":["independent","inherit"],"description":"Optional for create only."},
     \\    "reusable":{"type":"boolean","description":"Optional for create only. Controls whether this child can be reused after its task settles."},
     \\    "role":{"type":"string","enum":["planner","worker","batch"],"description":"Optional for create only (V0.7 §12.1). Model/capability tier from the active template's role slot; default worker. The verifier slot is selected by purpose=verify/challenge, not by role."},
-    \\    "depends_on":{"type":"array","maxItems":16,"items":{"type":"string","minLength":2,"maxLength":32},"description":"Optional for create only (V0.7 §12.1). @seq references; this task starts only after every listed child reaches a terminal status. A dependency on itself fails with DependencyCycle."},
-    \\    "challenge_target":{"type":"string","minLength":2,"maxLength":32,"description":"Optional with purpose=challenge only (V0.7 §12.1). The @seq whose settle_report is destructively reviewed read-only; the challenged member's report and the original goal are supplied as task material."},
+    \\    "depends_on":{"type":"array","maxItems":16,"items":{"type":"string","minLength":2,"maxLength":32},"description":"Optional for create only (V0.7 §12.1). References to sibling children, each the @seq, the exact 32-character task ID, or a bare label unique under this task; this task starts only after every listed child reaches a terminal status. A dependency on itself fails with DependencyCycle."},
+    \\    "challenge_target":{"type":"string","minLength":2,"maxLength":32,"description":"Optional with purpose=challenge only (V0.7 §12.1). The target child as @seq, the exact 32-character task ID, or a bare label unique under this task; its settle_report is destructively reviewed read-only and the challenged member's report and the original goal are supplied as task material."},
     \\    "model":{"type":"object","additionalProperties":false,"description":"Optional for create only. Set both provider_id and model_id.","properties":{"provider_id":{"type":"string"},"model_id":{"type":"string"}},"required":["provider_id","model_id"]},
     \\    "effort":{"type":"string","enum":["none","low","medium","high","xhigh","max","ultra"],"description":"Optional for create only."},
     \\    "after_sequence":{"type":"integer","minimum":0,"description":"Optional for wait_events only. Use the last returned sequence watermark, or 0 for the first read. Omit to receive only events newer than the last delivered report."},
     \\    "verification":{"type":"array","minItems":1,"maxItems":16,"description":"Required for verify_boost only. Each item checks one original requirement and cites observed evidence.","items":{"type":"object","additionalProperties":false,"required":["requirement","passed","detail"],"properties":{"requirement":{"type":"string","maxLength":512},"passed":{"type":"boolean"},"detail":{"type":"string","maxLength":512}}}},
-    \\    "wait_ms":{"type":"integer","minimum":0,"maximum":10000,"description":"Optional for wait_events only. Defaults to 0."}
+    \\    "wait_ms":{"type":"integer","minimum":0,"maximum":10000,"description":"Optional for wait_events only. Omit for an immediate read. Maximum 10000 milliseconds (10 seconds)."}
     \\  }
     \\}
     ,
@@ -77,11 +77,13 @@ pub const Request = struct {
     reusable: ?bool = null,
     /// V0.7 §12.1 role tier (planner/worker/batch; verifier is a purpose).
     role: ?@import("swarm_orchestration.zig").GatewayRole = null,
-    /// V0.7 §12.1 dependency references; the host starts this task only
-    /// after every listed child reached a terminal status.
+    /// V0.7 §12.1 dependency references (three-way: @seq, 32-char task ID, or
+    /// unique bare label); the host starts this task only after every listed
+    /// child reached a terminal status.
     depends_on: ?[]const []const u8 = null,
-    /// V0.7 §12.1 with purpose=challenge: the @seq whose settle_report is
-    /// destructively reviewed read-only.
+    /// V0.7 §12.1 with purpose=challenge: the referenced child (same
+    /// three-way rule) whose settle_report is destructively reviewed
+    /// read-only.
     challenge_target: ?[]const u8 = null,
     model: ?@import("provider_config.zig").ModelSelection = null,
     effort: ?@import("provider.zig").Effort = null,
@@ -252,6 +254,54 @@ fn resolveTask(root: *budget.Root, context_task: id.TaskId, reference: []const u
     if (reference.len == 32) return id.TaskId.parse(reference) catch return error.ChildTaskNotFound;
     return error.ChildTaskNotFound;
 }
+/// V0.7 §12.1: resolve a depends_on/challenge_target child reference with the
+/// §2.1 three-way rule used by agent_id/task_id: "@N" addresses child N, a
+/// 32-char hex string is the exact current-root task ID (restricted to a
+/// delegated child of this task), and a bare label matches only when unique
+/// under this task.
+fn resolveChildTask(root: *budget.Root, context_task: id.TaskId, reference: []const u8) !budget.Fact {
+    if (reference.len != 0 and reference[0] == '@') {
+        const number = std.fmt.parseInt(u32, reference[1..], 10) catch return error.InvalidArguments;
+        if (number == 0) return error.InvalidArguments;
+        return root.factForSeq(context_task, number) catch error.ChildTaskNotFound;
+    }
+    if (reference.len == 32) {
+        const task = id.TaskId.parse(reference) catch return error.ChildTaskNotFound;
+        const fact = root.factForTask(task) catch return error.ChildTaskNotFound;
+        if (fact.parent == null or !fact.parent.?.eql(context_task)) return error.ChildTaskNotFound;
+        return fact;
+    }
+    const resolution = root.factsForLabel(context_task, reference) catch |err| return if (err == error.LabelAmbiguous) error.LabelAmbiguous else error.ChildTaskNotFound;
+    return resolution.fact;
+}
+
+test "resolveChildTask resolves seq exact task id and unique label" {
+    var root = budget.Root.init(std.testing.allocator);
+    defer root.deinit();
+    const parent_task = id.TaskId.generate();
+    try root.add(.{ .root = parent_task, .task = parent_task, .parent = null, .conversation = id.ConversationId.generate(), .agent = id.AgentId.generate(), .generation = 1, .status = .running });
+    const first = budget.Fact{ .root = parent_task, .task = id.TaskId.generate(), .parent = parent_task, .conversation = id.ConversationId.generate(), .agent = id.AgentId.generate(), .generation = 1, .status = .succeeded, .seq = 1, .label = "worker" };
+    try root.add(first);
+    const second = budget.Fact{ .root = parent_task, .task = id.TaskId.generate(), .parent = parent_task, .conversation = id.ConversationId.generate(), .agent = id.AgentId.generate(), .generation = 1, .status = .succeeded, .seq = 2, .label = "worker" };
+    try root.add(second);
+    // @seq 短引用。
+    try std.testing.expectEqual(first.task, (try resolveChildTask(&root, parent_task, "@1")).task);
+    // 32 位任务 ID。
+    const hex = std.fmt.bytesToHex(second.task.bytes, .lower);
+    try std.testing.expectEqual(second.task, (try resolveChildTask(&root, parent_task, &hex)).task);
+    // 唯一裸 label：只有一个孩子带独立短名时命中。
+    try root.add(.{ .root = parent_task, .task = id.TaskId.generate(), .parent = parent_task, .conversation = id.ConversationId.generate(), .agent = id.AgentId.generate(), .generation = 1, .status = .succeeded, .seq = 3, .label = "challenger" });
+    try std.testing.expectEqualStrings("challenger", (try resolveChildTask(&root, parent_task, "challenger")).label);
+    // 重复短名 → LabelAmbiguous；未知名与父任务自身 → ChildTaskNotFound。
+    try std.testing.expectError(error.LabelAmbiguous, resolveChildTask(&root, parent_task, "worker"));
+    try std.testing.expectError(error.ChildTaskNotFound, resolveChildTask(&root, parent_task, "missing"));
+    const parent_hex = std.fmt.bytesToHex(parent_task.bytes, .lower);
+    try std.testing.expectError(error.ChildTaskNotFound, resolveChildTask(&root, parent_task, &parent_hex));
+    // 非法形态：@0 / @x / 32 位非 hex。
+    try std.testing.expectError(error.InvalidArguments, resolveChildTask(&root, parent_task, "@0"));
+    try std.testing.expectError(error.InvalidArguments, resolveChildTask(&root, parent_task, "@x"));
+    try std.testing.expectError(error.ChildTaskNotFound, resolveChildTask(&root, parent_task, "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"));
+}
 /// V0.7 §3.2: a create/reuse without an explicit request_key uses a stable
 /// content-derived key so identical retries deduplicate automatically.
 fn derivedRequestKey(r: Request) [65]u8 {
@@ -296,10 +346,11 @@ pub fn execute(env: Environment, invocation: host.Invocation, r: Request, a: std
             var dep_count: usize = 0;
             var predecessor: ?budget.Fact = null;
             if (r.depends_on) |refs| {
-                var numbers: [16]u32 = undefined;
-                const seqs = try @import("swarm_orchestration.zig").parseDependencies(refs, &numbers);
-                for (seqs) |seq| {
-                    const prior = root.factForSeq(context.task, seq) catch return error.ChildTaskNotFound;
+                for (refs) |reference| {
+                    const prior = try resolveChildTask(root, context.task, reference);
+                    // Distinct reference forms may name the same child; keep
+                    // the parse-level contract of rejecting duplicates.
+                    for (dependencies[0..dep_count]) |listed| if (listed.eql(prior.task)) return error.InvalidArguments;
                     dependencies[dep_count] = prior.task;
                     dep_count += 1;
                     if (prior.boost_round != null and (predecessor == null or prior.boost_round.?.number > predecessor.?.boost_round.?.number)) predecessor = prior;
@@ -309,9 +360,7 @@ pub fn execute(env: Environment, invocation: host.Invocation, r: Request, a: std
             defer if (challenge_owned) |owned| a.free(owned);
             const effective_text = blk: {
                 const reference = r.challenge_target orelse break :blk text;
-                if (!std.mem.startsWith(u8, reference, "@")) return error.InvalidArguments;
-                const seq = std.fmt.parseInt(u32, reference[1..], 10) catch return error.InvalidArguments;
-                const target = root.factForSeq(context.task, seq) catch return error.ChildTaskNotFound;
+                const target = try resolveChildTask(root, context.task, reference);
                 if (target.status != .succeeded) return error.ChallengeReportPending;
                 if (parent_fact.boost_limit != null and (target.boost_round == null or target.boost_round.?.phase == .challenge)) return error.InvalidArguments;
                 predecessor = target;
@@ -509,7 +558,14 @@ pub fn execute(env: Environment, invocation: host.Invocation, r: Request, a: std
                 return error.ChildTaskNotFound;
             };
             root.mutex.unlock();
-            if (budget.terminal(fact.status)) return error.TaskAlreadyFinished;
+            // A settled child can no longer accept send/stop. Surface a normal
+            // rejection payload instead of an execute error: the gateway is
+            // resource_write, and tool_loop would otherwise mark the parent
+            // task outcome_unknown.
+            if (budget.terminal(fact.status)) return rejectionWithPayload(invocation, a, error.TaskAlreadyFinished, .{
+                .task_id = fact.task,
+                .status = @tagName(fact.status),
+            });
             const child_runner = env.service.runnerFor(fact.agent) orelse return error.ChildTaskNotFound;
             const queued = child_runner.pending_task != null and child_runner.pending_task.?.eql(fact.task);
             if (!queued and (child_runner.context == null or !child_runner.context.?.task.eql(fact.task) or child_runner.worker_generation != fact.generation)) return error.ChildTaskNotFound;
@@ -541,7 +597,15 @@ pub fn execute(env: Environment, invocation: host.Invocation, r: Request, a: std
             // than the host-tracked delivered watermark (P9: the host keeps
             // the ledger). An explicit watermark still pages from there.
             const after = r.after_sequence orelse root.delivered_watermark;
-            if (after > root.revision) return error.InvalidEventWatermark;
+            // This call never dispatched an effect, so surface a normal
+            // rejection payload instead of an execute error: the gateway is
+            // resource_write, and tool_loop would otherwise mark the parent
+            // task outcome_unknown.
+            if (after > root.revision) return rejectionWithPayload(invocation, a, error.InvalidEventWatermark, .{
+                .after_sequence = after,
+                .root_revision = root.revision,
+                .delivered_watermark = root.delivered_watermark,
+            });
             var events: [8]budget.Fact = undefined;
             var count: usize = 0;
             var watermark = after;

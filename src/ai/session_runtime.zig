@@ -686,6 +686,8 @@ pub const Service = struct {
             const root = try self.allocator.create(task_budget.Root);
             root.* = task_budget.Root.init(self.allocator);
             root.persist = .{ .context = &self.store, .write = lifecycle.Store.persistTask };
+            // V0.7 §11.1: board posts ride the same session journal.
+            root.board_persist = .{ .context = &self.store, .write = lifecycle.Store.persistBoardPost };
             // V0.7 §2.3: the root freezes the configured child limit.
             root.child_limit = self.child_limit;
             self.task_roots.appendAssumeCapacity(root);

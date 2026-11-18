@@ -149,6 +149,7 @@ pub const Host = struct {
         }
         try store.records.ensureUnusedCapacity(self.allocator, recovered.records.items.len);
         try store.task_facts.ensureUnusedCapacity(self.allocator, recovered.task_facts.items.len);
+        try store.board_posts.ensureUnusedCapacity(self.allocator, recovered.board_posts.items.len);
         try self.presentations.states.ensureUnusedCapacity(self.allocator, recovered.records.items.len);
         try self.journal.?.installPersistence(recovered);
         for ([_]bool{ true, false }) |is_child| for (recovered.records.items) |record| {
@@ -157,6 +158,8 @@ pub const Host = struct {
         try recovered.recoverTasks();
         store.task_facts.appendSliceAssumeCapacity(recovered.task_facts.items);
         recovered.task_facts.clearRetainingCapacity();
+        store.board_posts.appendSliceAssumeCapacity(recovered.board_posts.items);
+        recovered.board_posts.clearRetainingCapacity();
         for (recovered.records.items) |record| {
             record.inbox.budget = &store.budget;
             store.records.appendAssumeCapacity(record);

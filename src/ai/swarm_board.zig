@@ -28,6 +28,10 @@ pub const Post = struct {
     ts: i64,
     /// Attached at the host boundary after idempotent dedup.
     post_id: [16]u8 = @splat(0),
+    /// True once the host delivered this post directly into its target's
+    /// inbox (parent or member). The board still renders it for history;
+    /// delivery skips it.
+    delivered: bool = false,
 };
 
 pub const max_text_bytes = 8 * 1024;
@@ -56,7 +60,8 @@ pub fn parse(to: []const u8, category: []const u8, text: []const u8) ParseError!
 }
 
 /// 投递规则表（§11.2）。注入宿主在下一轮模型输入时执行；此处仅描述语义，
-/// 由调用方（G2 反向复用通道）实施。
+/// 由调用方（main.dispatchBoardPost 的 host.post 落板处）实施：父帖唤醒父、
+/// 成员帖直投目标成员下一轮、@all 只落板。
 pub fn deliversToRoot(post: Post) enum { parent_next_round, member_next_round, board_only } {
     return switch (post.to) {
         .parent => .parent_next_round,
@@ -145,6 +150,13 @@ test "v0.7 board delivery rules and ask debounce" {
     try std.testing.expect(deliversToRoot(member_post) == .member_next_round);
     const all_post: Post = .{ .origin = 2, .to = .all, .category = .note, .text = "备注", .ts = 3 };
     try std.testing.expect(deliversToRoot(all_post) == .board_only);
+    // deliverableText 语义：父帖全文投递，@all 截断为摘要，成员帖永进父转录（空文本）。
+    try std.testing.expectEqualStrings("请求确认", deliverableText(parent_post));
+    try std.testing.expectEqualStrings("备注", deliverableText(all_post));
+    const long_text: [200]u8 = @splat('x');
+    const long_all: Post = .{ .origin = 2, .to = .all, .category = .note, .text = &long_text, .ts = 4 };
+    try std.testing.expectEqual(@as(usize, 160), deliverableText(long_all).len);
+    try std.testing.expectEqualStrings("", deliverableText(member_post));
     // ask 防抖：第 4 次连续 ask 自动回"按当前最佳判断继续"。
     var debounce: AskDebounce = .{};
     for (0..3) |_| try std.testing.expect(debounce.observe(1) == null);

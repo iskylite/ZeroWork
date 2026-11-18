@@ -30,7 +30,13 @@ pub fn localDateTimestamp(out: *[19]u8, wall_ms: i64) ![]const u8 {
 pub fn onKey(self: *Surface, key: ui.events.KeyCode, modifiers: ui.events.Modifiers) ui.events.EventResult {
     if (self.preedit.len != 0) return .stop;
     if (self.pending_paste != null or self.paste_requested != null) {
-        if (key == .escape) cancelPaste(self);
+        if (key == .escape) {
+            cancelPaste(self);
+        } else if (key == .@"return" and self.pending_paste != null and !self.paste_confirmed) {
+            // 弹窗出现后直接回车等于确认插入；Esc 保持取消语义。
+            approvePaste(self);
+            self.cx.setFocus(self.host);
+        }
         return .stop;
     }
     if (modifiers.super) {
@@ -549,6 +555,7 @@ pub fn cancelPaste(self: *Surface) void {
     if (self.modal_open) |open| open.set(false);
 }
 fn approvePaste(self: *Surface) void {
+    if (self.paste_confirmed) return;
     self.paste_confirmed = true;
     if (self.modal_open) |open| open.set(false);
     pumpPaste(self) catch |err| self.showError(err);

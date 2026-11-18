@@ -19,12 +19,20 @@ pub const Callbacks = struct {
     owner_label: ?*const fn (*anyopaque, backend.JobId) []const u8 = null,
     metadata: ?*const fn (*anyopaque, backend.JobId) []const u8 = null,
     owner: ?*const fn (*anyopaque, backend.JobId) ?identity.SessionHandle = null,
+    can_dismiss: ?*const fn (*anyopaque, backend.JobId) bool = null,
+    /// Host-owned batch path; manager-backed panels derive it from the host
+    /// batch callback carried alongside the single-task action.
+    batch: ?*const fn (*anyopaque, []const Target, TaskAction) anyerror!void = null,
+    /// Mirrors this callbacks block's optional batch as view hooks.
+    fn batchHook(self: Callbacks) ?*const fn (*anyopaque, []const Target, TaskAction) anyerror!void {
+        return self.batch;
+    }
 };
 pub const Statistics = struct { window_chunks: u8, chunk_kb: u16, today_bytes: ?u64 = null };
 pub const Presentation = enum { window, global_popover, session_popover, session_tray };
-pub const Options = struct { presentation: Presentation = .window, fill_window: bool = false };
+pub const Options = struct { presentation: Presentation = .window, fill_window: bool = false, default_filter: Filter = .all };
 pub const Target = struct { job: backend.JobId, attempt: u32, owner: ?identity.SessionHandle };
-pub const TaskAction = enum { pause, resume_transfer, cancel, retry, reveal, new_draft, resolve_conflict };
+pub const TaskAction = enum { pause, resume_transfer, cancel, retry, reveal, new_draft, resolve_conflict, dismiss };
 pub const WindowAction = enum { minimize, zoom, close };
 pub const Phase = enum { queued, running, retry_wait, pausing, paused, conflict, verifying, succeeded, skipped, failed, checksum_failed, cancelling, cancelled, cleanup_unknown };
 pub const Scope = union(enum) {
@@ -52,6 +60,7 @@ pub const Task = struct {
     event_summary: []const u8 = "",
     can_resume: bool = true,
     can_reveal: bool = true,
+    can_dismiss: bool = false,
 };
 pub const Snapshot = struct {
     revision: u64,
@@ -144,6 +153,7 @@ pub fn allows(phase: Phase, action: TaskAction) bool {
         .resolve_conflict => phase == .conflict,
         .reveal => phase == .succeeded,
         .cancel => phase == .running or phase == .queued or phase == .retry_wait or phase == .pausing or phase == .paused or phase == .conflict or phase == .verifying,
+        .dismiss => phase == .succeeded or phase == .skipped or phase == .failed or phase == .checksum_failed or phase == .cancelled,
     };
 }
 pub fn belongs(scope: Scope, owner: ?identity.SessionHandle) bool {
@@ -181,7 +191,7 @@ fn copyScope(a: std.mem.Allocator, scope: Scope) !Scope {
 fn taskEql(a: Task, b: Task) bool {
     if (!same(a.target, b.target) or a.direction != b.direction or a.phase != b.phase or
         a.done_bytes != b.done_bytes or a.total_bytes != b.total_bytes or a.speed_bps != b.speed_bps or
-        a.can_resume != b.can_resume or a.can_reveal != b.can_reveal or a.reading_source != b.reading_source) return false;
+        a.can_resume != b.can_resume or a.can_reveal != b.can_reveal or a.can_dismiss != b.can_dismiss or a.reading_source != b.reading_source) return false;
     inline for (.{ "name", "owner_label", "local_path", "remote_path", "route", "status_detail", "options", "events", "event_summary" }) |field| {
         if (!std.mem.eql(u8, @field(a, field), @field(b, field))) return false;
     }
@@ -266,7 +276,7 @@ pub fn mountSessionTray(cx: *ui.Cx, scope: *ui.Scope, manager: *backend.Manager,
 /// The titlebar entry uses the global layout inside the current window.
 /// Its close button only hides this view; it owns no native window or jobs.
 pub fn mountGlobalPopover(cx: *ui.Cx, scope: *ui.Scope, manager: *backend.Manager, callbacks: Callbacks) !*Panel {
-    const panel = try mountProjection(cx, scope, .{ .presentation = .global_popover }, .{ .context = callbacks.context });
+    const panel = try mountProjection(cx, scope, .{ .presentation = .global_popover, .default_filter = .active }, .{ .context = callbacks.context, .batch = callbacks.batchHook() });
     panel.manager = manager;
     panel.callbacks = callbacks;
     return panel;
@@ -276,6 +286,18 @@ pub fn mountWindow(cx: *ui.Cx, scope: *ui.Scope, manager: *backend.Manager, call
     panel.manager = manager;
     panel.callbacks = callbacks;
     return panel;
+}
+
+const batch_controls = [_]struct { action: TaskAction, kind: @FieldType(Control, "kind"), label: []const u8, id: []const u8, icon: []const u8 }{
+    .{ .action = .pause, .kind = .batch_pause, .label = "暂停所选任务", .id = "transfer.batch.pause", .icon = "pause" },
+    .{ .action = .resume_transfer, .kind = .batch_resume, .label = "恢复所选任务", .id = "transfer.batch.resume", .icon = "play" },
+    .{ .action = .cancel, .kind = .batch_cancel, .label = "取消所选任务", .id = "transfer.batch.cancel", .icon = "x" },
+    .{ .action = .dismiss, .kind = .batch_dismiss, .label = "删除所选任务记录", .id = "transfer.batch.dismiss", .icon = "trash-2" },
+};
+
+fn batchAllows(task_: Task, action: TaskAction) bool {
+    return task_.target.owner != null and allows(task_.phase, action) and
+        (action != .resume_transfer or task_.can_resume) and (action != .dismiss or task_.can_dismiss);
 }
 
 const Control = struct {
@@ -289,7 +311,7 @@ const Control = struct {
     copy_feedback: ?*@import("copy_button.zig").Button = null,
     copy_anchor: ?*ui.Node = null,
     event_anchor: ?*ui.Node = null,
-    kind: enum { action, detail, events, copy_path, copy_local_path, window, choice, search, filter, new_transfer, batch, batch_pause, batch_resume, batch_cancel, all_tasks, scope_tasks, state_filter } = .action,
+    kind: enum { action, detail, events, copy_path, copy_local_path, window, choice, search, filter, new_transfer, batch, batch_pause, batch_resume, batch_cancel, batch_dismiss, all_tasks, scope_tasks, state_filter } = .action,
     fn run(self: *Control) void {
         const p = self.panel;
         const copy_rect = if (self.copy_anchor) |node| node.globalRect() else p.root.globalRect();
@@ -376,6 +398,7 @@ const Control = struct {
             .batch_pause => p.performBatch(.pause) catch |err| p.fail(err),
             .batch_resume => p.performBatch(.resume_transfer) catch |err| p.fail(err),
             .batch_cancel => p.performBatch(.cancel) catch |err| p.fail(err),
+            .batch_dismiss => p.performBatch(.dismiss) catch |err| p.fail(err),
         }
     }
     fn checked(self: *Control, value: bool) void {
@@ -421,10 +444,10 @@ pub const Panel = struct {
     expanded: ?Target = null,
     tray_layout_width: f32 = 0,
     metadata_layout_width: f32 = 0,
-    owner_column_width: f32 = 106,
+    owner_width_limit: f32 = 106,
     events_open: bool = false,
     event_view: ?*@import("transfer_events_view.zig").View = null,
-    batch_visible: bool = false,
+    batch_visible: bool = true,
     search_visible: bool = false,
     filter_visible: bool = false,
     dirty: bool = false,
@@ -446,6 +469,8 @@ pub const Panel = struct {
     v3_filter_labels: [3]?*ui.Node = @splat(null),
     counts_row: *ui.Node,
     tools_row: *ui.Node,
+    browse_tools: ?*ui.Node = null,
+    browse_spacer: *ui.Node = undefined,
     counts_buttons: [status_filters.len]struct { node: *ui.Node, label: *ui.Node, style: *ui.Signal(ui.BoxStyle) } = undefined,
     filter_value: *ui.Signal(?[]const u8),
     title_badge: *ui.Node,
@@ -460,6 +485,7 @@ pub const Panel = struct {
     search_node: *ui.Node,
     filters_node: *ui.Node,
     batch_row: *ui.Node,
+    batch_disabled: [4]*ui.Signal(bool) = undefined,
     batch_label: *ui.Node,
     list: struct { container: *ui.Node, content: *ui.Node, state: *ui.widgets.scroll_area.ScrollState },
     virtual: *ui.widgets.VirtualListState,
@@ -469,7 +495,7 @@ pub const Panel = struct {
 
     pub fn mountProjection(cx: *ui.Cx, scope: *ui.Scope, options: Options, hooks: Hooks) !*Panel {
         const p = try cx.allocator.create(Panel);
-        p.* = .{ .cx = cx, .scope = scope, .root = undefined, .options = options, .hooks = hooks, .window_disabled = try scope.createSignal(bool, hooks.window == null), .paint_colors = S.theme.current(), .head = undefined, .heading_title = undefined, .foot = undefined, .scope_row = undefined, .counts_row = undefined, .tools_row = undefined, .filter_value = try scope.createSignal(?[]const u8, "all"), .title_badge = undefined, .notice = undefined, .footer_label = undefined, .footer_rate = undefined, .empty = undefined, .failure = undefined, .search = try scope.createText("", .{}), .search_node = undefined, .filters_node = undefined, .batch_row = undefined, .batch_label = undefined, .list = undefined, .virtual = undefined };
+        p.* = .{ .cx = cx, .scope = scope, .root = undefined, .options = options, .hooks = hooks, .filter = options.default_filter, .window_disabled = try scope.createSignal(bool, hooks.window == null), .paint_colors = S.theme.current(), .head = undefined, .heading_title = undefined, .foot = undefined, .scope_row = undefined, .counts_row = undefined, .tools_row = undefined, .filter_value = try scope.createSignal(?[]const u8, @tagName(options.default_filter)), .title_badge = undefined, .notice = undefined, .footer_label = undefined, .footer_rate = undefined, .empty = undefined, .failure = undefined, .search = try scope.createText("", .{}), .search_node = undefined, .filters_node = undefined, .batch_row = undefined, .batch_label = undefined, .list = undefined, .virtual = undefined };
         try scope.onCleanup(Panel, p, cleanup);
         const tray = options.presentation == .session_tray;
         const window = !tray;
@@ -530,7 +556,21 @@ pub const Panel = struct {
             chip.* = .{ .node = node, .label = firstTextNode(node) orelse return error.MissingFilterLabel, .style = style };
             try p.counts_row.appendChild(cx.allocator, node);
         }
-        try p.counts_row.appendChild(cx.allocator, try ui.spacer(cx));
+        p.batch_row = try ui.box(cx, S.row(28, 6), .{});
+        if (tray) {
+            p.batch_row.setStyleInline(cx.allocator, .{ .padding = .{ .right = S.list_scroll_gutter + S.task_content_inset } });
+        } else p.batch_row.setStyleInline(cx.allocator, .{ .flex = 1 });
+        p.batch_label = try p.label(p.batch_row, "", 11, 500, true);
+        p.batch_label.setStyleInline(cx.allocator, S.flexibleLabel());
+        for (&p.batch_disabled, batch_controls) |*disabled, control| {
+            disabled.* = try scope.createSignal(bool, true);
+            _ = try p.button(p.batch_row, scope, control.label, control.id, control.icon, .{ .panel = p, .kind = control.kind }, disabled.*, 24);
+        }
+        p.batch_row.setDisplay(.none);
+        if (!tray) try p.counts_row.appendChild(cx.allocator, p.batch_row);
+
+        p.browse_spacer = try ui.spacer(cx);
+        try p.counts_row.appendChild(cx.allocator, p.browse_spacer);
         p.tools_row = try ui.box(cx, .{ .height = .{ .px = 28 }, .direction = .row, .align_items = .center, .gap = 6, .flex_shrink = 0 }, .{});
         try p.counts_row.appendChild(cx.allocator, p.tools_row);
         p.search_node = try ui.widgets.Input(.{ .value = p.search, .placeholder = "搜索文件名、路径或会话", .on_change = cx.on(Panel, p, searchChanged) }).mount(scope, cx);
@@ -602,14 +642,7 @@ pub const Panel = struct {
         }
         p.empty.meta.ownership.meta.test_id = "transfer.empty.title";
         empty_state.setDisplay(.none);
-        p.batch_row = try ui.box(cx, S.row(30, 6), .{});
-        p.batch_label = try p.label(p.batch_row, "", 11, 400, true);
-        p.batch_label.setStyleInline(cx.allocator, S.flexibleLabel());
-        _ = try p.button(p.batch_row, scope, "暂停所选任务", "transfer.batch.pause", "pause", .{ .panel = p, .kind = .batch_pause }, hooks.batch == null, 24);
-        _ = try p.button(p.batch_row, scope, "恢复所选任务", "transfer.batch.resume", "play", .{ .panel = p, .kind = .batch_resume }, hooks.batch == null, 24);
-        _ = try p.button(p.batch_row, scope, "取消所选任务", "transfer.batch.cancel", "x", .{ .panel = p, .kind = .batch_cancel }, hooks.batch == null, 24);
-        p.batch_row.setDisplay(.none);
-        try p.root.appendChild(cx.allocator, p.batch_row);
+        if (tray) try p.root.appendChild(cx.allocator, p.batch_row);
         const list = try ui.widgets.VirtualList(.{ .item_count = @as(usize, 0), .item_height = S.row_pitch, .height = if (window) @as(f32, 360) else @as(f32, 214), .overscan = 1, .item_height_fn = itemHeight, .item_height_context = p, .item_label_fn = itemLabel, .item_label_context = p }).mountWithContext(scope, cx, p, null, renderItem);
         p.virtual = list.state;
         p.list = .{ .container = list.container, .content = list.state.content_node, .state = list.state.scroll_state };
@@ -770,15 +803,13 @@ pub const Panel = struct {
             if (retained) selected_index += 1 else _ = self.selection.orderedRemove(selected_index);
         }
         if (self.options.presentation != .session_popover and self.options.presentation != .session_tray) {
-            var preferred: f32 = 106;
-            for (self.visible.items) |index| preferred = @max(preferred, self.cx.text.measureTextWidth(source.value.rows[index].owner_label, 11, 400, false) + 2);
             // Keep a useful filename slot; long filenames ellipsize within it.
             const filename_width: f32 = 160;
             const available = if (self.metadata_layout_width > 0) self.metadata_layout_width else 812;
             const reserved: f32 = 20 + 14 + 112 + 102 + 24 + (if (self.batch_visible) @as(f32, 22) else 0);
             const budget = @max(0, available - reserved);
             const filename_reserved = @min(filename_width, @max(0, budget - 48));
-            self.owner_column_width = @min(preferred, @max(0, budget - filename_reserved));
+            self.owner_width_limit = @min(160, @max(0, budget - filename_reserved));
         }
         if (self.expanded) |target| if (self.task(target) == null) {
             self.expanded = null;
@@ -792,7 +823,9 @@ pub const Panel = struct {
         try self.notice.setTextContent(self.cx.allocator, source.value.notice);
         self.notice.parent.?.setDisplay(if (self.options.presentation != .session_popover and source.value.notice.len != 0) .flex else .none);
         const values = [_]usize{ self.counts.active, self.counts.waiting, self.counts.paused, self.counts.failed, self.counts.ended };
+        const has_selection = self.selection.items.len > 0;
         for (status_filters, status_labels, values, &self.counts_buttons, 0..) |filter, name, count_, *chip, i| {
+            chip.node.setDisplay(if (has_selection) .none else .flex);
             const selected = self.filter == filter;
             const ink = if (count_ == 0 and !selected) S.theme.current().fg_3 else countColor(i);
             chip.style.set(S.statusFilter(i == 0, selected, ink));
@@ -808,9 +841,19 @@ pub const Panel = struct {
         self.foot.setDisplay(if (has_tasks and self.options.presentation == .window) .flex else .none);
         var speed_buffer: [40]u8 = undefined;
         try self.format(self.footer_rate, "{d} 进行中 · {s} · {d} 等待", .{ self.counts.active, formatSpeed(&speed_buffer, self.counts.speed_bps), self.counts.waiting });
-        self.search_node.setDisplay(if (self.search_visible) .flex else .none);
-        self.filters_node.setDisplay(if (self.filter_visible) .flex else .none);
-        self.batch_row.setDisplay(if (self.batch_visible) .flex else .none);
+        self.browse_spacer.setDisplay(if (has_selection) .none else .flex);
+        if (self.browse_tools) |tools| tools.setDisplay(if (has_selection) .none else .flex);
+        self.search_node.setDisplay(if (self.search_visible and !has_selection) .flex else .none);
+        self.filters_node.setDisplay(if (self.filter_visible and !has_selection) .flex else .none);
+        self.batch_row.setDisplay(if (has_selection) .flex else .none);
+        var available: [batch_controls.len]bool = @splat(false);
+        if (self.hooks.batch != null) for (self.selection.items) |target| {
+            const task_ = self.task(target) orelse continue;
+            for (batch_controls, &available) |control, *enabled| {
+                enabled.* = enabled.* or batchAllows(task_, control.action);
+            }
+        };
+        for (self.batch_disabled, available) |disabled, enabled| disabled.set(!enabled);
         if (self.options.presentation == .session_tray) {
             self.scope_row.setDisplay(.none);
             self.counts_row.setDisplay(.none);
@@ -842,6 +885,7 @@ pub const Panel = struct {
         self.cx.requestRedraw();
     }
     fn renderScopes(self: *Panel) !void {
+        self.browse_tools = null;
         if (self.scope_scope) |scope| scope.dispose();
         self.scope_scope = null;
         for ([_]*ui.Node{ self.scope_row, self.tools_row }) |parent| {
@@ -896,8 +940,11 @@ pub const Panel = struct {
         self.tools_row.removeChild(manage);
         const manage_hint = try @import("control_hint.zig").mount(self.cx, scope, manage, manage_label, .{ .id = "transfer.batch.tooltip", .layout = S.action(28) });
         try self.tools_row.appendChild(self.cx.allocator, manage_hint.wrapper);
-        _ = try self.button(self.tools_row, scope, "搜索任务", "transfer.search.toggle", "search", .{ .panel = self, .kind = .search }, false, 28);
-        _ = try self.button(self.tools_row, scope, "筛选任务状态", "transfer.filter.toggle", "filter", .{ .panel = self, .kind = .filter }, false, 28);
+        const browse_tools = try ui.box(self.cx, .{ .height = .{ .px = 28 }, .direction = .row, .align_items = .center, .gap = 6, .flex_shrink = 0 }, .{});
+        try self.tools_row.appendChild(self.cx.allocator, browse_tools);
+        self.browse_tools = browse_tools;
+        _ = try self.button(browse_tools, scope, "搜索任务", "transfer.search.toggle", "search", .{ .panel = self, .kind = .search }, false, 28);
+        _ = try self.button(browse_tools, scope, "筛选任务状态", "transfer.filter.toggle", "filter", .{ .panel = self, .kind = .filter }, false, 28);
     }
     fn renderItem(node: *ui.Node, index: usize, cx: *ui.Cx, raw: ?*anyopaque) void {
         const self: *Panel = @ptrCast(@alignCast(raw.?));
@@ -940,20 +987,31 @@ pub const Panel = struct {
         tip.wrapper.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = 24 }, .flex = 1, .min_width = 0 });
         tip.trigger.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .fill(), .min_width = 0, .align_items = .center, .cursor = .pointer });
         try upper.appendChild(cx.allocator, tip.wrapper);
-        _ = try self.taskTextSlot(tip.trigger, scope, task_.name, 12, false, false, "transfer.task.name");
-        if (self.options.presentation != .session_tray and self.options.presentation != .session_popover) {
-            const owner = try self.label(upper, task_.owner_label, 11, 400, true);
-            owner.setStyleInline(cx.allocator, S.label(self.owner_column_width));
+        const name_weight = 500;
+        const name = try self.taskTextSlot(tip.trigger, scope, task_.name, 12, false, false, "transfer.task.name");
+        if (name.getText()) |old| {
+            var name_text = old;
+            name_text.font_weight = name_weight;
+            name.setText(name_text);
+        }
+        if (self.options.presentation != .session_tray and self.options.presentation != .session_popover and task_.owner_label.len > 0 and self.owner_width_limit > 24) {
+            tip.trigger.setStyleInline(cx.allocator, .{ .direction = .row, .gap = 10 });
+            const name_width = @ceil(cx.text.measureTextWidth(task_.name, 12, name_weight, false)) + 1;
+            name.parent.?.setStyleInline(cx.allocator, .{ .width = .{ .px = name_width }, .flex = 0, .flex_shrink = 1 });
+            const owner_font_size = 10;
+            const owner_width = @ceil(cx.text.measureTextWidth(task_.owner_label, owner_font_size, 400, false)) + 1;
+            const tag = try ui.box(cx, S.ownerTag(@min(self.owner_width_limit, owner_width + 12)), .{});
+            try tip.trigger.appendChild(cx.allocator, tag);
+            const owner = try self.label(tag, task_.owner_label, owner_font_size, 400, true);
+            owner.setStyleInline(cx.allocator, S.flexibleLabel());
             owner.meta.ownership.meta.test_id = "transfer.task.owner";
             if (owner.getText()) |old| {
                 var text_props = old;
                 text_props.text_overflow = .ellipsis;
-                text_props.text_align = .end;
                 owner.setText(text_props);
             }
         }
-        var buffer: [96]u8 = undefined;
-        const description = if (task_.phase == .running) formatSpeed(&buffer, task_.speed_bps) else if (task_.status_detail.len > 0) task_.status_detail else switch (task_.phase) {
+        const description = if (task_.status_detail.len > 0) task_.status_detail else switch (task_.phase) {
             .queued => "等待连接",
             .paused => if (task_.can_resume) "等待继续" else "数据已保留",
             else => "",
@@ -979,15 +1037,22 @@ pub const Panel = struct {
         if (!(task_.phase == .succeeded and task_.direction == .upload)) {
             if (primaryAction(task_.phase)) |action| {
                 _ = try self.button(actions, scope, actionLabel(action, task_.direction), "transfer.task.primary", actionIcon(action, task_.direction), .{ .panel = self, .target = task_.target, .action = action }, !self.actionAvailable(task_.target) or (action == .resume_transfer and !task_.can_resume) or (action == .reveal and !self.canReveal(task_.target)), 24);
+            } else if (allows(task_.phase, .pause)) {
+                // Queued/waiting rows put a real pause control in the primary
+                // slot instead of a passive clock glyph.
+                _ = try self.button(actions, scope, "暂停传输", "transfer.task.primary", "pause", .{ .panel = self, .target = task_.target, .action = .pause }, !self.actionAvailable(task_.target), 24);
             } else {
                 const slot = try ui.box(cx, .{ .width = .{ .px = 24 }, .height = .{ .px = 24 }, .align_items = .center, .justify = .center, .flex_shrink = 0 }, .{});
-                try slot.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.get(if (task_.phase == .queued or task_.phase == .retry_wait) "clock" else if (task_.phase == .verifying or task_.phase == .pausing or task_.phase == .cancelling) "loader-circle" else "minus").?, S.theme.current().fg_3, S.icon(16)));
+                try slot.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.get(if (task_.phase == .verifying or task_.phase == .pausing or task_.phase == .cancelling) "loader-circle" else "minus").?, S.theme.current().fg_3, S.icon(16)));
                 try actions.appendChild(cx.allocator, slot);
             }
         }
+        // Selection management additionally exposes pause/resume explicitly so
+        // batch-style control stays reachable without a phase-specific slot.
         _ = try self.button(actions, scope, "复制远程路径", "transfer.task.copy_path", "copy", .{ .panel = self, .target = task_.target, .kind = .copy_path }, false, 24);
         _ = try self.button(actions, scope, "查看任务事件", "transfer.task.events", "list", .{ .panel = self, .target = task_.target, .kind = .events }, false, 24);
         if (allows(task_.phase, .cancel)) _ = try self.button(actions, scope, "取消任务", "transfer.task.cancel", "x", .{ .panel = self, .target = task_.target, .action = .cancel }, !self.actionAvailable(task_.target), 24);
+        if (allows(task_.phase, .dismiss)) _ = try self.button(actions, scope, "删除任务记录", "transfer.task.dismiss", "trash-2", .{ .panel = self, .target = task_.target, .action = .dismiss }, !self.actionAvailable(task_.target) or !task_.can_dismiss, 24);
         const lower = try ui.box(cx, S.row(16, 6), .{});
         lower.meta.ownership.meta.test_id = "transfer.task.meta";
         try row.appendChild(cx.allocator, lower);
@@ -995,22 +1060,22 @@ pub const Panel = struct {
         progress.meta.ownership.meta.test_id = "transfer.task.bytes";
         var done_buffer: [40]u8 = undefined;
         var total_buffer: [40]u8 = undefined;
+        var speed_buffer: [40]u8 = undefined;
         const done_text = try byteLabel(&done_buffer, task_.done_bytes);
+        const fraction: f64 = if (task_.phase == .succeeded) 1 else if (task_.total_bytes) |total| if (total > 0) @min(@as(f64, 1), @as(f64, @floatFromInt(task_.done_bytes)) / @as(f64, @floatFromInt(total))) else 0 else 0;
+        // Byte totals first; speed and percent join on the right, joined by
+        // the middle dot so one label carries "capacity · speed · progress".
+        const speed_text = if (task_.phase == .running and task_.speed_bps > 0) formatSpeed(&speed_buffer, task_.speed_bps) else null;
         if (task_.total_bytes) |total| {
             const total_text = try byteLabel(&total_buffer, total);
-            if (task_.phase == .running and task_.speed_bps > 0 and total > task_.done_bytes) {
-                const remaining = total - task_.done_bytes;
-                const seconds = remaining / task_.speed_bps + @intFromBool(remaining % task_.speed_bps != 0);
-                try self.format(progress, "{s} / {s} · 约 {d}s", .{ done_text, total_text, seconds });
-            } else try self.format(progress, "{s} / {s}", .{ done_text, total_text });
+            if (speed_text) |speed| try self.format(progress, "{s} / {s} · {s} · {d:.0}%", .{ done_text, total_text, speed, fraction * 100 }) else try self.format(progress, "{s} / {s} · {d:.0}%", .{ done_text, total_text, fraction * 100 });
+        } else if (speed_text) |speed| {
+            try self.format(progress, "{s} / 大小未知 · {s}", .{ done_text, speed });
         } else try self.format(progress, "{s} / 大小未知", .{done_text});
         progress.setStyleInline(cx.allocator, .{ .width = .{ .px = if (compact) @max(@as(f32, 1), (self.tray_layout_width - 40) * 0.48) else if (self.options.presentation == .session_tray) 160 else 270 }, .min_width = 0, .flex_shrink = 1, .overflow = .hidden, .overflow_hidden = true });
-        const fraction: f64 = if (task_.phase == .succeeded) 1 else if (task_.total_bytes) |total| if (total > 0) @min(@as(f64, 1), @as(f64, @floatFromInt(task_.done_bytes)) / @as(f64, @floatFromInt(total))) else 0 else 0;
         const status = try self.label(lower, "", 11, 400, true);
         const status_label = if (task_.reading_source) "读取源文件" else phaseLabel(task_.phase);
-        if (task_.phase == .succeeded or (task_.total_bytes != null and task_.total_bytes.? > 0)) {
-            try self.format(status, "{s} {d:.0}%", .{ status_label, fraction * 100 });
-        } else try self.format(status, "{s} —%", .{status_label});
+        try self.format(status, "{s}", .{status_label});
         status.setTextColor(color);
         status.meta.ownership.meta.test_id = "transfer.task.status";
         status.setStyleInline(cx.allocator, S.flexibleLabel());
@@ -1067,27 +1132,22 @@ pub const Panel = struct {
         return null;
     }
     fn patchProgress(self: *Panel, root: *ui.Node, task_: Task) !void {
-        var buffer: [96]u8 = undefined;
-        if (task_.phase == .running) if (progressNode(root, "transfer.task.rate")) |node|
-            try node.setTextContent(self.cx.allocator, formatSpeed(&buffer, task_.speed_bps));
-        const progress = progressNode(root, "transfer.task.bytes") orelse return;
+        var speed_buffer: [40]u8 = undefined;
         var done_buffer: [40]u8 = undefined;
         var total_buffer: [40]u8 = undefined;
+        const progress = progressNode(root, "transfer.task.bytes") orelse return;
         const done = try byteLabel(&done_buffer, task_.done_bytes);
+        const fraction: f64 = if (task_.phase == .succeeded) 1 else if (task_.total_bytes) |total| if (total > 0) @min(@as(f64, 1), @as(f64, @floatFromInt(task_.done_bytes)) / @as(f64, @floatFromInt(total))) else 0 else 0;
+        const speed_text = if (task_.phase == .running and task_.speed_bps > 0) formatSpeed(&speed_buffer, task_.speed_bps) else null;
         if (task_.total_bytes) |total| {
             const total_text = try byteLabel(&total_buffer, total);
-            if (task_.phase == .running and task_.speed_bps > 0 and total > task_.done_bytes) {
-                const remaining = total - task_.done_bytes;
-                const seconds = remaining / task_.speed_bps + @intFromBool(remaining % task_.speed_bps != 0);
-                try self.format(progress, "{s} / {s} · 约 {d}s", .{ done, total_text, seconds });
-            } else try self.format(progress, "{s} / {s}", .{ done, total_text });
+            if (speed_text) |speed| try self.format(progress, "{s} / {s} · {s} · {d:.0}%", .{ done, total_text, speed, fraction * 100 }) else try self.format(progress, "{s} / {s} · {d:.0}%", .{ done, total_text, fraction * 100 });
+        } else if (speed_text) |speed| {
+            try self.format(progress, "{s} / 大小未知 · {s}", .{ done, speed });
         } else try self.format(progress, "{s} / 大小未知", .{done});
-        const fraction: f64 = if (task_.phase == .succeeded) 1 else if (task_.total_bytes) |total| if (total > 0) @min(@as(f64, 1), @as(f64, @floatFromInt(task_.done_bytes)) / @as(f64, @floatFromInt(total))) else 0 else 0;
         if (progressNode(root, "transfer.task.status")) |status| {
             const label_ = if (task_.reading_source) "读取源文件" else phaseLabel(task_.phase);
-            if (task_.phase == .succeeded or (task_.total_bytes != null and task_.total_bytes.? > 0)) {
-                try self.format(status, "{s} {d:.0}%", .{ label_, fraction * 100 });
-            } else try self.format(status, "{s} —%", .{label_});
+            try self.format(status, "{s}", .{label_});
         }
         if (progressNode(root, "transfer.task.progress")) |track| if (track.children.items.len > 0) {
             const fill = track.children.items[0];
@@ -1284,6 +1344,7 @@ pub const Panel = struct {
         if (!allows(task_.phase, action)) return error.ActionUnavailable;
         if (action == .resume_transfer and !task_.can_resume) return error.ActionUnavailable;
         if (action == .reveal and self.options.presentation != .window and !self.canReveal(target)) return error.ActionUnavailable;
+        if (action == .dismiss and !task_.can_dismiss) return error.ActionUnavailable;
         if (target.owner == null) return error.UnknownOwner;
         if (self.manager) |manager| {
             const actual = manager.progress(target.job) orelse return error.StaleTask;
@@ -1296,6 +1357,12 @@ pub const Panel = struct {
             }
 
             if (session != if (target.owner) |owner| @backingInt(owner.session_id) else @as(u64, 0)) return error.StaleOwner;
+            if (action == .dismiss) {
+                try manager.dismiss(target.job);
+                self.failure.setDisplay(.none);
+                self.cx.requestRedraw();
+                return;
+            }
             const action_: Action = switch (action) {
                 .pause => .pause,
                 .resume_transfer => .resume_transfer,
@@ -1304,6 +1371,7 @@ pub const Panel = struct {
                 .reveal => .reveal,
                 .new_draft => return error.ActionUnavailable,
                 .resolve_conflict => .resolve_conflict,
+                .dismiss => return error.ActionUnavailable,
             };
             const callbacks = self.callbacks.?;
             if (action_ == .resolve_conflict and callbacks.resolve_conflict != null) {
@@ -1324,13 +1392,17 @@ pub const Panel = struct {
     fn performBatch(self: *Panel, action: TaskAction) !void {
         const call = self.hooks.batch orelse return error.ActionUnavailable;
         if (self.selection.items.len == 0) return error.EmptySelection;
-        const frozen = try self.cx.allocator.dupe(Target, self.selection.items);
-        defer self.cx.allocator.free(frozen);
-        for (frozen) |target| {
-            const task_ = self.task(target) orelse return error.StaleTask;
-            if (target.owner == null or !allows(task_.phase, action)) return error.ActionUnavailable;
+        // Mixed selections shrink to the targets that allow this action now;
+        // an empty remainder reports instead of dispatching a no-op batch.
+        var dispatch = std.ArrayList(Target).empty;
+        defer dispatch.deinit(self.cx.allocator);
+        for (self.selection.items) |target| {
+            const task_ = self.task(target) orelse continue;
+            if (!batchAllows(task_, action)) continue;
+            try dispatch.append(self.cx.allocator, target);
         }
-        try call(self.hooks.context, frozen, action);
+        if (dispatch.items.len == 0) return error.ActionUnavailable;
+        try call(self.hooks.context, dispatch.items, action);
     }
     fn isSelected(self: *const Panel, target: Target) bool {
         for (self.selection.items) |target_| if (same(target_, target)) return true;
@@ -1381,7 +1453,10 @@ pub const Panel = struct {
         self.invalidate();
     }
     pub fn show(self: *Panel) void {
-        if (self.root.style.display == .none) self.cx.dispatcher.cancelScrollGesture();
+        if (self.root.style.display == .none) {
+            self.cx.dispatcher.cancelScrollGesture();
+            if (self.options.default_filter != .all) self.setFilter(self.options.default_filter);
+        }
         self.tray_requested_show = true;
         self.root.setDisplay(if (self.options.presentation == .session_tray and self.visible.items.len == 0) .none else .flex);
         if (self.floating) |surface| surface.activate();
@@ -1475,6 +1550,7 @@ pub const Panel = struct {
             row.event_summary = try std.fmt.allocPrint(a, "{d} 条状态事件 · 当前尝试 {d} · {s}", .{ manager.jobs.items[i].event_count, p.attempt, phaseLabel(row.phase) });
             row.can_resume = manager.canResume(p.job);
             row.can_reveal = if (self.callbacks.?.can_reveal) |read_capability| read_capability(self.callbacks.?.context, p.job) else false;
+            row.can_dismiss = if (self.callbacks.?.can_dismiss) |read_capability| read_capability(self.callbacks.?.context, p.job) else manager.canDismiss(p.job);
         }
         var speed: u64 = 0;
         for (rows) |row| if (row.phase == .running) {
@@ -1580,7 +1656,7 @@ pub const Panel = struct {
             // 9/8px insets + 28px header + 6px gap + one complete card.
             // A short/self-sized parent must not feed the old clipped height
             // back into this budget; management adds its own 28px row.
-            const chrome: f32 = 9 + 28 + 6 + 8 + (if (p.batch_visible) @as(f32, 28) else 0);
+            const chrome: f32 = 9 + 28 + 6 + 8 + (if (p.selection.items.len > 0) @as(f32, 28) else 0);
             const minimum: f32 = chrome + S.row_height;
             const maximum = @min(@as(f32, 190), @max(minimum, bounds.h * 0.32));
             const height = std.math.clamp(chrome + task_height, minimum, maximum);
@@ -1597,7 +1673,7 @@ pub const Panel = struct {
         const max_height = @max(@as(f32, 1), @min(bounds.h - 24, @as(f32, 578)));
         const failure_height: f32 = if (p.failure.style.display != .none) @max(@as(f32, 24), p.failure.globalRect().h) else 0;
         const notice_height: f32 = if (p.notice.parent.?.style.display != .none) @max(@as(f32, 36), p.notice.parent.?.globalRect().h) else 0;
-        const chrome: f32 = (if (global) @as(f32, 156) else 112) + (if (p.batch_visible) @as(f32, 28) else 0);
+        const chrome: f32 = if (global) 156 else 112;
         const presentation_cap: f32 = if (global) 578 else 420;
         const height = @min(chrome + list_height + failure_height + notice_height, @min(presentation_cap, max_height));
         var top: f32 = 46;
@@ -1703,6 +1779,7 @@ fn actionIcon(action: TaskAction, direction: backend.Direction) []const u8 {
         .reveal => if (direction == .upload) "copy" else "folder-open",
         .new_draft => "file-plus",
         .cancel => "x",
+        .dismiss => "trash-2",
     };
 }
 fn actionLabel(action: TaskAction, direction: backend.Direction) []const u8 {
@@ -1714,6 +1791,7 @@ fn actionLabel(action: TaskAction, direction: backend.Direction) []const u8 {
         .reveal => if (direction == .upload) "复制远程路径" else "打开本地目录",
         .new_draft => "再次传输，重新核对",
         .cancel => "取消传输",
+        .dismiss => "删除任务记录",
     };
 }
 

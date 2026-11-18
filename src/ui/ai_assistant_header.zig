@@ -15,6 +15,18 @@ pub fn mountCountBadge(cx: *ui.Cx, button: *ui.Node, test_id: []const u8) !*ui.N
     try button.appendChild(cx.allocator, badge);
     return badge;
 }
+pub fn mountDotBadge(cx: *ui.Cx, button: *ui.Node, test_id: []const u8) !*ui.Node {
+    button.setStyleInline(cx.allocator, .{ .position = .relative });
+    const dot = try ui.boxStyled(cx, S.countDot, .{});
+    dot.meta.ownership.meta.test_id = test_id;
+    dot.setDisplay(.none);
+    dot.setHitTestVisible(false);
+    try button.appendChild(cx.allocator, dot);
+    return dot;
+}
+pub fn updateDotBadge(_: *ui.Cx, dot: *ui.Node, visible: bool) void {
+    dot.setDisplay(if (visible) .flex else .none);
+}
 pub fn updateCountBadge(cx: *ui.Cx, badge: *ui.Node, count: usize) !void {
     var buffer: [32]u8 = undefined;
     const number = try std.fmt.bufPrint(&buffer, "{d}", .{count});

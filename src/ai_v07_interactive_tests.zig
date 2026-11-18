@@ -137,7 +137,7 @@ comptime {
     _ = @import("ai/swarm_prompts.zig");
 }
 
-test "v0.7 board 引擎：postBoard 入流、ask 计数与终态清零" {
+test "v0.7 board 引擎：postBoard 入流、ask 计数按 seq 键控与终态清零" {
     const budget_mod = @import("ai/task_budget.zig");
     var root = budget_mod.Root.init(a);
     defer root.deinit();
@@ -145,26 +145,42 @@ test "v0.7 board 引擎：postBoard 入流、ask 计数与终态清零" {
     try root.add(.{ .root = parent, .task = parent, .conversation = id.ConversationId.generate(), .agent = id.AgentId.generate(), .generation = 1, .request_key = "root" });
     const child = delegated(parent, id.TaskId.generate());
     try root.add(child);
-    // ask×3 不触发自动回复，第 4 次触发。
-    for (0..3) |_| {
-        const reply = blk: {
-            root.lock();
-            defer root.mutex.unlock();
-            root.board_ask_counts[root.facts[1].seq - 1] +|= 1;
-            break :blk if (root.board_ask_counts[root.facts[1].seq - 1] >= 4) "按当前最佳判断继续" else null;
-        };
-        try std.testing.expect(reply == null);
-    }
-    root.board_ask_counts[root.facts[1].seq - 1] +|= 1;
-    try std.testing.expectEqual(@as(u32, 4), root.board_ask_counts[root.facts[1].seq - 1]);
+    // add 按值接收 Fact：分配的 seq 存在 root.facts，调用方副本保持 0。
+    const child_seq = root.facts[1].seq;
+    // seq 无回收（§2.1）：next_seq 推进到 16 后新成员拿 #17，ask 计数不受 ≤16 槽位限制。
+    root.next_seq = 16;
+    const late = delegated(parent, id.TaskId.generate());
+    try root.add(late);
+    const late_seq = root.facts[2].seq;
+    try std.testing.expectEqual(@as(u32, 17), late_seq);
+    // 与 main.dispatchBoardPost 相同的按 seq 键控计数：ask×3 不触发自动回复，第 4 次触发。
+    const Ask = struct {
+        fn once(board_root: *budget_mod.Root, seq: u32) !?[]const u8 {
+            board_root.lock();
+            defer board_root.mutex.unlock();
+            if (seq == 0) return error.ScopeChanged;
+            const entry = try board_root.board_ask_counts.getOrPut(board_root.allocator, seq);
+            if (!entry.found_existing) entry.value_ptr.* = 0;
+            entry.value_ptr.* += 1;
+            return if (entry.value_ptr.* >= 4) "按当前最佳判断继续" else null;
+        }
+    };
+    for (0..3) |_| try std.testing.expect((try Ask.once(&root, child_seq)) == null);
+    try std.testing.expectEqualStrings("按当前最佳判断继续", (try Ask.once(&root, child_seq)).?);
+    // seq 17 的成员同样计数到第 4 次（此前 seq>16 直接 ScopeChanged 拒绝发帖）。
+    for (0..3) |_| try std.testing.expect((try Ask.once(&root, late_seq)) == null);
+    try std.testing.expectEqualStrings("按当前最佳判断继续", (try Ask.once(&root, late_seq)).?);
+    try std.testing.expectEqual(@as(usize, 2), root.board_ask_counts.count());
     // postBoard 入流；父目标帖与 @all 帖可投递（deliverableText 语义）。
     try root.postBoard(.{ .origin = child.seq, .to = .parent, .category = .ask, .text = "请求确认方案", .ts = 1 });
     try root.postBoard(.{ .origin = child.seq, .to = .all, .category = .note, .text = "广播: " ++ "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", .ts = 2 });
     try root.postBoard(.{ .origin = child.seq, .to = .{ .member = 2 }, .category = .answer, .text = "给成员 2 的结果", .ts = 3 });
     try std.testing.expectEqual(@as(usize, 3), root.board_posts.items.len);
-    // 终态清零 ask 计数。
+    // 终态按 seq 清除对应成员的计数（不再有 ≤16 的槽位界）。
     try root.state(child.task, .succeeded, "done");
-    try std.testing.expectEqual(@as(u32, 0), root.board_ask_counts[root.facts[1].seq - 1]);
+    try std.testing.expectEqual(@as(usize, 1), root.board_ask_counts.count());
+    try root.state(late.task, .succeeded, "done");
+    try std.testing.expectEqual(@as(usize, 0), root.board_ask_counts.count());
 }
 
 test "v0.7 depends_on 门控与 challenge 工具契约" {

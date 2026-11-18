@@ -64,10 +64,11 @@ const StoredEvent = struct {
     workspace_change: @FieldType(lifecycle.Event, "workspace_change") = null,
     workspace_ack_revision: @FieldType(lifecycle.Event, "workspace_ack_revision") = null,
     conversation_model: @FieldType(lifecycle.Event, "conversation_model") = null,
+    board_post: @FieldType(lifecycle.Event, "board_post") = null,
     pub fn jsonStringify(self: StoredEvent, writer: *std.json.Stringify) !void {
         try writer.beginObject();
         inline for (@typeInfo(StoredEvent).@"struct".field_names) |name| {
-            const emit = if (comptime std.mem.eql(u8, name, "child_settings") or std.mem.eql(u8, name, "child_info") or std.mem.eql(u8, name, "parent_binding") or std.mem.eql(u8, name, "targets") or std.mem.eql(u8, name, "children") or std.mem.eql(u8, name, "task_fact") or std.mem.eql(u8, name, "initial_text") or std.mem.eql(u8, name, "conversation_model") or std.mem.eql(u8, name, "presentation_patch") or std.mem.startsWith(u8, name, "workspace")) @field(self, name) != null else true;
+            const emit = if (comptime std.mem.eql(u8, name, "child_settings") or std.mem.eql(u8, name, "child_info") or std.mem.eql(u8, name, "parent_binding") or std.mem.eql(u8, name, "targets") or std.mem.eql(u8, name, "children") or std.mem.eql(u8, name, "task_fact") or std.mem.eql(u8, name, "initial_text") or std.mem.eql(u8, name, "conversation_model") or std.mem.eql(u8, name, "presentation_patch") or std.mem.eql(u8, name, "board_post") or std.mem.startsWith(u8, name, "workspace")) @field(self, name) != null else true;
             if (emit) {
                 try writer.objectField(name);
                 try writer.write(@field(self, name));
@@ -272,7 +273,7 @@ pub const Journal = struct {
             if (row.consumed_batch != null or (row.receipt != null and row.receipt.?.workspace_revision != null) or hasMessageProvenance(row.messages) or hasMessageProvenance(row.transcript)) return error.InvalidSessionJournal;
         }
         if (row.schema < 3) if (row.event) |event| if (event.kind == .task_fact or event.kind == .child_launch or event.task_fact != null or event.initial_text != null) return error.InvalidSessionJournal;
-        if (row.schema == 1) if (row.event) |event| if (event.kind == .child_config or event.child_settings != null or event.kind == .child_create or event.kind == .child_bind or event.kind == .remove_family or event.child_info != null or event.parent_binding != null or event.targets != null or event.children != null or event.task_fact != null or event.kind == .task_fact or event.kind == .child_launch or event.initial_text != null) return error.InvalidSessionJournal;
+        if (row.schema == 1) if (row.event) |event| if (event.kind == .child_config or event.child_settings != null or event.kind == .child_create or event.kind == .child_bind or event.kind == .remove_family or event.child_info != null or event.parent_binding != null or event.targets != null or event.children != null or event.task_fact != null or event.kind == .task_fact or event.kind == .child_launch or event.initial_text != null or event.kind == .board_post or event.board_post != null) return error.InvalidSessionJournal;
         if (row.order) |order| {
             const record = store.find(order.fence.conversation) orelse return error.InvalidSessionJournal;
             if (order.ids.len != record.inbox.entries.items.len) return error.InvalidSessionJournal;
@@ -477,7 +478,7 @@ pub const Journal = struct {
             @field(event, name) = if (comptime std.mem.eql(u8, name, "presentation_patch")) null else @field(original, name);
         }
         if (event.kind == .presentation) return self.appendPresentation(event);
-        const extended = event.kind == .child_config or event.child_settings != null or event.kind == .child_create or event.kind == .child_bind or event.kind == .remove_family or event.kind == .task_fact or event.kind == .child_launch;
+        const extended = event.kind == .child_config or event.child_settings != null or event.kind == .child_create or event.kind == .child_bind or event.kind == .remove_family or event.kind == .task_fact or event.kind == .child_launch or event.kind == .board_post or event.board_post != null;
         const schema: u8 = if (workspaceEvent(event) or event.kind == .conversation_model or hasMessageProvenance(original.messages)) 4 else if (event.kind == .task_fact or event.kind == .child_launch) 3 else if (extended) 2 else 1;
         try self.append(.{ .schema = schema, .event = event }, original.messages, &.{});
     }

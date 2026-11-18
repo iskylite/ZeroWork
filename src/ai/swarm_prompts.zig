@@ -67,8 +67,12 @@ pub const StallAction = union(enum) {
 /// （由 §3.6 审批队列负责）。
 pub fn detect(config: StallConfig, inputs: StallInputs) StallAction {
     if (inputs.task_finished) return .none;
-    // 全部子终态、父未收尾：注入"全部子任务已结束，请汇总"。
-    if (inputs.all_children_terminal) return .inject_wake;
+    // 全部子终态、父未收尾：注入"全部子任务已结束，请汇总"唤醒父；父被
+    // 唤醒 parent_minutes 仍无动作 → 升级用户（§12.2 二级行为同样适用）。
+    if (inputs.all_children_terminal) {
+        if (inputs.parent_woken_minutes >= config.parent_minutes) return .escalate_parent;
+        return .inject_wake;
+    }
     // 子 running 但计数长期无变化：只标记，不干预。
     if (inputs.any_child_running and inputs.child_stuck_minutes >= config.stuck_minutes) return .mark_child_stuck;
     // 全部子空闲且板上无新帖 ≥ 一级阈值：唤醒父；父 M 分钟无动作 → 升级用户。
@@ -86,6 +90,8 @@ test "v0.7 stall detection deterministic levels" {
     try std.testing.expect(detect(config, .{ .any_child_running = false, .any_child_human_wait = false, .all_children_terminal = true, .undelivered_events = false, .task_finished = true, .new_board_posts = false, .minutes_idle = 0, .parent_woken_minutes = 0, .child_stuck_minutes = 0 }) == .none);
     // 全部子终态父未收尾 → 唤醒。
     try std.testing.expect(detect(config, .{ .any_child_running = false, .any_child_human_wait = false, .all_children_terminal = true, .undelivered_events = false, .task_finished = false, .new_board_posts = false, .minutes_idle = 0, .parent_woken_minutes = 0, .child_stuck_minutes = 0 }) == .inject_wake);
+    // 全部子终态、唤醒 2 分钟仍无动作 → 升级用户。
+    try std.testing.expect(detect(config, .{ .any_child_running = false, .any_child_human_wait = false, .all_children_terminal = true, .undelivered_events = false, .task_finished = false, .new_board_posts = false, .minutes_idle = 5, .parent_woken_minutes = 2, .child_stuck_minutes = 0 }) == .escalate_parent);
     // 子 running 计数停滞 10 分钟 → 疑似卡住。
     try std.testing.expect(detect(config, .{ .any_child_running = true, .any_child_human_wait = false, .all_children_terminal = false, .undelivered_events = false, .task_finished = false, .new_board_posts = false, .minutes_idle = 0, .parent_woken_minutes = 0, .child_stuck_minutes = 10 }) == .mark_child_stuck);
     // 一级停滞 3 分钟 → 唤醒父。

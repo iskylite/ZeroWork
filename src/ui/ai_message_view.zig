@@ -359,6 +359,7 @@ fn compact(cx: *ui.Cx, scope: *ui.Scope, node: *ui.Node) !void {
         // Keep an 18px per-line rhythm; wrapping still determines total height.
         style.line_height = 18.0 / style.font_size;
         node.setText(style);
+        node.setStyleInline(cx.allocator, .{ .margin = .{ .top = S.heading_vertical_margin, .bottom = S.heading_vertical_margin } });
     };
     for (node.children.items) |child| try compact(cx, scope, child);
 }

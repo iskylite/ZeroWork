@@ -299,26 +299,7 @@ pub const Manager = struct {
             addStats(&total, stats);
             if (self.pending_tools.items.len == 0 or self.tool_run == null) {
                 if (self.shared_task) |shared| if (self.tool_run) |loop| if (shared.root.needsChildren(shared.task)) {
-                    if (self.round_text.items.len != 0) loop.appendPrepared(try loop.prepareMessage(.{ .role = .assistant, .content = self.round_text.items }));
-                    const dependency_wait = provider.CancelToken.beginUserWait(cancel);
-                    defer dependency_wait.end();
-                    try shared.root.state(shared.task, .waiting_children, "");
-                    while (shared.root.childrenRunning(shared.task)) {
-                        if (shared.root.unreportedHuman(shared.task) or self.hasSteeringInput()) break;
-                        try budget.check();
-                        try shared.root.check();
-                        (@import("retry.zig").Clock{}).sleep(5 * std.time.ns_per_ms);
-                    }
-                    try shared.root.state(shared.task, .running, "");
-                    // V0.7 §3.3: after the dependency wait, deliver settled but
-                    // uncollected child reports into the next model round as a
-                    // typed host notice (kind=settle_report). The model no
-                    // longer polls wait_events itself; the host keeps the
-                    // delivery watermark and never drops a settled report.
-                    self.deliverSettledReports(loop, shared.root, shared.task) catch |err| switch (err) {
-                        error.OutOfMemory => return err,
-                        else => {}, // context budget: reports remain wait_events-readable
-                    };
+                    try self.waitForChildren(loop, shared.root, shared.task, budget, cancel);
                     continue;
                 };
 
@@ -338,10 +319,21 @@ pub const Manager = struct {
             try budget.check();
             const loop = self.tool_run.?;
             if (loop.uncertain and !loop.host_observation_only) {
-                if (self.input) |inbox| {
-                    inbox.pauseAll(.failure);
-                    inbox.setWorkPhase(self.turn_id, .response);
-                }
+                if (self.input) |inbox| inbox.setWorkPhase(self.turn_id, .response);
+                // Uncertain receipts do not mean the turn is over: children may
+                // still be running. Wait for them and append their settled
+                // reports before the answer-only recovery round, otherwise the
+                // parent would finish while a child is still running.
+                if (self.shared_task) |shared| if (shared.root.needsChildren(shared.task)) {
+                    try self.waitForChildren(loop, shared.root, shared.task, budget, cancel);
+                };
+                // Close the inbox only after the dependency wait: pausing first
+                // sets closing and hides steering input from waitForChildren's
+                // hasSteeringInput break (new input would queue instead of
+                // being accepted), leaving the parent unable to react until
+                // the children settle or the budget expires. Unconsumed input
+                // still pauses .failure here and at inbox.finish.
+                if (self.input) |inbox| inbox.pauseAll(.failure);
                 addStats(&total, try self.finishFromReceipts(p, loop, budget, cancel));
                 return total;
             }
@@ -356,6 +348,33 @@ pub const Manager = struct {
         const inbox: *@import("session_input.zig").Inbox = @ptrCast(@alignCast(raw));
         return inbox.operationObservationCurrent(revision);
     }
+    /// Wait for running child tasks and deliver their settled reports into
+    /// the next model round as a typed host notice. Shared by the normal
+    /// dependency wait and the uncertain-receipt finish path so a parent
+    /// never ends its turn while children are still running.
+    fn waitForChildren(self: *Manager, loop: *tool_loop.Loop, root: *@import("task_budget.zig").Root, task: @import("../host/identity.zig").TaskId, budget: anytype, cancel: *provider.CancelToken) !void {
+        if (self.round_text.items.len != 0) loop.appendPrepared(try loop.prepareMessage(.{ .role = .assistant, .content = self.round_text.items }));
+        const dependency_wait = provider.CancelToken.beginUserWait(cancel);
+        defer dependency_wait.end();
+        try root.state(task, .waiting_children, "");
+        while (root.childrenRunning(task)) {
+            if (root.unreportedHuman(task) or self.hasSteeringInput()) break;
+            try budget.check();
+            try root.check();
+            (@import("retry.zig").Clock{}).sleep(5 * std.time.ns_per_ms);
+        }
+        try root.state(task, .running, "");
+        // V0.7 §3.3: after the dependency wait, deliver settled but uncollected
+        // child reports into the next model round as a typed host notice
+        // (kind=settle_report). The model no longer polls wait_events itself;
+        // the host keeps the delivery watermark and never drops a settled
+        // report.
+        self.deliverSettledReports(loop, root, task) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => {}, // context budget: reports remain wait_events-readable
+        };
+    }
+
     /// V0.7 §3.3/G2/G8: deliver settled-but-undelivered child reports and
     /// parent-targeted board posts into the next model round. Delivery is
     /// the typed event structure {kind, origin(#seq), text, ts}; this
@@ -392,11 +411,18 @@ pub const Manager = struct {
             }
             // G8 pipeline: parent-targeted (and @all summary) posts ride the
             // same delivery; a delivered post is consumed once. Member-
-            // targeted posts stay on the board for their target's round.
+            // targeted posts were delivered directly into their target's
+            // round at host.post time (main.dispatchBoardPost); only posts
+            // whose direct delivery failed stay here undelivered, and they
+            // never enter the parent transcript.
             var index: usize = 0;
             while (index < root.board_posts.items.len) {
                 if (board_delivered + count >= 8) break;
                 const post = root.board_posts.items[index];
+                if (post.delivered) {
+                    index += 1;
+                    continue;
+                }
                 if (post.to == .member) {
                     index += 1;
                     continue;

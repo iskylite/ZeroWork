@@ -29,6 +29,7 @@ comptime {
 }
 test {
     _ = @import("ai/host_recall.zig");
+    _ = @import("ai/swarm_wake.zig");
     _ = @import("notes_store_tests.zig");
     _ = @import("notes_document_sessions_tests.zig");
     _ = @import("notes_assets_tests.zig");

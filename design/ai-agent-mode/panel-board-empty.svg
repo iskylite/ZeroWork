@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="560" height="70" viewBox="0 0 560 70" xml:lang="zh-CN">
+  <title>留言板</title>
+  <style>
+    text { font: 600 12px -apple-system, "PingFang SC", sans-serif; fill: #e4e8d7; dominant-baseline: central; }
+    .secondary { font: 11px -apple-system, "PingFang SC", sans-serif; fill: #c6cbb9; }
+  </style>
+  <rect width="560" height="70" rx="12" fill="#2d362d"/>
+  <rect x="68" y="8" width="66" height="32" rx="8" fill="#3a4437"/>
+  <text x="24" y="24">成员</text>
+  <text x="80" y="24">留言板</text>
+  <text x="146" y="24">关系图</text>
+  <text x="548" y="24" text-anchor="end" class="secondary">2 运行中</text>
+  <text x="12" y="54" class="secondary">暂无留言</text>
+</svg>

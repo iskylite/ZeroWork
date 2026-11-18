@@ -153,9 +153,21 @@ pub fn queryStuck(a: std.mem.Allocator, service: *runtime.Service, parent: id.Co
     return rows.toOwnedSlice(a);
 }
 
+/// V0.7 §11.2 target label for a board post row.
+fn boardTargetLabel(post: @import("swarm_board.zig").Post) []const u8 {
+    return switch (post.to) {
+        .parent => "协调者",
+        .member => "成员",
+        .all => "全体",
+    };
+}
+
 /// V0.7 §14.2/G8: the parent root's board posts as UI rows. Posts stay on the
 /// board for reading even after model delivery consumed them (§11.2); this
-/// projection is read-only and never mutates the delivery watermark.
+/// projection is read-only and never mutates the delivery watermark. Replayed
+/// posts from the journal (§11.1) ride the same rows; a live root and the
+/// replayed store never hold the same post, and replayed rows follow the
+/// live ones in arrival order.
 pub fn boardRows(a: std.mem.Allocator, service: *runtime.Service, parent: id.ConversationId) ![]BoardRow {
     var rows: std.ArrayList(BoardRow) = .empty;
     errdefer rows.deinit(a);
@@ -173,13 +185,13 @@ pub fn boardRows(a: std.mem.Allocator, service: *runtime.Service, parent: id.Con
         }
         if (!owns) continue;
         for (root.board_posts.items) |post| {
-            const target: []const u8 = switch (post.to) {
-                .parent => "协调者",
-                .member => "成员",
-                .all => "全体",
-            };
-            try rows.append(a, .{ .kind = post.kind, .origin = post.origin, .category = @tagName(post.category), .to = target, .text = post.text });
+            try rows.append(a, .{ .kind = post.kind, .origin = post.origin, .category = @tagName(post.category), .to = boardTargetLabel(post), .text = post.text });
         }
+    }
+    for (service.store.board_posts.items) |stored| {
+        if (!stored.conversation.eql(parent)) continue;
+        const post = stored.post;
+        try rows.append(a, .{ .kind = post.kind, .origin = post.origin, .category = @tagName(post.category), .to = boardTargetLabel(post), .text = post.text });
     }
     return rows.toOwnedSlice(a);
 }

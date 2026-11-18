@@ -825,7 +825,9 @@ pub const Loop = struct {
         var parsed = table.parse(self.allocator, call.name, call.arguments) catch |err| {
             if (err == error.InvalidToolArguments) {
                 if (table.lookup(call.name)) |entry| {
-                    if (std.mem.eql(u8, entry.definition.id, "host.run_in_terminal")) {
+                    if (std.mem.eql(u8, entry.definition.id, "host.run_in_terminal") or
+                        std.mem.eql(u8, entry.definition.id, @import("child_gateway.zig").tool_id))
+                    {
                         var scratch = std.heap.ArenaAllocator.init(self.allocator);
                         defer scratch.deinit();
                         if (table.argumentIssue(scratch.allocator(), call.name, call.arguments) catch null) |issue| {

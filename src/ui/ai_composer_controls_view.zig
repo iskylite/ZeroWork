@@ -211,9 +211,9 @@ pub const View = struct {
     scope: *ui.Scope,
     callbacks: Callbacks,
     root: *ui.Node = undefined,
-    /// Append the host's existing send/stop controls here once.
+    /// Append the host's existing send/stop controls here once. Send and
+    /// Stop share this single slot; only one is visible at a time.
     trailing: *ui.Node = undefined,
-    separate_actions: bool = false,
     followup_send: ?*ui.Node = null,
     ordinary_spacer: *ui.Node = undefined,
     interaction_active: bool = false,
@@ -340,8 +340,8 @@ pub const View = struct {
             self.buttons[index] = button;
             const size: f32 = switch (index) {
                 0, 4 => 14,
-                1, 5 => 12,
-                3, 6 => 14,
+                1, 5, 6 => 12,
+                3 => 14,
                 2 => 10,
                 else => 16,
             };
@@ -896,7 +896,7 @@ pub const View = struct {
         const active = self.swarm_mode != .auto;
         self.button_styles[6].set(S.modeChip(self.mode_compact, active));
         const ink = if (active) colors.accent_ink else colors.fg_2;
-        setAsset(self.icons[6], @import("../ai/swarm_mode.zig").modeIcon(self.swarm_mode), 14, ink);
+        setAsset(self.icons[6], @import("../ai/swarm_mode.zig").modeIcon(self.swarm_mode), 12, ink);
         _ = self.mode_chevron.setTint(ink);
         self.labels[6].?.setTextColor(colors.fg_1);
         self.labels[6].?.setDisplay(if (self.mode_compact) .none else .flex);
@@ -1518,20 +1518,17 @@ pub const View = struct {
             return .done;
         };
         self.flush() catch {};
-        // Reserve the independent Stop slot only while its button is visible.
-        // Idle composers keep the model chip next to Send without an empty slot.
+        // Send and Stop share one 28px slot; changing state swaps the visible
+        // control in place instead of widening the composer.
         var slot_changed = false;
-        const show_stop = self.separate_actions and self.trailing.children.items.len > 0 and
-            self.trailing.children.items[0].style.display != .none;
-        const actions_width: f32 = if (show_stop) 62 else 28;
+        const actions_width: f32 = 28;
         if (self.trailing.style.width != .px or self.trailing.style.width.px != actions_width) {
             self.trailing.setStyleInline(self.cx.allocator, .{ .width = .{ .px = actions_width } });
             slot_changed = true;
         }
-        for (self.trailing.children.items, 0..) |button, index| {
-            const x: f32 = if (show_stop and index != 0) 34 else 0;
-            if (button.style.position != .absolute or button.style.ext == null or button.style.ext.?.inset.left != .px or button.style.ext.?.inset.left.px != x) {
-                button.setStyleInline(self.cx.allocator, .{ .position = .absolute, .inset = .{ .left = .{ .px = x }, .top = .{ .px = 0 } }, .width = .{ .px = 28 }, .height = .{ .px = 28 }, .min_width = 28, .min_height = 28, .flex_shrink = 0 });
+        for (self.trailing.children.items) |button| {
+            if (button.style.position != .absolute or button.style.ext == null or button.style.ext.?.inset.left != .px or button.style.ext.?.inset.left.px != 0) {
+                button.setStyleInline(self.cx.allocator, .{ .position = .absolute, .inset = .{ .left = .{ .px = 0 }, .top = .{ .px = 0 } }, .width = .{ .px = 28 }, .height = .{ .px = 28 }, .min_width = 28, .min_height = 28, .flex_shrink = 0 });
                 slot_changed = true;
             }
         }
