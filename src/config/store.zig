@@ -201,6 +201,11 @@ pub fn saveHosts(io: std.Io, dir: std.Io.Dir, sub_path: []const u8, registry: co
 }
 
 pub fn saveHostsWithOptions(io: std.Io, dir: std.Io.Dir, sub_path: []const u8, registry: config.hosts.Registry, options: CredentialOptions) !CleanupStatus {
+    return saveHostsWithBaseline(io, dir, sub_path, registry, options, null);
+}
+
+fn saveHostsWithBaseline(io: std.Io, dir: std.Io.Dir, sub_path: []const u8, registry: config.hosts.Registry, options: CredentialOptions, expected: ?HostBaseline) !CleanupStatus {
+    if (expected) |source| try checkHostsBaseline(io, dir, sub_path, source);
     var staged = try registry.clone(std.heap.page_allocator);
     defer staged.deinit();
     var tx = try credentials.Transaction.init();
@@ -213,7 +218,7 @@ pub fn saveHostsWithOptions(io: std.Io, dir: std.Io.Dir, sub_path: []const u8, r
     if (encoded.len > max_config_bytes) return error.HostRegistryTooLarge;
     const lock = try lockHosts(io, dir, sub_path);
     defer lock.close(io);
-    try writeHostsEncoded(io, dir, sub_path, encoded, null);
+    try writeHostsEncoded(io, dir, sub_path, encoded, expected);
     tx.commit();
     return cleanup;
 }
@@ -340,7 +345,8 @@ fn loadHostsInternal(io: std.Io, dir: std.Io.Dir, allocator: std.mem.Allocator, 
         try host.validate();
     }
     if (migrate and skipped_credentials == null and !options.defer_credentials) {
-        observeCleanup(try saveHostsWithOptions(io, dir, sub_path, registry, options));
+        // Migration must not replace external edits made after this read.
+        observeCleanup(try saveHostsWithBaseline(io, dir, sub_path, registry, options, .{ .hash = config.hosts.digest(source) }));
         const migrated = try loadHostsWithOptions(io, dir, allocator, sub_path, options);
         registry.deinit();
         return migrated;
@@ -606,4 +612,19 @@ test "host registry persists atomically with private permissions" {
     defer file.close(std.testing.io);
     const stat = try file.stat(std.testing.io);
     try std.testing.expectEqual(@as(std.posix.mode_t, 0o600), stat.permissions.toMode() & 0o777);
+}
+
+test "host migration refuses to overwrite a changed source file" {
+    const io = std.testing.io;
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var stale = try config.hosts.Registry.parse(a, "");
+    defer stale.deinit();
+    const replacement = "# external edit\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "hosts.toml", .data = replacement });
+    try std.testing.expectError(error.FileConflict, saveHostsWithBaseline(io, tmp.dir, "hosts.toml", stale, .{}, .{ .hash = config.hosts.digest("") }));
+    const actual = try tmp.dir.readFileAlloc(io, "hosts.toml", a, .limited(128));
+    defer a.free(actual);
+    try std.testing.expectEqualStrings(replacement, actual);
 }
