@@ -891,7 +891,9 @@ pub const Bridge = struct {
         }
         self.emitHostStep(invocation, .running, "");
     }
-    fn emitHostStep(self: *Bridge, invocation: host_tools.Invocation, phase: @import("../ai/step_events.zig").Phase, detail: []const u8) void {
+    /// Public for the conflict arbiter: a host-side suspension must surface
+    /// the same approval-stage step event as a broker approval wait.
+    pub fn emitHostStep(self: *Bridge, invocation: host_tools.Invocation, phase: @import("../ai/step_events.zig").Phase, detail: []const u8) void {
         const events = self.events orelse return;
         events.push(.{ .call_id = invocation.call_id, .name = invocation.tool_id, .command = invocation.arguments_json, .detail = detail, .phase = phase, .at_ms = @intCast(timeNow(self)) }) catch {};
     }

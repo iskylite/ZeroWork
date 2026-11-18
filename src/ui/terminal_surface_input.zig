@@ -508,6 +508,7 @@ pub fn requestPaste(self: *Surface, text: []const u8) !void {
     if ((terminal.PastePolicy{}).inspect(text) == .reject) return error.InvalidPaste;
     // Freeze bytes immediately; preparation may retry while worker owns VT.
     const copy = try self.cx.allocator.dupe(u8, text);
+    self.noteStagingChange();
     self.paste_requested = copy;
     self.broadcast_paste_stamp = if (self.shell_observer) |observer| observer.paste_stamp(observer.context, self.owner) else 0;
     try pumpPaste(self);
@@ -527,6 +528,7 @@ pub fn pumpPaste(self: *Surface) !void {
         };
         self.cx.allocator.free(bytes);
         self.paste_requested = null;
+        self.noteStagingChange();
         if (self.pending_paste.?.requires_confirmation) try showPasteModal(self) else self.paste_confirmed = true;
     }
     if (self.pending_paste) |paste| {
@@ -547,6 +549,7 @@ pub fn pumpPaste(self: *Surface) !void {
     }
 }
 pub fn cancelPaste(self: *Surface) void {
+    if (self.pending_paste != null or self.paste_requested != null) self.noteStagingChange();
     if (self.pending_paste) |*paste| paste.deinit(self.cx.allocator);
     self.pending_paste = null;
     if (self.paste_requested) |bytes| self.cx.allocator.free(bytes);
@@ -556,6 +559,7 @@ pub fn cancelPaste(self: *Surface) void {
 }
 fn approvePaste(self: *Surface) void {
     if (self.paste_confirmed) return;
+    self.noteStagingChange();
     self.paste_confirmed = true;
     if (self.modal_open) |open| open.set(false);
     pumpPaste(self) catch |err| self.showError(err);

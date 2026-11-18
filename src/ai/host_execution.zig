@@ -32,14 +32,18 @@ pub fn needsShellObservation(failure: anyerror) bool {
     return failure == error.ShellPromptNotObserved or failure == error.IntegrationUnavailable or failure == error.ShellContextChanged or failure == error.ShellContextRequired;
 }
 
+pub fn needsInputObservation(failure: anyerror) bool {
+    return failure == error.InputConflict or failure == error.TerminalInputConflictChanged;
+}
+
 /// Use only when this invocation is known to have sent no command bytes.
 pub fn rejectedRun(allocator: std.mem.Allocator, invocation: host.Invocation, failure: anyerror) !host.Result {
-    const session_ref = if (needsShellObservation(failure)) string(invocation.arguments, "session_ref") catch null else null;
+    const session_ref = if (needsShellObservation(failure) or needsInputObservation(failure)) string(invocation.arguments, "session_ref") catch null else null;
     var tool_name: [64]u8 = undefined;
     const next_tool = if (session_ref != null) try @import("plugin_tools.zig").encodeName(&tool_name, "host.read_terminal") else null;
     const body = try std.json.Stringify.valueAlloc(allocator, .{
         .error_code = @errorName(failure),
-        .message = if (session_ref != null and failure == error.ShellContextRequired) "命令未发送。先只读同一 session_ref 的终端画面和控制状态（include_control=true），确认当前仍是原命令要进入的内层 Shell 且已就绪。再将 control.shell_context.id 和 revision 分别作为 shell_id 和 shell_revision，使用新的 request_key 提交；若层级或目标已改变，重新确认，不要改发到父层或原样重试。" else if (session_ref != null) "命令未发送。先读取同一终端的最新画面和控制状态，按当前执行方式恢复 Shell 就绪后再提交。" else @import("step_failure.zig").explanation(@errorName(failure)),
+        .message = if (session_ref != null and failure == error.ShellContextRequired) "命令未发送。先只读同一 session_ref 的终端画面和控制状态（include_control=true），确认当前仍是原命令要进入的内层 Shell 且已就绪。再将 control.shell_context.id 和 revision 分别作为 shell_id 和 shell_revision，使用新的 request_key 提交；若层级或目标已改变，重新确认，不要改发到父层或原样重试。" else if (session_ref != null and !needsInputObservation(failure)) "命令未发送。先读取同一终端的最新画面和控制状态，按当前执行方式恢复 Shell 就绪后再提交。" else @import("step_failure.zig").explanation(@errorName(failure)),
         .state = "cancelled_unsent",
         .side_effect_started = false,
         .local_released = true,
@@ -966,6 +970,32 @@ test "execution authorization rejection retains known unsent facts" {
     try std.testing.expectEqualStrings("未执行 · 已拒绝", card.statusLabel());
     try std.testing.expectEqualStrings("命令未派发，没有执行输出。", card.outputLabel().?);
     try std.testing.expect(card.actionTarget() == null and card.terminal_output.len == 0);
+}
+
+test "input conflict refusals expose only same-session observation and known unsent state" {
+    const a = std.testing.allocator;
+    const context: host.Context = .{ .conversation_id = .generate(), .task_id = .generate(), .binding = .{ .session = 1 }, .binding_revision = 1, .grant_revision = 1 };
+    const json = "{\"session_ref\":\"same-session\",\"command\":\"business-command\",\"request_key\":\"old-key\"}";
+    const arguments = try std.json.parseFromSlice(std.json.Value, a, json, .{});
+    defer arguments.deinit();
+    const invocation: host.Invocation = .{ .context = context, .authority = .execution_control, .operation_id = 1, .turn_id = 1, .call_id = "conflict", .tool_id = "host.run_in_terminal", .arguments = arguments.value, .arguments_json = json, .arguments_hash = execution.digest(json), .canonical_arguments_hash = try @import("canonical_arguments.zig").digest(a, arguments.value) };
+    for ([_]anyerror{ error.InputConflict, error.TerminalInputConflictChanged }) |failure| {
+        try std.testing.expect(needsInputObservation(failure));
+        var result = try rejectedRun(a, invocation, failure);
+        defer result.deinit(a);
+        try result.validate(context, 1);
+        try std.testing.expectEqual(.rejected, result.status);
+        try std.testing.expect(!result.receipt.side_effect_started and !result.receipt.remote_effect_unknown);
+        const data = try std.json.parseFromSlice(std.json.Value, a, result.blocks[0].structured, .{});
+        defer data.deinit();
+        const fields = data.value.object;
+        try std.testing.expectEqualStrings("cancelled_unsent", fields.get("state").?.string);
+        try std.testing.expectEqualStrings("host__read_uterminal", fields.get("next_tool").?.string);
+        const next = fields.get("next_arguments").?.object;
+        try std.testing.expectEqual(@as(usize, 2), next.count());
+        try std.testing.expectEqualStrings("same-session", next.get("session_ref").?.string);
+        try std.testing.expect(next.get("include_control").?.bool);
+    }
 }
 
 test "execution unknown receipt retains its uncertainty and never becomes a successful RPC" {

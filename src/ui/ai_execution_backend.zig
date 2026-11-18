@@ -316,6 +316,54 @@ pub const Context = struct {
             }
         }
     }
+    pub const StagedInput = struct {
+        boundary: Boundary,
+        decision: @import("terminal_surface.zig").Surface.StagingDecision,
+    };
+
+    /// Pin the authorized command target and exact, isolated UI draft. A
+    /// transient queue or trusted operation is never just a discardable draft.
+    pub fn stagedInput(self: *Context, invocation: host.Invocation, command_hash: [32]u8) !StagedInput {
+        const controller = try self.current(invocation.context, false);
+        const handle = try parseSession(invocation.context, try string(invocation.arguments, "session_ref"));
+        try controller.bridge.checkCommandTarget(self.app, invocation.context, invocation.operation_id, handle, command_hash);
+        if (self.app.domain.ai) |ai| {
+            if (ai.service.childReservesSession(handle, controller.authority.task_id)) return error.TerminalBusy;
+        }
+        const boundary = try self.captureBoundary(controller, handle, false, command_hash);
+        try validateShellExpectation(invocation.arguments, boundary.shell);
+        if (boundary.input.automation != null) return error.LeaseConflict;
+        const surf = try self.stagingSurface(handle);
+        return .{ .boundary = boundary, .decision = surf.stagingDecision() orelse return error.InputConflict };
+    }
+
+    /// No terminal bytes are written by remediation. Check the dispatch fence
+    /// and same live target on this controller turn immediately before clearing.
+    pub fn clearTerminalInputStaging(self: *Context, invocation: host.Invocation, command_hash: [32]u8, expected: StagedInput) !void {
+        if (invocation.dispatch_fence) |fence| try fence.check();
+        const observed = self.stagedInput(invocation, command_hash) catch return error.TerminalInputConflictChanged;
+        const now = observed.boundary;
+        const before = expected.boundary;
+        if (!sameService(now.service, before.service) or !now.handle.eql(before.handle) or
+            now.capability_revision != before.capability_revision or now.membership_revision != before.membership_revision or
+            now.ownership_revision != before.ownership_revision or !std.meta.eql(now.input, before.input) or
+            !std.meta.eql(now.shell.id, before.shell.id) or now.shell.revision != before.shell.revision or
+            now.execution_revision != before.execution_revision or now.input_epoch != before.input_epoch or
+            now.next_input != before.next_input or !std.meta.eql(observed.decision, expected.decision))
+            return error.TerminalInputConflictChanged;
+        if (invocation.dispatch_fence) |fence| try fence.check();
+        const surf = try self.stagingSurface(before.handle);
+        try surf.discardStagedInput(expected.decision);
+    }
+
+    fn stagingSurface(self: *Context, handle: identity.SessionHandle) !*@import("terminal_surface.zig").Surface {
+        const legacy = self.app.legacyForHandle(handle) orelse return error.StaleReference;
+        const tab = self.app.workspace.sessionTab(legacy) orelse return error.StaleReference;
+        const view = tab.terminal orelse return error.IntegrationUnavailable;
+        const surf = view.terminal_surface orelse return error.IntegrationUnavailable;
+        if (!surf.owner.eql(handle)) return error.StaleReference;
+        return surf;
+    }
     /// Attachment intentionally does not require an already integrated prompt.
     /// It has the same scope/permission checks and a separate fresh-screen fence.
     pub fn preflightAttachment(self: *Context, invocation: host.Invocation) !AttachmentPrepared {
@@ -600,7 +648,7 @@ pub const Context = struct {
         var next_input: u64 = 0;
         const service = if (tab.terminal) |view| if (view.terminal_surface) |surface| blk: {
             if (!surface.owner.eql(handle)) return error.StaleReference;
-            if (idle and (surface.pending.items.len != 0 or surface.pending_bytes != 0 or surface.preedit.len != 0 or surface.pending_paste != null or surface.paste_requested != null or surface.trusted_pending != null)) return error.InputConflict;
+            if (idle and surface.inputConflictKind() != null) return error.InputConflict;
             next_input = surface.next_input;
             // Execution outlives the input Surface during protocol close.
             // Keep the adapter-owned service, never the document wrapper.

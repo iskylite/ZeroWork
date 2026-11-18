@@ -2914,3 +2914,61 @@ test "terminal cell graphics preserve VT text styles selection and pooled text r
     _ = try view.refreshTerminalService(owner, true);
     _ = cx.render();
 }
+
+test "input conflict arbitration pins the exact discardable draft and preserves other input" {
+    var transport: FakeTransport = undefined;
+    try transport.init(4, 16);
+    defer transport.deinit();
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(800, 400);
+    var view = try View.mount(cx);
+    cx.root = view.root;
+    defer view.releaseBuffers(cx);
+    try view.bindTerminalService(transport.service());
+    _ = cx.render();
+    _ = try view.refreshTerminalService(owner, false);
+    cx.setFocus(view.root);
+    const surface = view.terminal_surface.?;
+    try std.testing.expect(surface.inputConflictKind() == null);
+    try std.testing.expect(surface.stagingDecision() == null);
+
+    // Approving an old draft must not erase newer input of the same kind.
+    surface.setPreedit("旧候选");
+    try std.testing.expectEqual(Surface.InputConflictKind.ime, surface.inputConflictKind().?);
+    const old_ime = surface.stagingDecision().?;
+    surface.setPreedit("新候选");
+    try std.testing.expectError(error.TerminalInputConflictChanged, surface.discardStagedInput(old_ime));
+    try std.testing.expectEqualStrings("新候选", surface.preedit);
+    const current_ime = surface.stagingDecision().?;
+    try surface.discardStagedInput(current_ime);
+    surface.setPreedit("新候选");
+    try std.testing.expectError(error.TerminalInputConflictChanged, surface.discardStagedInput(current_ime));
+    try std.testing.expectEqualStrings("新候选", surface.preedit);
+    try surface.discardStagedInput(surface.stagingDecision().?);
+
+    // Unconfirmed paste may be discarded but its replacement may not.
+    try view.pasteTerminalText(owner, "a\nb");
+    const old_paste = surface.stagingDecision().?;
+    try std.testing.expectEqual(Surface.InputConflictKind.paste, old_paste.kind);
+    try std.testing.expect(surface.modal_open.?.get());
+    @import("terminal_surface_input.zig").cancelPaste(surface);
+    try view.pasteTerminalText(owner, "a\nb");
+    try std.testing.expectError(error.TerminalInputConflictChanged, surface.discardStagedInput(old_paste));
+    try std.testing.expect(surface.pending_paste != null and surface.modal_open.?.get());
+    const current_paste = surface.stagingDecision().?;
+    var other_surface = current_paste;
+    other_surface.instance += 1;
+    try std.testing.expectError(error.TerminalInputConflictChanged, surface.discardStagedInput(other_surface));
+    try surface.discardStagedInput(current_paste);
+    try std.testing.expect(surface.pending_paste == null and surface.paste_requested == null and !surface.modal_open.?.get());
+
+    // Pending user keystrokes are never erased by an arbitration decision.
+    transport.busy = true;
+    try surface.queueText("queued");
+    try std.testing.expectEqual(Surface.InputConflictKind.backlog, surface.inputConflictKind().?);
+    try std.testing.expect(surface.stagingDecision() == null);
+    try std.testing.expectError(error.TerminalInputConflictChanged, surface.discardStagedInput(current_paste));
+    try std.testing.expectEqual(@as(usize, 1), surface.pending.items.len);
+    try std.testing.expectEqual(@as(usize, 0), transport.written.items.len);
+}

@@ -688,6 +688,7 @@ const AiHost = struct {
     tool_results: @import("ai/tool_results.zig").Store,
     approval_view: ?*@import("ui/ai_tool_approval_view.zig").View = null,
     host_approval: @import("ai/host_approval.zig").Broker = .{},
+    conflict_arbiter: @import("ai/host_conflict_arbiter.zig").Broker = .{},
     host_approval_view: ?*@import("ui/ai_host_approval_view.zig").View = null,
     inventory_approval: @import("ai/inventory_approval.zig").Broker = .{},
     inventory_view: ?*@import("ui/ai_inventory_grant_view.zig").View = null,
@@ -1349,6 +1350,11 @@ const AiHost = struct {
         const current = self.execution();
         if (current.attached_runner) |runner| if (runner.worker) |worker| return &worker.questions;
         return &current.user_interaction;
+    }
+    fn conflictsRef(self: *AiHost) *@import("ai/host_conflict_arbiter.zig").Broker {
+        const current = self.execution();
+        if (current.attached_runner) |runner| if (runner.worker) |worker| return &worker.conflicts;
+        return &current.conflict_arbiter;
     }
     fn uiOwner(self: *AiHost) *AiHost {
         return self.backend_owner orelse self;
@@ -5195,6 +5201,7 @@ const AiHost = struct {
             self.cancelRef().cancel();
             self.approvalsRef().stop();
             self.questionsRef().stop();
+            self.conflictsRef().stop();
             self.execution().inventory_approval.stop();
         }
         if (request.task_id) |task| if (lookupLifecycleTask(self, request.ticket.conversation_id, task)) |controller| {
@@ -5230,6 +5237,7 @@ const AiHost = struct {
             self.cancelRef().cancel();
             self.approvalsRef().stop();
             self.questionsRef().stop();
+            self.conflictsRef().stop();
             self.execution().inventory_approval.stop();
             self.execution().tool_bridge.stopAll();
         }
@@ -6611,6 +6619,7 @@ const AiHost = struct {
             const authority: @import("ai/host_tools.zig").Context = .{ .conversation_id = context.fence.conversation, .task_id = context.task, .binding = context.owner, .binding_revision = context.fence.binding, .grant_revision = self.request_policy_revision, .child_origin = context.child_origin };
             try self.approvalsRef().configure(authority, self.request_policy_revision);
             self.questionsRef().configure(authority);
+            self.conflictsRef().configure(authority);
             try self.inventory_approval.configure(authority, self.request_policy_revision);
             self.tool_bridge.configureFiles(self.file_application);
             self.tool_bridge.configurePolicy(self.managerRef().permission_engine, self.request_policy_revision);
@@ -6772,12 +6781,14 @@ const AiHost = struct {
         const self: *AiHost = @ptrCast(@alignCast(raw));
         self.approvalsRef().supersede();
         self.questionsRef().supersede();
+        self.conflictsRef().supersede();
         self.inventory_approval.supersede();
     }
     fn supersedeAttachedHandoff(raw: *anyopaque, _: @import("ai/session_runtime.zig").Context) void {
         const self: *AiHost = @ptrCast(@alignCast(raw));
         self.approvalsRef().supersedeForHandoff();
         self.questionsRef().supersede();
+        self.conflictsRef().supersede();
         self.inventory_approval.supersede();
     }
     fn stopAttached(raw: *anyopaque, context: @import("ai/session_runtime.zig").Context) void {
@@ -7616,6 +7627,7 @@ const AiHost = struct {
         self.cancelRef().cancel();
         self.approvalsRef().stop();
         self.questionsRef().stop();
+        self.conflictsRef().stop();
         self.execution().inventory_approval.stop();
         if (self.execution().request_host_context) |context| {
             if (self.application_host) |app| app.cancelOwnedTask(context.task_id);
@@ -8140,6 +8152,7 @@ const AiHost = struct {
                 // Context and policy revision were validated during preparation.
                 self.approvalsRef().configure(next_context, backend.request_policy_revision) catch unreachable;
                 self.questionsRef().configure(next_context);
+                self.conflictsRef().configure(next_context);
                 self.approvalsRef().updatePermissionPolicy(value.bridge.permissionPolicy().engine);
                 backend.inventory_approval.configure(next_context, backend.request_policy_revision) catch unreachable;
                 backend.host_notice_revision = value.notice_revision;
@@ -9605,6 +9618,7 @@ const AiHost = struct {
             defer if (consume_route) bridge.consumeHostRoute(prepared.invocation, target, prepared.command);
             var reconfirm = false;
             var auto_shell_attempts: u8 = 0;
+            var conflict_attempts: u8 = 0;
             while (true) {
                 if (prepared.invocation.dispatch_fence) |fence| try fence.check();
                 bridge.callController(&preflight, Preflight.run, cancel) catch |err| {
@@ -9613,7 +9627,53 @@ const AiHost = struct {
                     // through the manual read/attach dance. One bounded
                     // recovery per call; the original blocker is reported
                     // unchanged when recovery does not reach prompt_ready.
-                    if (err != error.ShellPromptNotObserved or auto_shell_attempts != 0) return rejectedHostInvocation(invocation, allocator, err);
+                    if (err != error.ShellPromptNotObserved or auto_shell_attempts != 0) {
+                        if (err != error.InputConflict or conflict_attempts != 0) return rejectedHostInvocation(invocation, allocator, err);
+                        // Queued/trusted input fails promptly with a read-only
+                        // retry hint. The UI scheduler must remain free to pump.
+                        // Only an exact isolated IME/paste draft is discardable.
+                        conflict_attempts += 1;
+                        const Backend = @import("ui/ai_execution_backend.zig").Context;
+                        const Probe = struct {
+                            backend: *Backend,
+                            invocation: @import("ai/host_tools.zig").Invocation,
+                            hash: [32]u8,
+                            staged: ?Backend.StagedInput = null,
+                            fn run(context: *anyopaque) !void {
+                                const value: *@This() = @ptrCast(@alignCast(context));
+                                value.staged = try value.backend.stagedInput(value.invocation, value.hash);
+                            }
+                        };
+                        var probe: Probe = .{ .backend = preflight.backend, .invocation = prepared.invocation, .hash = prepared.command_hash };
+                        bridge.callController(&probe, Probe.run, cancel) catch |probe_err| return rejectedHostInvocation(invocation, allocator, probe_err);
+                        const staged = probe.staged.?;
+                        const arbiter_kind: @import("ai/host_conflict_arbiter.zig").Kind = switch (staged.decision.kind) {
+                            .ime => .ime,
+                            .paste => .paste,
+                            .backlog, .trusted_edit => unreachable,
+                        };
+                        const ticket = self.conflictsRef().begin(prepared.invocation.context, arbiter_kind) catch |begin_err| return rejectedHostInvocation(invocation, allocator, begin_err);
+                        defer self.conflictsRef().finish(ticket);
+                        bridge.emitHostStep(prepared.invocation, .approval, "终端输入被占用，等待你处理");
+                        const decision = self.conflictsRef().wait(ticket, cancel) catch |wait_err| return rejectedHostInvocation(invocation, allocator, wait_err);
+                        if (decision != .clear_and_proceed) return rejectedHostInvocation(invocation, allocator, err);
+                        const Clear = struct {
+                            backend: *Backend,
+                            invocation: @import("ai/host_tools.zig").Invocation,
+                            hash: [32]u8,
+                            staged: Backend.StagedInput,
+                            fn run(context: *anyopaque) !void {
+                                const value: *@This() = @ptrCast(@alignCast(context));
+                                try value.backend.clearTerminalInputStaging(value.invocation, value.hash, value.staged);
+                            }
+                        };
+                        var clear: Clear = .{ .backend = preflight.backend, .invocation = prepared.invocation, .hash = prepared.command_hash, .staged = staged };
+                        bridge.callController(&clear, Clear.run, cancel) catch |clear_err| return rejectedHostInvocation(invocation, allocator, clear_err);
+                        // Consent was to clear only the old draft, not to install
+                        // Shell hooks or to approve the business command.
+                        auto_shell_attempts = 1;
+                        continue;
+                    }
                     auto_shell_attempts += 1;
                     const Recovery = struct {
                         backend: *@import("ui/ai_execution_backend.zig").Context,
@@ -9684,7 +9744,7 @@ const AiHost = struct {
         const host = @import("ai/host_tools.zig");
         const host_execution = @import("ai/host_execution.zig");
         const recover_shell = host_execution.needsShellObservation(failure);
-        if (recover_shell and std.mem.eql(u8, invocation.tool_id, "host.run_in_terminal")) return host_execution.rejectedRun(allocator, invocation, failure);
+        if ((recover_shell or host_execution.needsInputObservation(failure)) and std.mem.eql(u8, invocation.tool_id, "host.run_in_terminal")) return host_execution.rejectedRun(allocator, invocation, failure);
         const next_tool = if (recover_shell) try @import("ai/plugin_tools.zig").toolHints(allocator, &.{ "host.read_terminal", "host.get_session", "host.attach_shell" }) else null;
         defer if (next_tool) |hint| allocator.free(hint);
         const body = try std.json.Stringify.valueAlloc(allocator, .{ .error_code = @errorName(failure), .message = @import("ai/step_failure.zig").explanation(@errorName(failure)), .next_tool = next_tool, .side_effect_started = false, .local_released = true, .remote_effect_unknown = false }, .{});
@@ -9699,6 +9759,7 @@ const AiHost = struct {
             .tool => |value| value.authority,
             .host => |value| value.authority,
             .question => null,
+            .conflict => null,
         };
         if (authority) |context| {
             const origin = context.child_origin orelse return error.StaleApproval;
@@ -9714,7 +9775,7 @@ const AiHost = struct {
                     .route => |route| try backend.host.approvalsRef().chooseRoute(value.sequence, value.hash, route),
                     else => return error.InvalidInteractionAction,
                 },
-                .question => unreachable,
+                .question, .conflict => unreachable,
             }
             self.cx.scheduleRedrawAfterNs(16 * std.time.ns_per_ms);
             return;
@@ -9735,6 +9796,10 @@ const AiHost = struct {
                     try self.validateHostContext(value.context);
                     try self.questionsRef().answer(value, answer.option_id, answer.text);
                 },
+                else => return error.InvalidInteractionAction,
+            },
+            .conflict => |value| switch (action) {
+                .approve, .reject => try self.conflictsRef().decide(value, if (action == .approve) .clear_and_proceed else .cancel),
                 else => return error.InvalidInteractionAction,
             },
         }
@@ -9858,6 +9923,19 @@ const AiHost = struct {
         } else if (question_pending) |*pending| {
             for (pending.options[0..pending.option_count], 0..) |*option, index| options[index] = .{ .id = option.id.text(), .label = option.label.text(), .description = option.description.text() };
             snapshot = .{ .ticket = .{ .question = pending.ticket }, .title = pending.question.text(), .options = options[0..pending.option_count], .allow_custom = pending.allow_custom };
+        } else if (own_request) {
+            // Terminal input conflict arbitration surfaces only when no
+            // approval, tool grant or question is pending; the user's own
+            // staged input decisions take precedence over host remediation.
+            if (self.conflictsRef().snapshot()) |pending| {
+                snapshot = .{
+                    .ticket = .{ .conflict = pending.ticket },
+                    .title = pending.kind.title(),
+                    .detail = pending.kind.detail(),
+                    .accept_label = pending.kind.accept_label(),
+                    .reject_label = "取消",
+                };
+            }
         }
         const was_expanded = view.expanded();
         const was_pending = view.pendingVisible();
@@ -10044,6 +10122,7 @@ const AiHost = struct {
             self.cancelRef().cancel();
             self.approvalsRef().stop();
             self.questionsRef().stop();
+            self.conflictsRef().stop();
             self.execution().inventory_approval.stop();
             if (self.application_host) |app| app.cancelOwnedTask(task);
         };
@@ -10846,6 +10925,7 @@ const AiHost = struct {
                 if (err != error.TransitionPending and !host.committedHandoffPending(context)) {
                     host.approvalsRef().stop();
                     host.questionsRef().stop();
+                    host.conflictsRef().stop();
                     host.execution().inventory_approval.stop();
                 }
             };

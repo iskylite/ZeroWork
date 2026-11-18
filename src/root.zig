@@ -67,6 +67,7 @@ test {
     _ = @import("ai/lifecycle_runtime_tests.zig");
     _ = @import("ai/lifecycle_runtime.zig");
     _ = @import("ai/host_approval.zig");
+    _ = @import("ai/host_conflict_arbiter.zig");
     _ = @import("ai/user_interaction_tests.zig");
     _ = @import("ai/fetch_url.zig");
     _ = @import("ui/ai_execution_backend.zig");

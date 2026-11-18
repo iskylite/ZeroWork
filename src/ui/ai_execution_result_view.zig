@@ -343,7 +343,7 @@ fn appendOutput(cx: *ui.Cx, scope: *ui.Scope, parent: *ui.Node, bytes: []const u
 fn failureLabel(code: []const u8) []const u8 {
     if (std.mem.eql(u8, code, "RecordingExecutionCapacity")) return "录制执行记录已满，本条命令未发送。已在运行的命令仍可用原执行记录查看进度。";
     if (std.mem.eql(u8, code, "SessionClosed") or std.mem.eql(u8, code, "SessionReconnected")) return "原终端连接已结束，断线后的命令状态待核实。";
-    if (std.mem.eql(u8, code, "ShellContextRequired")) return @import("../ai/step_failure.zig").explanation(code);
+    if (std.mem.eql(u8, code, "ShellContextRequired") or std.mem.eql(u8, code, "TerminalInputConflictChanged") or std.mem.eql(u8, code, "InputConflict")) return @import("../ai/step_failure.zig").explanation(code);
     if (std.mem.eql(u8, code, "IntegrationUnavailable")) return "当前终端的执行能力不可用。";
     if (std.mem.eql(u8, code, "HostToolGatewayUnavailable")) return "执行服务当前不可用。";
     if (std.mem.eql(u8, code, "ToolApprovalRejected")) return "本次调用未获批准。";

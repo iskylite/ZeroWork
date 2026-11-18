@@ -19,12 +19,14 @@ pub const Ticket = union(enum) {
     tool: ApprovalTicket,
     host: ApprovalTicket,
     question: question.Ticket,
+    conflict: @import("../ai/host_conflict_arbiter.zig").Ticket,
     pub fn eql(a: Ticket, b: Ticket) bool {
         if (std.meta.activeTag(a) != std.meta.activeTag(b)) return false;
         return switch (a) {
             .tool => |v| v.eql(b.tool),
             .host => |v| v.eql(b.host),
             .question => |v| v.eql(b.question),
+            .conflict => |v| v.eql(b.conflict),
         };
     }
 };
@@ -41,6 +43,10 @@ pub const Snapshot = struct {
     route: ?routing.Route = null,
     route_selectable: bool = false,
     reconfirm: bool = false,
+    /// Optional accept/reject copy override; empty falls back to the
+    /// default approval labels. Only the conflict card overrides today.
+    accept_label: []const u8 = "",
+    reject_label: []const u8 = "",
 };
 pub const Action = union(enum) { approve, reject, answer: struct { option_id: ?[]const u8, text: []const u8 }, route: routing.Route };
 pub const Callbacks = struct { context: *anyopaque, act: *const fn (*anyopaque, Ticket, Action) anyerror!void };
@@ -52,7 +58,7 @@ const Owned = struct {
         errdefer arena.deinit();
         const allocator = arena.allocator();
         var value = source;
-        inline for (.{ "title", "target", "detail", "impact" }) |field| @field(value, field) = try allocator.dupe(u8, @field(source, field));
+        inline for (.{ "title", "target", "detail", "impact", "accept_label", "reject_label" }) |field| @field(value, field) = try allocator.dupe(u8, @field(source, field));
         if (value.child) |*child| child.label = try allocator.dupe(u8, child.label);
         const options = try allocator.dupe(Option, source.options);
         for (options) |*option| {
@@ -99,6 +105,10 @@ pub const View = struct {
     postpone_button: *ui.Node = undefined,
     accept: *ui.Node = undefined,
     reject: *ui.Node = undefined,
+    accept_text: ?*ui.Node = null,
+    reject_text: ?*ui.Node = null,
+    accept_a11y: *ui.Signal([]const u8),
+    reject_a11y: *ui.Signal([]const u8),
     submit_button: *ui.Node = undefined,
     disabled: *ui.Signal(bool),
     pending_label: *ui.Node = undefined,
@@ -112,7 +122,7 @@ pub const View = struct {
     colors: ?S.theme.Colors = null,
     input_focus: ?ui.Handler(void) = null,
     pub fn mount(cx: *ui.Cx, scope: *ui.Scope, callbacks: Callbacks) !*View {
-        const self = try scope.createState(View, .{ .cx = cx, .scope = scope, .callbacks = callbacks, .selected = try scope.createSignal(?[]const u8, null), .custom_text = try scope.createText("", .{ .capacity = 4096 }), .disabled = try scope.createSignal(bool, false) });
+        const self = try scope.createState(View, .{ .cx = cx, .scope = scope, .callbacks = callbacks, .selected = try scope.createSignal(?[]const u8, null), .custom_text = try scope.createText("", .{ .capacity = 4096 }), .accept_a11y = try scope.createText("允许执行", .{}), .reject_a11y = try scope.createText("拒绝执行", .{}), .disabled = try scope.createSignal(bool, false) });
         try scope.onCleanup(View, self, release);
         const scroll = try ui.widgets.ScrollArea(.{ .direction = .vertical }).mount(scope, cx);
         @import("ai_card_scroll.zig").containVertical(scroll);
@@ -189,8 +199,16 @@ pub const View = struct {
         self.actions.meta.ownership.meta.test_id = "ai.interaction.actions";
         try self.actions.appendChild(cx.allocator, try ui.spacer(cx));
         self.postpone_button = try self.button(self.actions, "稍后处理", "稍后处理", "corner-down-left", "ai.interaction.postpone", false, postpone);
-        self.reject = try self.button(self.actions, "拒绝", "拒绝执行", "x", "ai.interaction.reject", false, deny);
-        self.accept = try self.button(self.actions, "允许执行", "允许执行", "check", "ai.interaction.approve", false, approve);
+        self.reject = try self.button(self.actions, "拒绝", self.reject_a11y, "x", "ai.interaction.reject", false, deny);
+        for (self.reject.children.items) |child| if (child.getText() != null) {
+            self.reject_text = child;
+            break;
+        };
+        self.accept = try self.button(self.actions, "允许执行", self.accept_a11y, "check", "ai.interaction.approve", false, approve);
+        for (self.accept.children.items) |child| if (child.getText() != null) {
+            self.accept_text = child;
+            break;
+        };
         self.submit_button = try self.button(self.actions, "提交答案", "提交答案", "check", "ai.interaction.submit", false, submit);
         self.pending = try ui.widgets.Button(.{ .variant = .secondary, .a11y_label = "继续处理待办请求", .base_style = S.pending(), .on_click = cx.on(View, self, reopen) }).mount(scope, cx);
         for (self.pending.children.items) |child| child.setDisplay(.none);
@@ -210,7 +228,7 @@ pub const View = struct {
         try parent.appendChild(self.cx.allocator, node);
         return node;
     }
-    fn button(self: *View, parent: *ui.Node, text: []const u8, a11y: []const u8, icon_name: []const u8, id: []const u8, primary: bool, comptime callback: fn (*View) void) !*ui.Node {
+    fn button(self: *View, parent: *ui.Node, text: []const u8, a11y: anytype, icon_name: []const u8, id: []const u8, primary: bool, comptime callback: fn (*View) void) !*ui.Node {
         const button_node = try ui.widgets.Button(.{ .variant = .secondary, .a11y_label = a11y, .base_style = S.action(primary), .disabled = self.disabled, .on_click = self.cx.on(View, self, callback) }).mount(self.scope, self.cx);
         for (button_node.children.items) |child| child.setDisplay(.none);
         button_node.setStyleInline(self.cx.allocator, .{ .direction = .row, .align_items = .center, .gap = 4, .opacity = 1 });
@@ -224,6 +242,10 @@ pub const View = struct {
         }
         try parent.appendChild(self.cx.allocator, button_node);
         return button_node;
+    }
+    fn actionCaption(self: *View, accessibility: *ui.Signal([]const u8), label_node: ?*ui.Node, override: []const u8, visible_default: []const u8, a11y_default: []const u8) !void {
+        if (label_node) |node| try node.setTextContent(self.cx.allocator, if (override.len == 0) visible_default else override);
+        accessibility.set(if (override.len == 0) a11y_default else override);
     }
     pub fn update(self: *View, snapshot: ?Snapshot) !bool {
         const changed = if (snapshot) |value| if (self.source) |old| !value.ticket.eql(old.value.ticket) else true else self.source != null;
@@ -264,6 +286,8 @@ pub const View = struct {
                 const asset = if (is_question) ui.icons.get("message-circle").? else ui.icons.shield;
                 if (asset.icon_id) |id| if (asset.pickRep(18)) |rep| self.heading_icon.setIcon(.{ .icon_id = id, .rep = rep, .tint = S.theme.current().accent });
                 self.panel.setStyleInline(self.cx.allocator, S.panel(is_question, value.route_selectable));
+                try self.actionCaption(self.accept_a11y, self.accept_text, value.accept_label, "允许执行", "允许执行");
+                try self.actionCaption(self.reject_a11y, self.reject_text, value.reject_label, "拒绝", "拒绝执行");
             }
         }
         if (snapshot) |value| {

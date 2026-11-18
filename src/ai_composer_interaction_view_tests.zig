@@ -151,3 +151,26 @@ test "composer interaction validates empty custom answer and keeps action row ou
     try std.testing.expect(f.view.panel.globalRect().h < 180);
     try std.testing.expectApproxEqAbs(f.view.panel.globalRect().h + 44, f.composer.globalRect().h, 0.5);
 }
+
+test "composer interaction conflict captions reset for ordinary approval" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const snapshot: V.Snapshot = .{
+        .ticket = .{ .conflict = .{ .context = question().ticket.question.context, .sequence = 1, .kind = .paste } },
+        .title = "有未确认的粘贴内容",
+        .accept_label = "清除粘贴并继续",
+        .reject_label = "取消",
+    };
+    try f.show(snapshot);
+    try std.testing.expectEqualStrings("清除粘贴并继续", f.view.accept_text.?.getText().?.content);
+    try std.testing.expectEqualStrings("取消", f.view.reject_text.?.getText().?.content);
+    try std.testing.expectEqualStrings("取消", f.view.reject.behavior.interaction.a11y.?.label.?);
+    f.click(f.view.reject);
+    try std.testing.expectEqual(@as(usize, 1), f.calls);
+    try std.testing.expectEqualStrings("取消", f.view.reject.behavior.interaction.a11y.?.label.?);
+    try f.show(approval(2));
+    try std.testing.expectEqualStrings("允许执行", f.view.accept_text.?.getText().?.content);
+    try std.testing.expectEqualStrings("拒绝", f.view.reject_text.?.getText().?.content);
+    try std.testing.expectEqualStrings("拒绝执行", f.view.reject.behavior.interaction.a11y.?.label.?);
+}

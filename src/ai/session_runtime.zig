@@ -134,10 +134,12 @@ pub const Worker = struct {
     result: wire.History = .{},
     approvals: @import("host_approval.zig").Broker = .{},
     questions: @import("user_interaction.zig").Broker = .{},
+    conflicts: @import("host_conflict_arbiter.zig").Broker = .{},
 
     fn deinit(self: *Worker, a: std.mem.Allocator) void {
         self.approvals.stop();
         self.questions.stop();
+        self.conflicts.stop();
         self.manager.deinit();
         self.base.deinit();
         self.result.deinit();
@@ -395,18 +397,21 @@ pub const Runner = struct {
             worker.cancel.cancel();
             worker.approvals.stop();
             worker.questions.stop();
+            worker.conflicts.stop();
         }
     }
     fn supersedeWorker(self: *Runner) void {
         if (self.worker) |worker| {
             worker.approvals.supersede();
             worker.questions.supersede();
+            worker.conflicts.supersede();
         }
     }
     fn supersedeWorkerForHandoff(self: *Runner) void {
         if (self.worker) |worker| {
             worker.approvals.supersedeForHandoff();
             worker.questions.supersede();
+            worker.conflicts.supersede();
         }
     }
     fn releaseWorker(self: *Runner) void {

@@ -13,6 +13,7 @@ const records_style = @import("builtin_records_styles.zig");
 const input = @import("terminal_surface_input.zig");
 const annotations = @import("command_annotations.zig");
 const blink_half_period_ms = 550;
+var next_staging_instance = std.atomic.Value(u64).init(1);
 // Viewport cell arrays are large and short-lived. Keep them out of malloc's
 // small-region high-water caches so retiring a pane actually releases pages.
 const snapshot_allocator = std.heap.page_allocator;
@@ -133,6 +134,8 @@ pub const Surface = struct {
     requested_rows: u16 = 0,
     pending: std.ArrayList(Pending) = .empty,
     pending_bytes: usize = 0,
+    staging_instance: u64 = 0,
+    staging_revision: u64 = 0,
     force_snapshot: bool = true,
     paint_pending: bool = true,
     active: bool = false,
@@ -215,7 +218,7 @@ pub const Surface = struct {
         try message_root.appendChild(cx.allocator, message);
         message_root.setDisplay(.none);
         message.setDisplay(.none);
-        self.* = .{ .cx = cx, .host = host, .root = root, .viewport = viewport, .service = service, .owner = owner, .options = owned_options, .timestamp_width = S.timestampWidth(cx, options.family_id), .composite = @import("terminal_document.zig").Document.init(cx.allocator, service, owner), .caret = caret, .preedit_node = preedit, .message = message, .message_root = message_root };
+        self.* = .{ .cx = cx, .host = host, .root = root, .viewport = viewport, .service = service, .owner = owner, .options = owned_options, .timestamp_width = S.timestampWidth(cx, options.family_id), .composite = @import("terminal_document.zig").Document.init(cx.allocator, service, owner), .caret = caret, .preedit_node = preedit, .staging_instance = next_staging_instance.fetchAdd(1, .monotonic), .message = message, .message_root = message_root };
         self.service = self.composite.service();
         if (service.textSlot()) |slot| {
             slot.bindPresentationTarget(@import("../platform/presentation_wakeup.zig").targetForWindow(@intFromPtr(cx)));
@@ -1141,6 +1144,7 @@ pub const Surface = struct {
     pub fn setPreedit(self: *Surface, bytes: []const u8) void {
         if (self.control_grant != null and bytes.len != 0) return;
         const next = self.cx.allocator.dupe(u8, bytes) catch return;
+        if (self.preedit.len != 0 or bytes.len != 0) self.noteStagingChange();
         self.cx.allocator.free(self.preedit);
         self.preedit = next;
         self.document_version = null;
@@ -1471,6 +1475,52 @@ pub const Surface = struct {
         try input.buildDocument(self);
         self.document_version = version;
     }
+    pub const InputConflictKind = enum { backlog, ime, paste, trusted_edit };
+
+    /// Classifies the staged input states that block AI command submission.
+    /// Keep in exact correspondence with the InputConflict condition in
+    /// ai_execution_backend.captureBoundaryMode; the arbiter uses the kind to
+    /// decide between a bounded drain wait and a user remediation card.
+    pub fn inputConflictKind(self: *const Surface) ?InputConflictKind {
+        if (self.trusted_pending != null) return .trusted_edit;
+        if (self.pending_paste != null or self.paste_requested != null) return .paste;
+        if (self.preedit.len != 0) return .ime;
+        if (self.pending.items.len != 0 or self.pending_bytes != 0) return .backlog;
+        return null;
+    }
+
+    pub const StagingDecision = struct { instance: u64, revision: u64, kind: InputConflictKind };
+
+    pub fn noteStagingChange(self: *Surface) void {
+        self.staging_revision +|= 1;
+    }
+
+    /// Only an unconfirmed user draft, in isolation, can be discarded.
+    /// Queued key/text/protocol events and trusted edits are never cleared.
+    pub fn stagingDecision(self: *const Surface) ?StagingDecision {
+        if (self.staging_instance == 0 or self.staging_revision == std.math.maxInt(u64) or
+            self.control_grant != null or self.pending.items.len != 0 or self.pending_bytes != 0 or self.paste_confirmed)
+            return null;
+        const kind = self.inputConflictKind() orelse return null;
+        switch (kind) {
+            .ime => {},
+            .paste => if (self.preedit.len != 0 or self.pending_paste == null) return null,
+            .backlog, .trusted_edit => return null,
+        }
+        return .{ .instance = self.staging_instance, .revision = self.staging_revision, .kind = kind };
+    }
+
+    pub fn discardStagedInput(self: *Surface, expected: StagingDecision) !void {
+        const current = self.stagingDecision() orelse return error.TerminalInputConflictChanged;
+        if (!std.meta.eql(current, expected)) return error.TerminalInputConflictChanged;
+        switch (expected.kind) {
+            .ime => self.setPreedit(""),
+            .paste => self.cancelPaste(),
+            else => unreachable,
+        }
+        if (self.inputConflictKind() != null) return error.InputConflict;
+    }
+
     pub fn requestPaste(self: *Surface, bytes: []const u8) !void {
         try input.requestPaste(self, bytes);
     }
