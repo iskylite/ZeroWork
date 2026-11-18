@@ -294,7 +294,22 @@ test "v0.7 send and stop on a settled child reject with a payload instead of out
     // The settled child stays untouched: no inbox submission, no reopen.
     try std.testing.expectEqual(@as(usize, 1), child.calls.load(.acquire));
 }
-test "v0.4.3 child receives the current workspace and only explicitly delegated file capability" {
+fn expectLocalFileRejection(env: gateway.Environment, json: []const u8, reason: []const u8) !void {
+    const record_count = env.service.store.records.items.len;
+    const runner_count = env.service.runners.items.len;
+    var result = try invoke(env, json);
+    defer result.deinit(a);
+    try std.testing.expectEqual(.rejected, result.status);
+    try std.testing.expect(!result.receipt.side_effect_started and result.receipt.local_released and !result.receipt.remote_effect_unknown);
+    try std.testing.expectEqual(record_count, env.service.store.records.items.len);
+    try std.testing.expectEqual(runner_count, env.service.runners.items.len);
+    const parsed = try std.json.parseFromSlice(std.json.Value, a, result.blocks[0].structured, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("LocalFileAuthorityNotGranted", parsed.value.object.get("error_code").?.string);
+    try std.testing.expectEqualStrings(reason, parsed.value.object.get("details").?.object.get("reason").?.string);
+}
+
+test "tool diagnostics v0.4.3 child receives the current workspace and only explicitly delegated file capability" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -328,14 +343,14 @@ test "v0.4.3 child receives the current workspace and only explicitly delegated 
     defer a.free(reference);
     const assign = try std.fmt.allocPrint(a, "{{\"action\":\"create\",\"request_key\":\"one\",\"name\":\"child\",\"text\":\"inspect the working directory\",\"session_refs\":[\"{s}\"],\"reusable\":true,\"local_files\":\"write\"}}", .{reference});
     defer a.free(assign);
-    try std.testing.expectError(error.LocalFileAuthorityNotGranted, invoke(env, assign));
+    try expectLocalFileRejection(env, assign, "parent_file_authority");
     try std.testing.expectError(error.InvalidArguments, invoke(env, "{\"action\":\"list\",\"local_files\":\"read\"}"));
     try std.testing.expectEqual(@as(usize, 1), service.store.records.items.len);
 
     env.local_files = .write;
-    try std.testing.expectError(error.LocalFileAuthorityNotGranted, invoke(env, assign));
+    try expectLocalFileRejection(env, assign, "missing_workspace_target");
     env.workspace_targets = &.{terminal};
-    try std.testing.expectError(error.LocalFileAuthorityNotGranted, invoke(env, "{\"action\":\"create\",\"request_key\":\"material\",\"name\":\"child\",\"text\":\"read files\",\"session_refs\":[],\"local_files\":\"read\"}"));
+    try expectLocalFileRejection(env, "{\"action\":\"create\",\"request_key\":\"material\",\"name\":\"child\",\"text\":\"read files\",\"session_refs\":[],\"local_files\":\"read\"}", "missing_workspace_target");
     var response = try invoke(env, assign);
     defer response.deinit(a);
     try started(&child);

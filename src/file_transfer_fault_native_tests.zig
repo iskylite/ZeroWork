@@ -240,6 +240,9 @@ test "file transfer fault native auxiliary then retained FIN preserve nonzero ch
             if (clock.monotonicNs() >= deadline) return error.NativeFaultSetupTimeout;
             pause();
         }
+        // The peer gates a transfer READ, not the fingerprint/cache scan.
+        // Select direct READs on each isolated runtime before admitting work.
+        host.entries.items[0].backend.backend.remote_files.stage_download = false;
         if (round == 0) {
             job = try manager.enqueue(.{ .transfer_binding = current_binding, .session_id = @backingInt(accepted.handle.session_id), .direction = .download, .sources = &.{"/retained-fixture.bin"}, .remote_dir = "/", .local_dir = directory, .md5_check = true, .conflict_context = .{ .intent_id = 11, .original_owner = accepted.handle, .resource_owner = current_binding.resource_owner, .source_endpoint = .{ .sftp = .{ .binding_id = current_binding.binding_id, .binding_generation = current_binding.binding_generation, .resource_owner = current_binding.resource_owner, .origin_session = accepted.handle, .connection_snapshot_id = 77 } }, .target_endpoint = .{ .local_fs = .{ .binding_id = 999, .binding_generation = 1 } } } });
             manager.tick(0);

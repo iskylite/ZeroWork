@@ -108,6 +108,9 @@ test "file transfer active FIN native keeps real in-flight partial as an exporta
         if (clock.monotonicNs() >= ready_deadline) return error.RuntimeNotReady;
         pause();
     }
+    // This fixture gates a native READ during destination writes. The
+    // staged path reads the whole remote source before those writes begin.
+    value.backend.remote_files.stage_download = false;
     const engine = value.engine();
     const id = try engine.open(engine.ctx, .{ .transfer_binding = binding, .session_id = @backingInt(owner.session_id), .sources = &.{"/retained-fixture.bin"}, .direction = .download, .remote_dir = "/", .local_dir = directory, .md5_check = true });
     try fixture.wait("aux-1.read-entered");

@@ -21,6 +21,18 @@ from sftp_conflict_loopback import State, Server, Files
 
 logging.getLogger("paramiko").setLevel(logging.CRITICAL)
 
+# Match the exact bounded metadata probe in src/proto/ssh/remote_os.zig.
+# Refuse this request too: recording it separately does not allow execution.
+OS_PROBE = b'sh -c "uname -s || exit; if test -r /etc/os-release; then cat /etc/os-release; elif test -r /usr/lib/os-release; then cat /usr/lib/os-release; fi" || cmd /c ver'
+
+
+class DirectoryServer(Server):
+    def check_channel_exec_request(self, channel, command):
+        if command == OS_PROBE:
+            self.state.record(self.connection, "REFUSED_OS_PROBE")
+            return False
+        return super().check_channel_exec_request(channel, command)
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--binary", type=Path, required=True)
@@ -40,37 +52,48 @@ def main():
     transports, workers, sockets = {}, [], {}
     stop = threading.Event()
     control = out / "drop-first"
+    fin_ack = out / "fin-sent"
     fin = {"sent": False}
 
     def serve(connection, number):
         transport = paramiko.Transport(connection)
         channels = []
-        transports[number], sockets[number] = transport, connection
-        state.connections[number] = {"id": number, "active": True, "peer_closed_before_stop": False}
+        with state.lock:
+            transports[number], sockets[number] = transport, connection
+            state.connections[number] = {"id": number, "active": True, "peer_closed_before_stop": False}
         try:
             transport.add_server_key(key)
             transport.set_subsystem_handler("sftp", paramiko.SFTPServer, Files)
-            transport.start_server(server=Server(state, number))
+            transport.start_server(server=DirectoryServer(state, number))
             while transport.is_active() and not stop.is_set():
                 channel = transport.accept(0.02)
                 if channel is not None:
                     channels.append(channel)
-            state.connections[number]["peer_closed_before_stop"] = not stop.is_set()
+            with state.lock:
+                state.connections[number]["peer_closed_before_stop"] = not stop.is_set()
         except (EOFError, OSError, paramiko.SSHException):
-            state.connections[number]["peer_closed_before_stop"] = not stop.is_set()
+            with state.lock:
+                state.connections[number]["peer_closed_before_stop"] = not stop.is_set()
         finally:
             transport.close()
-            state.connections[number]["active"] = False
+            with state.lock:
+                state.connections[number]["active"] = False
 
     def accept():
         number = 0
         while not stop.is_set():
-            if control.exists() and not fin["sent"] and 1 in sockets:
-                fin.update(sent=True, connection=1, at=time.time())
-                try:
-                    sockets[1].shutdown(socket.SHUT_WR)
-                except OSError:
-                    pass
+            if control.exists() and not fin["sent"]:
+                with state.lock:
+                    first = sockets.get(1)
+                if first is not None:
+                    try:
+                        first.shutdown(socket.SHUT_WR)
+                        fin.update(sent=True, connection=1, at=time.time())
+                        fin_ack.touch()
+                    except OSError as error:
+                        with state.lock:
+                            state.errors.append(f"directory FIN acknowledgement failed: {error}")
+                        return
             try:
                 connection, _ = listener.accept()
             except socket.timeout:
@@ -86,21 +109,31 @@ def main():
     thread.start()
     report = {"status": "running", "scope": "actual libssh2 directory FIN, explicit same-owner recovery/new trust/password, original path rebind; no GUI claim", "remote_writes": False, "user_vm_connections": 0, "port": listener.getsockname()[1], "fingerprint": fingerprint}
     try:
-        environment = {**os.environ, "ZEROWORK_DIRECTORY_RECOVERY_PORT": str(report["port"]), "ZEROWORK_DIRECTORY_RECOVERY_FINGERPRINT": fingerprint, "ZEROWORK_DIRECTORY_RECOVERY_CONTROL": str(control)}
+        environment = {
+            **os.environ,
+            "ZEROWORK_DIRECTORY_RECOVERY_PORT": str(report["port"]),
+            "ZEROWORK_DIRECTORY_RECOVERY_FINGERPRINT": fingerprint,
+            "ZEROWORK_DIRECTORY_RECOVERY_CONTROL": str(control),
+            "ZEROWORK_DIRECTORY_RECOVERY_ACK": str(fin_ack),
+        }
         result = subprocess.run([str(args.binary.resolve())], env=environment, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=50)
         (out / "native.log").write_bytes(result.stdout)
         report["exit_code"] = result.returncode
-        deadline = time.time() + 3
-        while any(item["active"] for item in state.connections.values()) and time.time() < deadline:
+        deadline = time.monotonic() + 3
+        peer = state.snapshot()
+        while peer["active_connections"] and time.monotonic() < deadline:
             time.sleep(0.01)
-        report["peer_before_cleanup"] = state.snapshot()
-        report["fin"] = fin
+            peer = state.snapshot()
+        report["peer_before_cleanup"] = peer
+        report["fin"] = dict(fin)
         assert result.returncode == 0, result.stdout.decode(errors="replace")[-4000:]
         assert fin["sent"]
-        assert len(state.connections) == 2, state.snapshot()
-        assert all(item["peer_closed_before_stop"] for item in state.connections.values())
-        assert not state.forbidden and not state.errors, state.snapshot()
-        assert sum(call["operation"] == "SUBSYSTEM" for call in state.calls) == 2
+        assert len(peer["connections"]) == 2, peer
+        assert all(item["peer_closed_before_stop"] for item in peer["connections"])
+        assert not peer["forbidden_operations"] and not peer["errors"], peer
+        assert sum(call["operation"] == "SUBSYSTEM" for call in peer["calls"]) == 2
+        assert sorted(call["connection"] for call in peer["calls"] if call["operation"] == "REFUSED_OS_PROBE") == [1, 2], peer
+        assert not peer["remote_bytes_mutated"], peer
         assert b"SFTP_DIRECTORY_RECOVERY_NATIVE " in result.stdout
         report["status"] = "passed"
     except Exception as error:
@@ -109,9 +142,11 @@ def main():
         stop.set()
         state.stopping.set()
         listener.close()
-        for transport in transports.values():
-            transport.close()
         thread.join(2)
+        with state.lock:
+            owned_transports = list(transports.values())
+        for transport in owned_transports:
+            transport.close()
         for worker in workers:
             worker.join(2)
         report["peer_final"] = state.snapshot()

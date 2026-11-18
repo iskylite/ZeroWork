@@ -201,10 +201,11 @@ fn testInvocation(tool: []const u8, arguments: std.json.Value, wire: []const u8)
 }
 const TestGate = struct {
     revoked: bool = false,
+    denied_id: ?[]const u8 = null,
     approved: usize = 0,
-    fn check(raw: *anyopaque, _: []const u8, _: bool, cancel: ?*@import("ai/provider.zig").CancelToken) !void {
+    fn check(raw: *anyopaque, key: []const u8, _: bool, cancel: ?*@import("ai/provider.zig").CancelToken) !void {
         const self: *@This() = @ptrCast(@alignCast(raw));
-        if (self.revoked) return error.ExtensionRevoked;
+        if (self.revoked or (self.denied_id != null and std.mem.eql(u8, key, self.denied_id.?))) return error.ExtensionRevoked;
         if (cancel) |token| if (token.isCancelled()) return error.CancelledBeforeDispatch;
     }
     fn approve(raw: *anyopaque, _: host.Invocation, _: ext.Server, _: ?[]const u8, _: ?*@import("ai/provider.zig").CancelToken) !void {
@@ -832,4 +833,153 @@ test "v0.4 extensions modern unknown input invalid results and explicit unsuppor
         defer a.free(trace);
         try std.testing.expect(std.mem.indexOf(u8, trace, "initialize") == null);
     }
+}
+
+test "skill metadata lookup is exact and byte paged without loading packages" {
+    const gateway = @import("ai/extension_gateway.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", a);
+    defer a.free(root);
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const owned = arena.allocator();
+    var description_bytes: [1016]u8 = undefined;
+    for (0..description_bytes.len / 8) |i| @memcpy(description_bytes[i * 8 ..][0..8], "压测\"\\");
+    const description: []const u8 = &description_bytes;
+    var index: [21]ext.Skill = undefined;
+    for (&index, 0..) |*skill, i| skill.* = .{
+        .id = try std.fmt.allocPrint(owned, "{x:0>32}", .{i}),
+        .revision = &(@as([64]u8, @splat('b'))),
+        .name = try std.fmt.allocPrint(owned, "test-{d:0>2}", .{i}),
+        .description = description,
+    };
+    index[3].enabled = false;
+    index[20].name = " clusbench ";
+    // There is no imported package in this fixture; list must not touch it.
+    var session = try gateway.Session.init(a, .{ .skills = &index }, root);
+    defer session.deinit();
+    const journal = try @import("ai/lifecycle_runtime.zig").ProcessJournal.acquire(.{ .data_root = root, .dir = tmp.dir, .io = std.testing.io });
+    defer journal.release();
+    var gate: TestGate = .{ .denied_id = index[7].id };
+    var offset: usize = 0;
+    var total: usize = 0;
+    var found_last = false;
+    while (true) {
+        const wire = try std.json.Stringify.valueAlloc(a, .{ .action = "list", .query = "压测", .offset = offset }, .{});
+        defer a.free(wire);
+        var reply = try gatewayInvoke(&session, journal, &gate, "host.skills", wire);
+        defer reply.deinit(a);
+        try std.testing.expectEqual(.succeeded, reply.status);
+        try std.testing.expect(!reply.receipt.side_effect_started and reply.blocks[0].structured.len <= 8 * 1024);
+        const parsed = try std.json.parseFromSlice(std.json.Value, a, reply.blocks[0].structured, .{});
+        defer parsed.deinit();
+        const rows = parsed.value.object.get("skills").?.array;
+        try std.testing.expect(rows.items.len != 0);
+        for (rows.items) |row| {
+            const name = row.object.get("name").?.string;
+            try std.testing.expect(!std.mem.eql(u8, "test-03", name) and !std.mem.eql(u8, "test-07", name));
+            try std.testing.expectEqualStrings(description, row.object.get("description").?.string);
+            if (std.mem.eql(u8, index[20].name, name)) found_last = true;
+        }
+        total += rows.items.len;
+        const next = parsed.value.object.get("next_offset").?;
+        if (next == .null) break;
+        const current: usize = @intCast(next.integer);
+        try std.testing.expect(current > offset);
+        offset = current;
+    }
+    try std.testing.expectEqual(@as(usize, 19), total);
+    try std.testing.expect(found_last);
+    var exact = try gatewayInvoke(&session, journal, &gate, "host.skills", "{\"action\":\"list\",\"name\":\" clusbench \"}");
+    defer exact.deinit(a);
+    const exact_result = try std.json.parseFromSlice(std.json.Value, a, exact.blocks[0].structured, .{});
+    defer exact_result.deinit();
+    const rows = exact_result.value.object.get("skills").?.array;
+    try std.testing.expectEqual(@as(usize, 1), rows.items.len);
+    try std.testing.expectEqualStrings(index[20].id, rows.items[0].object.get("id").?.string);
+    try std.testing.expectEqualStrings(index[20].revision, rows.items[0].object.get("revision").?.string);
+    try std.testing.expectEqualStrings(index[20].name, rows.items[0].object.get("name").?.string);
+    const literal_checks = [_]struct { wire: []const u8, count: usize }{
+        .{ .wire = "{\"action\":\"list\",\"name\":\"clusbench\"}", .count = 0 },
+        .{ .wire = "{\"action\":\"list\",\"query\":\" clusbench \"}", .count = 1 },
+        .{ .wire = "{\"action\":\"list\",\"query\":\"  clusbench \"}", .count = 0 },
+    };
+    for (literal_checks) |check| {
+        var result = try gatewayInvoke(&session, journal, &gate, "host.skills", check.wire);
+        defer result.deinit(a);
+        try std.testing.expectEqual(.succeeded, result.status);
+        const parsed = try std.json.parseFromSlice(std.json.Value, a, result.blocks[0].structured, .{});
+        defer parsed.deinit();
+        try std.testing.expectEqual(check.count, parsed.value.object.get("skills").?.array.items.len);
+    }
+    var incompatible = try gatewayInvoke(&session, journal, &gate, "host.skills", "{\"action\":\"list\",\"name\":\"clusbench\",\"query\":\"x\"}");
+    defer incompatible.deinit(a);
+    try std.testing.expectEqual(.rejected, incompatible.status);
+    const stale = try std.json.Stringify.valueAlloc(a, .{ .action = "read", .skill_id = index[20].id, .revision = @as([]const u8, &(@as([64]u8, @splat('c')))) }, .{});
+    defer a.free(stale);
+    var stale_result = try gatewayInvoke(&session, journal, &gate, "host.skills", stale);
+    defer stale_result.deinit(a);
+    try std.testing.expectEqual(.rejected, stale_result.status);
+    try std.testing.expect(std.mem.indexOf(u8, stale_result.blocks[0].structured, "SkillNotSelected") != null);
+}
+
+test "offline skill provider wire includes metadata and loads body only for explicit selection" {
+    const gateway = @import("ai/extension_gateway.zig");
+    const skill_context = @import("ai/skill_context.zig");
+    const provider = @import("ai/provider.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "source/references");
+    const body_marker = "SKILL_BODY_OFFLINE_TEST_MARKER";
+    const resource_marker = "SKILL_RESOURCE_OFFLINE_TEST_MARKER";
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "source/SKILL.md", .data = "---\nname: clusbench\ndescription: Cluster benchmark lookup and diagnosis\n---\n" ++ body_marker ++ "\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "source/references/details.md", .data = resource_marker ++ "\n" });
+    const source = try tmp.dir.realPathFileAlloc(std.testing.io, "source", a);
+    defer a.free(source);
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", a);
+    defer a.free(root);
+    var imported = try skills.importLocal(a, std.testing.io, tmp.dir, source, null);
+    defer imported.deinit();
+    var session = try gateway.Session.init(a, .{ .skills = &.{imported.skill} }, root);
+    defer session.deinit();
+    const tools: []const provider.ToolDefinition = &.{.{
+        .session_ids = &.{},
+        .authority = .conversation_context,
+        .dynamic = .{ .id = "host.skills", .name = "host__skills", .schema = gateway.contributions[2].definition.schema, .description = gateway.contributions[2].definition.description },
+    }};
+    const prompt = try @import("ai/session_prompt.zig").buildWithSkillWindow(a, .auto, tools, .{}, null, session.frozen.skills, 64_000, 0);
+    defer a.free(prompt);
+    const messages = [_]provider.Message{.{ .content = "Show the previous cluster benchmark run." }};
+    var request: provider.ChatRequest = .{ .model = "fixture", .system = prompt, .messages = &messages, .tools = tools };
+    const discovery = try @import("ai/provider_http.zig").requestBody(a, .openai_compat, request, 64_000);
+    defer a.free(discovery);
+    try std.testing.expect(std.mem.indexOf(u8, discovery, imported.skill.id) != null);
+    try std.testing.expect(std.mem.indexOf(u8, discovery, body_marker) == null);
+    try std.testing.expect(std.mem.indexOf(u8, discovery, resource_marker) == null);
+    try std.testing.expect(std.mem.indexOf(u8, discovery, source) == null);
+
+    const name = skill_context.explicitName("/skill clusbench").?;
+    try std.testing.expectError(error.ExplicitSkillUnavailable, skill_context.select(name, session.frozen.skills, &.{}));
+    const selected = try skill_context.select(name, session.frozen.skills, null);
+    var explicit = [_]provider.Message{.{ .content = "Show the previous run.", .skill = selected }};
+    var updated = explicit;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const Gate = struct {
+        fn check(_: *anyopaque, _: ext.Skill, _: ?*provider.CancelToken) !void {}
+    };
+    var loading: skill_context.RequestContext = .{
+        .loader = .{ .session = &session, .context = &session, .check = Gate.check },
+        .allocator = arena.allocator(),
+        .context_window = 64_000,
+        .io = std.testing.io,
+    };
+    request.messages = &explicit;
+    try loading.apply(arena.allocator(), request, &updated, &explicit);
+    request.messages = &updated;
+    const activated = try @import("ai/provider_http.zig").requestBody(a, .openai_compat, request, 64_000);
+    defer a.free(activated);
+    try std.testing.expect(std.mem.indexOf(u8, activated, body_marker) != null);
+    try std.testing.expect(std.mem.indexOf(u8, activated, resource_marker) == null);
 }

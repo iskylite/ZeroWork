@@ -91,6 +91,8 @@ class Handle(paramiko.SFTPHandle):
         # libssh2 prefetches up to four 32KiB buffers (rounded to 30KiB
         # packets). Hold a later request, after an earlier native read must
         # have returned, so pause deterministically retains nonempty data.
+        # Test runner selects direct READs: OPEN 1 fingerprints the source;
+        # OPEN 2 feeds the destination copy; the gate holds a later READ.
         if self.ordinal == 2 and offset >= 6 * 32768 and name not in self.state.gates:
             gate = {"offset": offset, "length": length, "pause_seen_before_release": False, "released": False}
             self.state.gates[name] = gate

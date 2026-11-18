@@ -823,26 +823,30 @@ pub const Loop = struct {
     fn resolveDynamic(self: *Loop, record: *Record, table: *const dynamic.RequestTable, call: provider.ToolCall, host: Host, cancel: ?*provider.CancelToken) ![]const u8 {
         @import("tool_trace.zig").emit(.{ .event = "dynamic_invocation", .call_id = call.id, .tool_id = call.name, .owner = self.scope.owner, .arguments_hash = std.fmt.bytesToHex(record.arguments_hash, .lower) });
         var parsed = table.parse(self.allocator, call.name, call.arguments) catch |err| {
-            if (err == error.InvalidToolArguments) {
-                if (table.lookup(call.name)) |entry| {
-                    if (std.mem.eql(u8, entry.definition.id, "host.run_in_terminal") or
-                        std.mem.eql(u8, entry.definition.id, @import("child_gateway.zig").tool_id))
-                    {
-                        var scratch = std.heap.ArenaAllocator.init(self.allocator);
-                        defer scratch.deinit();
-                        if (table.argumentIssue(scratch.allocator(), call.name, call.arguments) catch null) |issue| {
-                            record.result_body = try std.json.Stringify.valueAlloc(self.arena.allocator(), .{
-                                .status = Status.rejected,
-                                .error_code = @errorName(err),
-                                .session_ids = @as([]const u64, &.{}),
-                                .argument_issue = issue,
-                            }, .{ .emit_null_optional_fields = false });
-                            return record.result_body.?;
-                        }
-                    }
-                }
+            const a = self.arena.allocator();
+            var scratch = std.heap.ArenaAllocator.init(self.allocator);
+            defer scratch.deinit();
+            const issue = if (err == error.InvalidToolArguments) try table.argumentIssue(scratch.allocator(), call.name, call.arguments) else null;
+            // Preserve specialist guidance and give generic tools the same
+            // bounded structural issue without echoing argument values.
+            if (try @import("kvm_tool_feedback.zig").preflightBodyWithIssue(a, call.name, @errorName(err), &.{}, issue)) |body| {
+                record.result_body = body;
+                return body;
             }
-            record.result_body = (try @import("kvm_tool_feedback.zig").preflightBody(self.arena.allocator(), call.name, @errorName(err), &.{})) orelse try self.errorBody(@errorName(err), null);
+            if (issue) |diagnostic| {
+                record.result_body = try std.json.Stringify.valueAlloc(a, .{
+                    .status = Status.rejected,
+                    .error_code = @errorName(err),
+                    .stage = "arguments",
+                    .session_ids = @as([]const u64, &.{}),
+                    .argument_issue = diagnostic,
+                    .side_effect_started = false,
+                    .local_released = true,
+                    .remote_effect_unknown = false,
+                }, .{ .emit_null_optional_fields = false });
+                return record.result_body.?;
+            }
+            record.result_body = try self.errorBody(@errorName(err), null);
             return record.result_body.?;
         };
         defer parsed.deinit();

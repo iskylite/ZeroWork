@@ -345,14 +345,20 @@ pub const RequestTable = struct {
     pub fn argumentIssue(self: *const RequestTable, scratch: std.mem.Allocator, name: []const u8, arguments: []const u8) !?ArgumentIssue {
         const entry = self.lookup(name) orelse return null;
         if (arguments.len > entry.definition.max_argument_bytes) return .{ .rule = "maxBytes", .expected = .{ .integer = @intCast(entry.definition.max_argument_bytes) } };
-        const value = try std.json.parseFromSliceLeaky(std.json.Value, scratch, arguments, .{});
+        const value = std.json.parseFromSliceLeaky(std.json.Value, scratch, arguments, .{}) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => return .{ .rule = "jsonSyntax" },
+        };
         const schema = try std.json.parseFromSliceLeaky(std.json.Value, scratch, entry.definition.schema, .{});
         return findArgumentIssue(schema, value, 0);
     }
     pub fn parse(self: *const RequestTable, allocator: std.mem.Allocator, name: []const u8, arguments: []const u8) !ParsedCall {
         const entry = self.lookup(name) orelse return error.ToolNotInRequest;
         if (arguments.len > entry.definition.max_argument_bytes) return error.InvalidToolArguments;
-        var parsed = try std.json.parseFromSlice(std.json.Value, allocator, arguments, .{ .allocate = .alloc_always });
+        var parsed = std.json.parseFromSlice(std.json.Value, allocator, arguments, .{ .allocate = .alloc_always }) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => return error.InvalidToolArguments,
+        };
         errdefer parsed.deinit();
         if (parsed.value != .object) return error.InvalidToolArguments;
         const schema = try std.json.parseFromSlice(std.json.Value, allocator, entry.definition.schema, .{});
@@ -594,6 +600,11 @@ pub const ArgumentIssue = struct {
     field: ?[]const u8 = null,
     expected: ?std.json.Value = null,
 };
+fn safeUnknownFieldName(name: []const u8) bool {
+    if (name.len == 0 or name.len > 64 or !std.ascii.isAlphabetic(name[0])) return false;
+    for (name) |c| if (!std.ascii.isAlphanumeric(c) and c != '_') return false;
+    return true;
+}
 fn findArgumentIssue(schema: std.json.Value, value: std.json.Value, depth: usize) ?ArgumentIssue {
     if (depth > 12) return .{ .rule = "maxDepth" };
     const kind = schema.object.get("type").?.string;
@@ -641,7 +652,7 @@ fn findArgumentIssue(schema: std.json.Value, value: std.json.Value, depth: usize
             };
             if (schema.object.get("additionalProperties")) |additional| if (!additional.bool) return .{
                 .rule = "additionalProperties",
-                .field = if (field.key_ptr.len <= 64 and std.unicode.utf8ValidateSlice(field.key_ptr.*)) field.key_ptr.* else null,
+                .field = if (safeUnknownFieldName(field.key_ptr.*)) field.key_ptr.* else null,
             };
         }
     }

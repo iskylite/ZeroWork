@@ -255,6 +255,12 @@ pub const View = struct {
             const next = if (snapshot) |value| try Owned.init(self.cx.allocator, value) else null;
             if (self.source) |*old| old.arena.deinit();
             self.source = next;
+            // An arbitration click must not blur the terminal before the
+            // exact staged draft is revalidated. Keep Tab/a11y and ordinary
+            // approval focus behavior; only these two pointer actions differ.
+            const preserve_terminal_focus = if (snapshot) |value| value.ticket == .conflict else false;
+            self.accept.behavior.interaction.pointer_down_focus = if (preserve_terminal_focus) .preserve else .transfer;
+            self.reject.behavior.interaction.pointer_down_focus = if (preserve_terminal_focus) .preserve else .transfer;
             self.postponed = false;
             self.submitted = false;
             self.disabled.set(false);

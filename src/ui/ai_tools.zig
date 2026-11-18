@@ -2428,7 +2428,7 @@ test "routing run_command to current terminal returns real plan change with zero
             const failure = try @import("../ai/step_failure.zig").describe(a, .{ .call_id = @constCast(event.call_id), .name = @constCast(event.name), .command = @constCast(event.command), .detail = @constCast(event.detail), .phase = event.phase, .started_ms = event.at_ms });
             defer failure.deinit(a);
             try std.testing.expect(std.mem.indexOf(u8, failure.summary, "requires_plan_change") != null);
-            try std.testing.expect(std.mem.indexOf(u8, failure.detail, "host__run_uin_uterminal") != null);
+            try std.testing.expect(std.mem.indexOf(u8, failure.detail, "运行方式不匹配") != null);
         }
     }
     try std.testing.expect(pending_event and approved_event and cancelled_event);

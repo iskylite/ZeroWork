@@ -174,3 +174,47 @@ test "composer interaction conflict captions reset for ordinary approval" {
     try std.testing.expectEqualStrings("拒绝", f.view.reject_text.?.getText().?.content);
     try std.testing.expectEqualStrings("拒绝执行", f.view.reject.behavior.interaction.a11y.?.label.?);
 }
+
+test "composer arbitration pointer decisions preserve terminal focus until normal approval" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const terminal_input = try ui.box(f.cx, .{ .width = .fill(), .height = .{ .px = 120 } }, .{});
+    terminal_input.behavior.interaction.focusable = true;
+    try f.cx.root.?.appendChild(a, terminal_input);
+
+    var snapshot: V.Snapshot = .{
+        .ticket = .{ .conflict = .{ .context = question().ticket.question.context, .sequence = 1, .kind = .ime } },
+        .title = "终端输入被组字暂存占用",
+        .accept_label = "清除组字并继续",
+        .reject_label = "取消",
+    };
+    for ([_]*ui.Node{ f.view.accept, f.view.reject }, 1..) |button, sequence| {
+        snapshot.ticket.conflict.sequence = sequence;
+        try f.show(snapshot);
+        f.cx.setFocus(terminal_input);
+        const r = button.globalRect();
+        f.cx.handleMouseDown(r.x + r.w / 2, r.y + r.h / 2, .{});
+        try std.testing.expect(f.cx.focus_manager.current_focus == terminal_input);
+        try std.testing.expectEqual(sequence - 1, f.calls);
+        f.cx.handleMouseUp(r.x + r.w / 2, r.y + r.h / 2);
+        try std.testing.expect(f.cx.focus_manager.current_focus == terminal_input);
+        try std.testing.expectEqual(sequence, f.calls);
+    }
+
+    snapshot.ticket.conflict.sequence = 3;
+    try f.show(snapshot);
+    try std.testing.expect(f.view.accept.behavior.interaction.focusable);
+    try std.testing.expect(f.view.accept.behavior.interaction.a11y != null);
+    f.cx.setFocus(f.view.accept);
+    f.cx.handleKeyDown(.space, .{});
+    try std.testing.expectEqual(@as(usize, 3), f.calls);
+
+    try f.show(approval(4));
+    f.cx.setFocus(terminal_input);
+    const r = f.view.accept.globalRect();
+    f.cx.handleMouseDown(r.x + r.w / 2, r.y + r.h / 2, .{});
+    try std.testing.expect(f.cx.focus_manager.current_focus == f.view.accept);
+    f.cx.handleMouseUp(r.x + r.w / 2, r.y + r.h / 2);
+    try std.testing.expectEqual(@as(usize, 4), f.calls);
+}

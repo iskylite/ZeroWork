@@ -28,8 +28,8 @@ pub const contributions = [_]host.Contribution{
     } },
     .{ .authority = .local_files, .definition = .{
         .id = "host.local_search_text",
-        .description = "Search for literal UTF-8 text under a local directory. Use a single-line pattern of at most 256 UTF-8 bytes. Results include file versions and are a bounded live scan, not a stable snapshot. An incomplete scan does not prove there are no more matches.",
-        .schema = "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{" ++ scan_fields ++ ",\"limit\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":16},\"pattern\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":256},\"context_lines\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":2},\"follow_directory_symlinks\":{\"type\":\"boolean\"}},\"required\":[\"pattern\"]}",
+        .description = "Search for literal UTF-8 text under a local directory. Send a JSON object with pattern (the text to find), and optionally path (the directory to search). The literal pattern must be one line and at most 256 UTF-8 bytes; use local_list_files to list a directory. Results include file versions and are a bounded live scan, not a stable snapshot. An incomplete scan does not prove there are no more matches.",
+        .schema = "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{" ++ scan_fields ++ ",\"limit\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":16},\"pattern\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":256,\"description\":\"Literal text to find; path selects the directory. Use one line and at most 256 UTF-8 bytes.\"},\"context_lines\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":2},\"follow_directory_symlinks\":{\"type\":\"boolean\"}},\"required\":[\"pattern\"]}",
     } },
 };
 fn classify(id: []const u8) ?Kind {
@@ -81,6 +81,19 @@ pub fn execute(allocator: std.mem.Allocator, io: std.Io, state: State, invocatio
     defer arena.deinit();
     const a = arena.allocator();
     const args = (try std.json.parseFromValue(Args, a, invocation.arguments, .{})).value;
+    if (kind == .search) {
+        const pattern = args.pattern orelse return error.InvalidArguments;
+        reads.validatePattern(pattern) catch {
+            const over_limit = pattern.len > reads.max_pattern_bytes;
+            return result(allocator, invocation, .rejected, .{
+                .error_code = "InvalidSearchPattern",
+                .argument_issue = .{ .field = "pattern", .rule = if (over_limit) "maxBytes" else "singleLine", .expected = if (over_limit) @as(?usize, reads.max_pattern_bytes) else null },
+                .side_effect_started = false,
+                .local_released = true,
+                .remote_effect_unknown = false,
+            });
+        };
+    }
     const options: paths.Options = .{
         .path = args.path orelse if (kind == .read) null else ".",
         .file_ref = if (args.file_ref) |ref| try openReference(a, state.reference_key orelse return error.LocalFileReferenceUnavailable, invocation.context.conversation_id, ref) else null,
@@ -171,4 +184,35 @@ test "v0.4.3 local file references cannot be moved to another conversation" {
     try std.testing.expectEqualStrings("/tmp/foo", (try openReference(a, @splat(7), conversation, token)).absolute);
     try std.testing.expectError(error.InvalidFileReference, openReference(a, @splat(7), .{ .bytes = @splat(2) }, token));
     try std.testing.expectError(error.InvalidFileReference, openReference(a, @splat(8), conversation, token));
+}
+
+test "tool diagnostics local search rejects multiline and UTF-8 byte overflow before resolving path" {
+    const a = std.testing.allocator;
+    const identity = @import("../host/identity.zig");
+    const context: host.Context = .{ .conversation_id = identity.ConversationId.generate(), .task_id = identity.TaskId.generate(), .binding = .{ .group = 7 }, .binding_revision = 2, .grant_revision = 3 };
+    const cases = .{
+        .{ "{\"pattern\":\"第一行\\n第二行\",\"path\":\"/nonexistent-fixture-path\"}", "singleLine" },
+        .{ "{\"pattern\":\"" ++ "字字字字字字字字字字字字字字字字字字字字字字字字字字字字字字字字字字字字字字字字字字字字字字字字字字字字字字字字字字字字字字字字字字字字字字字字字字字字字字字字字字字字字字" ++ "\",\"path\":\"/nonexistent-fixture-path\"}", "maxBytes" },
+    };
+    inline for (cases) |case| {
+        const parsed = try std.json.parseFromSlice(std.json.Value, a, case[0], .{});
+        defer parsed.deinit();
+        var value = try execute(a, std.testing.io, .{ .workspace = .{}, .key = @splat(0) }, .{
+            .context = context,
+            .authority = .local_files,
+            .operation_id = 1,
+            .turn_id = 1,
+            .call_id = "pattern-issue",
+            .tool_id = "host.local_search_text",
+            .arguments = parsed.value,
+            .arguments_json = case[0],
+            .arguments_hash = @splat(0),
+            .canonical_arguments_hash = @splat(0),
+        }, null);
+        defer value.deinit(a);
+        try std.testing.expectEqual(.rejected, value.status);
+        try std.testing.expect(!value.receipt.side_effect_started and value.receipt.local_released and !value.receipt.remote_effect_unknown);
+        try std.testing.expect(std.mem.indexOf(u8, value.blocks[0].structured, case[1]) != null);
+        try std.testing.expect(std.mem.indexOf(u8, value.blocks[0].structured, "/nonexistent-fixture-path") == null);
+    }
 }

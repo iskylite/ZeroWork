@@ -42,6 +42,8 @@ def main():
             state.record(state.reads, connection=self.peer.identity, open=self.ordinal,
                          path=SOURCE_PATH, offset=offset, length=length)
             label = self.peer.label
+            # Test runner selects direct READs: OPEN 1 fingerprints the source;
+            # OPEN 2 feeds the destination copy; the gate holds a later READ.
             if self.ordinal == 2 and offset >= 6 * 32768 and label not in gates:
                 gates[label] = {"connection": self.peer.identity, "offset": offset, "released": False}
                 state.marker(label + ".read-entered").write_text("ready\n")
@@ -149,7 +151,12 @@ def main():
         for worker in workers:
             worker.join(2)
     snapshot = state.snapshot()
-    report = {"status": "passed" if code == 0 and not snapshot["forbidden"] and not snapshot["errors"] else "failed",
+    native_cases_present = "ACTIVE_FIN_BEFORE " in log and "ACTIVE_FIN_AFTER " in log
+    peer_boundary_seen = set(gates) == {"aux-1"} and state.marker("aux-1.fin-sent").is_file()
+    # A misfiltered or skipped Zig runner can return zero without testing FIN.
+    report = {"status": "passed" if code == 0 and native_cases_present and peer_boundary_seen
+              and not snapshot["forbidden"] and not snapshot["errors"] else "failed",
+              "native_cases_present": native_cases_present, "peer_boundary_seen": peer_boundary_seen,
               "native_app_started": False, "runner_exit_code": code,
               "runner_sha256": hashlib.sha256(args.runner.read_bytes()).hexdigest(),
               "scope": "Actual libssh2 Runtime with active READ and real peer TCP FIN; no pause/fault injection, GUI or VM", "gates": gates, **snapshot}

@@ -1607,3 +1607,88 @@ test "one model response dispatches more than sixteen tool calls" {
     try std.testing.expectEqual(@as(usize, 20), manager.tool_run.?.records.items.len);
     try http.validateToolMessages(manager.tool_run.?.request);
 }
+
+test "tool diagnostics recover from missing child authority without lifting unknown guard" {
+    const tools = @import("plugin_tools.zig");
+    const child = @import("child_gateway.zig");
+    const identity = @import("../host/identity.zig");
+    const authority: tools.host.Context = .{ .conversation_id = identity.ConversationId.generate(), .task_id = identity.TaskId.generate(), .binding = .{ .group = 7 }, .binding_revision = 2, .grant_revision = 3 };
+    const empty_scope: scope_mod.Scope = .{ .owner = authority.binding, .members = .{} };
+    var table = try tools.RequestTable.initWithHost(a, empty_scope, &.{}, &.{}, authority, &.{child.contribution});
+    defer table.deinit();
+    const wire = try tools.providerDefinitions(&table, table.arena.allocator());
+    const Gateway = struct {
+        calls: usize = 0,
+        fn legacy(_: *anyopaque, _: loop_mod.Invocation, _: std.mem.Allocator, _: ?*provider.CancelToken) !loop_mod.Outcome {
+            return error.UnexpectedLegacyDispatch;
+        }
+        fn invoke(raw: *anyopaque, invocation: tools.host.Invocation, allocator: std.mem.Allocator, _: ?*provider.CancelToken) !tools.host.Result {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.calls += 1;
+            return switch (self.calls) {
+                1 => child.rejectLocalFiles(invocation, allocator, .missing_workspace_target, .read, .read),
+                2 => child.result(invocation, .{ .accepted = true }, allocator),
+                else => error.ChildStartupFailed,
+            };
+        }
+    };
+    var gateway: Gateway = .{};
+    const callbacks: loop_mod.Host = .{ .context = &gateway, .execute = Gateway.legacy, .execute_host = Gateway.invoke };
+    var loop = loop_mod.Loop.init(a, empty_scope, 1, .{ .context_window = 100_000 });
+    defer loop.deinit();
+    try loop.start(.{ .model = "model", .system = "", .messages = &.{}, .tools = wire, .tool_table = &table });
+    const bad: provider.ToolCall = .{ .id = "missing-workspace", .name = wire[0].name(), .arguments = "{\"action\":\"create\",\"text\":\"test\",\"session_refs\":[],\"local_files\":\"read\"}" };
+    try loop.complete("", &.{bad}, callbacks, .{}, 1, null);
+    const rejected = loop.records.items[0].host_result.?;
+    try std.testing.expectEqual(.rejected, rejected.status);
+    try std.testing.expect(!rejected.receipt.side_effect_started and rejected.receipt.local_released and !rejected.receipt.remote_effect_unknown);
+    try std.testing.expect(!loop.uncertain);
+    try std.testing.expect(std.mem.indexOf(u8, rejected.blocks[0].structured, "missing_workspace_target") != null);
+    var good: provider.ToolCall = .{ .id = "corrected-child", .name = wire[0].name(), .arguments = "{\"action\":\"create\",\"text\":\"test\",\"session_refs\":[]}" };
+    try loop.complete("", &.{good}, callbacks, .{}, 1, null);
+    try std.testing.expectEqual(.succeeded, loop.records.items[1].host_result.?.status);
+    try std.testing.expectEqual(@as(usize, 2), gateway.calls);
+    good.id = "actual-unknown";
+    try loop.complete("", &.{good}, callbacks, .{}, 1, null);
+    try std.testing.expect(loop.uncertain);
+    good.id = "denied-followup";
+    try loop.complete("", &.{good}, callbacks, .{}, 1, null);
+    try std.testing.expectEqual(@as(usize, 3), gateway.calls);
+    try std.testing.expect(std.mem.indexOf(u8, loop.records.items[3].result_body.?, "EarlierToolOutcomeUnknown") != null);
+}
+
+test "tool diagnostics distinguishes JSON syntax object type and missing search pattern" {
+    const tools = @import("plugin_tools.zig");
+    const identity = @import("../host/identity.zig");
+    const authority: tools.host.Context = .{ .conversation_id = identity.ConversationId.generate(), .task_id = identity.TaskId.generate(), .binding = .{ .group = 7 }, .binding_revision = 2, .grant_revision = 3 };
+    const empty_scope: scope_mod.Scope = .{ .owner = authority.binding, .members = .{} };
+    const contributions = @import("host_local_files.zig").contributions;
+    var table = try tools.RequestTable.initWithHost(a, empty_scope, &.{}, &.{}, authority, &.{contributions[2]});
+    defer table.deinit();
+    const wire = try tools.providerDefinitions(&table, table.arena.allocator());
+    const Gateway = struct {
+        fn legacy(_: *anyopaque, _: loop_mod.Invocation, _: std.mem.Allocator, _: ?*provider.CancelToken) !loop_mod.Outcome {
+            return error.UnexpectedLegacyDispatch;
+        }
+    };
+    var unused: u8 = 0;
+    const callbacks: loop_mod.Host = .{ .context = &unused, .execute = Gateway.legacy };
+    var loop = loop_mod.Loop.init(a, empty_scope, 1, .{ .context_window = 100_000 });
+    defer loop.deinit();
+    try loop.start(.{ .model = "model", .system = "", .messages = &.{}, .tools = wire, .tool_table = &table });
+    const cases = .{
+        .{ "malformed", "/secret/fixture", "jsonSyntax", "" },
+        .{ "wrong-shape", "\"/secret/fixture\"", "type", "object" },
+        .{ "missing-field", "{\"path\":\"/secret/fixture\"}", "required", "pattern" },
+    };
+    inline for (cases, 0..) |case, index| {
+        try loop.complete("", &.{.{ .id = case[0], .name = wire[0].name(), .arguments = case[1] }}, callbacks, .{}, 1, null);
+        const raw = loop.records.items[index].result_body.?;
+        try std.testing.expect(std.mem.indexOf(u8, raw, "InvalidToolArguments") != null);
+        try std.testing.expect(std.mem.indexOf(u8, raw, case[2]) != null);
+        try std.testing.expect(std.mem.indexOf(u8, raw, case[3]) != null);
+        try std.testing.expect(std.mem.indexOf(u8, raw, "/secret/fixture") == null);
+        try std.testing.expect(!loop.records.items[index].dispatched);
+    }
+    try std.testing.expect(!loop.uncertain);
+}

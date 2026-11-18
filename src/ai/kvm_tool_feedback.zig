@@ -155,9 +155,13 @@ pub fn project(a: std.mem.Allocator, name: []const u8, bytes: []const u8) !?Feed
 
 /// Used only for a known failure before the generic dispatch boundary.
 pub fn preflightBody(a: std.mem.Allocator, name: []const u8, code: []const u8, session_ids: []const u64) !?[]u8 {
+    return preflightBodyWithIssue(a, name, code, session_ids, null);
+}
+
+pub fn preflightBodyWithIssue(a: std.mem.Allocator, name: []const u8, code: []const u8, session_ids: []const u64, argument_issue: ?@import("plugin_tools.zig").ArgumentIssue) !?[]u8 {
     if (!isTool(name)) return null;
     const info = failure(code) orelse return null;
-    return try std.json.Stringify.valueAlloc(a, .{ .status = "rejected", .state = "rejected", .error_code = code, .stage = "preflight", .session_ids = session_ids, .message = info.message, .dispatch = false, .image_generated = false, .remote_effect_verified = false, .side_effect_started = false, .remote_effect_unknown = false, .next_step = info.next_step, .automatic_action_replay_allowed = false }, .{});
+    return try std.json.Stringify.valueAlloc(a, .{ .status = "rejected", .state = "rejected", .error_code = code, .stage = "preflight", .session_ids = session_ids, .message = info.message, .dispatch = false, .image_generated = false, .remote_effect_verified = false, .side_effect_started = false, .remote_effect_unknown = false, .next_step = info.next_step, .automatic_action_replay_allowed = false, .argument_issue = argument_issue }, .{ .emit_null_optional_fields = false });
 }
 
 /// Only the screenshot read may be retried. Once its bounded host wait ends,

@@ -6231,6 +6231,76 @@ test "sftp staged download preserves full fingerprint and avoids a second remote
     }
 }
 
+test "sftp staged download fault after one destination write retains the exact prefix" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var local = std.testing.tmpDir(.{});
+    defer local.cleanup();
+    var remote = std.testing.tmpDir(.{});
+    defer remote.cleanup();
+    const directory = try local.dir.realPathFileAlloc(io, ".", a);
+    defer a.free(directory);
+    const bytes = resumeBytes();
+    try remote.dir.writeFile(io, .{ .sub_path = "a", .data = &bytes });
+    var peer: ResumePeer = .{ .dir = remote.dir, .block_at = null };
+    var session: ssh_session.Session = .{};
+    const engine = try SftpEngine.init(a);
+    defer engine.deinit();
+    engine.attachSession(&session);
+    peer.bind(engine);
+    engine.remote_files.stage_download = true;
+
+    // Step the same continuation on this thread so the fault lands after a
+    // cache-to-destination write, not during source scan or after completion.
+    try engine.jobs.ensureUnusedCapacity(a, 1);
+    var spec = try OwnedSpec.clone(a, .{ .direction = .download, .sources = &.{"a"}, .remote_dir = "/remote", .local_dir = directory });
+    const job = a.create(Job) catch |err| {
+        spec.deinit(a);
+        return err;
+    };
+    job.* = .{ .id = 1, .spec = spec, .session = &session, .remote_metadata = engine.remote_metadata, .remote_files = engine.remote_files };
+    engine.jobs.appendAssumeCapacity(job);
+    defer if (!job.worker_done.load(.acquire)) {
+        job.cancel_flag.store(true, .release);
+        for (0..32) |_| {
+            if (job.worker_done.load(.acquire)) break;
+            _ = engine.advance(io, job) catch unreachable;
+        }
+    };
+
+    for (0..64) |_| {
+        if (job.runtime.phase == .transfer) break;
+        _ = try engine.advance(io, job);
+    }
+    try std.testing.expect(job.runtime.phase == .transfer and job.runtime.file.source_cache != null);
+    try std.testing.expectEqual(@as(u64, 0), job.done.load(.acquire));
+    try std.testing.expectEqual(@as(u64, bytes.len), peer.wire_bytes.load(.acquire));
+
+    _ = try engine.advance(io, job);
+    const written = job.done.load(.acquire);
+    try std.testing.expect(written > 0 and written < bytes.len);
+    try std.testing.expectEqual(@as(u64, bytes.len), peer.wire_bytes.load(.acquire));
+    const partial = job.owned_temp.?.path;
+    try std.testing.expectEqual(written, (try std.Io.Dir.cwd().statFile(io, partial, .{})).size);
+    engine.transportFailed();
+    for (0..32) |_| {
+        if (job.worker_done.load(.acquire)) break;
+        _ = try engine.advance(io, job);
+    }
+    try std.testing.expectEqual(manager.EngineState.paused, engineStateOf(job.state.load(.acquire)));
+    try std.testing.expectEqual(manager.JobCleanup.released, SftpEngine.cleanupOf(job));
+    try std.testing.expect(engine.canExportPaused(job.id));
+    const saved = job.checkpoint.?;
+    try std.testing.expect(saved.file.source_cache == null and saved.file.remote == null and saved.file.local == null);
+    try std.testing.expectEqual(written, saved.file.offset);
+    try std.testing.expectEqual(written, saved.file.target_stamp.?.size);
+    try std.testing.expectEqual(@as(u64, bytes.len), peer.wire_bytes.load(.acquire));
+    const actual = try std.Io.Dir.cwd().readFileAlloc(io, partial, a, .limited(bytes.len));
+    defer a.free(actual);
+    try std.testing.expectEqualSlices(u8, bytes[0..@intCast(written)], actual);
+    try std.testing.expectError(error.FileNotFound, local.dir.statFile(io, "a", .{}));
+}
+
 test "sftp staged download cancellation releases scratch before publishing cleanup" {
     var local = std.testing.tmpDir(.{});
     defer local.cleanup();

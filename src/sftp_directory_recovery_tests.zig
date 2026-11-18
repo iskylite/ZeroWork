@@ -110,10 +110,21 @@ const Trust = struct {
     }
 };
 
+fn printDirectoryState(stage: []const u8, file_host: *files.FileBindingHost, model: *const controller.Controller, binding: domain.ServiceHandle) void {
+    const local = model.paneStatus(.local);
+    const remote = model.paneStatus(.remote);
+    const state = file_host.state(binding);
+    const phase = if (state) |value| @tagName(value.phase) else "absent";
+    const failure = if (state) |value| if (value.failure) |code| @tagName(code) else "" else "";
+    const cleanup = if (state) |value| @tagName(value.cleanup) else "absent";
+    std.debug.print("SFTP_DIRECTORY_RECOVERY_NATIVE_DIAGNOSTIC {s}: local={s} ({s}) remote={s} ({s}) binding={s} failure={s} cleanup={s} pending={d}\n", .{ stage, @tagName(local.state), local.failure, @tagName(remote.state), remote.failure, phase, failure, cleanup, model.pending.items.len });
+}
+
 test "SFTP directory recovery actual SourceFactory libssh2 FIN new trust auth and same path rebind" {
     const port_text = std.c.getenv("ZEROWORK_DIRECTORY_RECOVERY_PORT") orelse return error.SkipZigTest;
     const fingerprint = std.mem.span(std.c.getenv("ZEROWORK_DIRECTORY_RECOVERY_FINGERPRINT") orelse return error.MissingFingerprint);
     const control = std.mem.span(std.c.getenv("ZEROWORK_DIRECTORY_RECOVERY_CONTROL") orelse return error.MissingControl);
+    const fin_ack = std.mem.span(std.c.getenv("ZEROWORK_DIRECTORY_RECOVERY_ACK") orelse return error.MissingFinAcknowledgementPath);
     const port = try std.fmt.parseInt(u16, std.mem.span(port_text), 10);
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -163,17 +174,32 @@ test "SFTP directory recovery actual SourceFactory libssh2 FIN new trust auth an
         model.deinit() catch unreachable;
     }
     const deadline = clock.monotonicNs() + 20 * std.time.ns_per_s;
-    while (file_host.state(previous.directory).?.phase != .ready) {
+    while (true) {
+        const state = file_host.state(previous.directory);
+        if (state != null and state.?.phase == .ready) break;
+        if (state == null or state.?.phase != .connecting) {
+            printDirectoryState("initial connection", &file_host, &model, previous.directory);
+            return error.InitialBindingFailed;
+        }
         _ = try file_host.safeTick();
-        if (clock.monotonicNs() > deadline) return error.NativeReadyTimeout;
+        if (clock.monotonicNs() > deadline) {
+            printDirectoryState("initial connection timeout", &file_host, &model, previous.directory);
+            return error.NativeReadyTimeout;
+        }
         pause();
     }
     try model.start();
     while (model.paneStatus(.remote).state == .loading or model.paneStatus(.local).state == .loading) {
         try tick(&file_host, &model, local);
-        if (clock.monotonicNs() > deadline) return error.InitialListTimeout;
+        if (clock.monotonicNs() > deadline) {
+            printDirectoryState("initial list timeout", &file_host, &model, previous.directory);
+            return error.InitialListTimeout;
+        }
     }
-    const initial = model.projection().?;
+    const initial = model.projection() orelse {
+        printDirectoryState("initial projection unavailable", &file_host, &model, previous.directory);
+        return error.InitialDirectoryProjectionUnavailable;
+    };
     try std.testing.expectEqualStrings("/fixture", initial.panes[1].resolved_path);
     try std.testing.expect(initial.panes[1].entries.len > 0);
     const old_request = initial.panes[1].stamp.request_id;
@@ -183,8 +209,18 @@ test "SFTP directory recovery actual SourceFactory libssh2 FIN new trust auth an
     // Peer sends genuine FIN. A real LIST exposes the transport failure; no
     // service replacement or authentication happens until the explicit API.
     var envelope: controller.View.Envelope = .{ .side = .remote, .stamp = initial.panes[1].stamp, .projection_revision = initial.revision, .selection_revision = initial.panes[1].selection_revision, .action = .refresh };
-    var unused: [1]std.c.pollfd = undefined;
-    _ = std.c.poll(&unused, 0, 100);
+    const fin_deadline = clock.monotonicNs() + 3 * std.time.ns_per_s;
+    while (true) {
+        std.Io.Dir.cwd().access(std.testing.io, fin_ack, .{}) catch |err| switch (err) {
+            error.FileNotFound => {
+                if (clock.monotonicNs() > fin_deadline) return error.FinAcknowledgementTimeout;
+                pause();
+                continue;
+            },
+            else => return err,
+        };
+        break;
+    }
     try model.handle(envelope);
     while (file_host.state(previous.directory) != null or model.pending.items.len != 0) {
         try tick(&file_host, &model, local);
@@ -196,9 +232,18 @@ test "SFTP directory recovery actual SourceFactory libssh2 FIN new trust auth an
     const recovery = try host.beginSftpDirectoryRecovery(original.handle, previous);
     try std.testing.expect(host.sftpDirectoryPreviousReleased(original.handle, recovery.key, previous, .released));
     const next_endpoint = try file_host.attachPreparing(original.handle, recovery.key, .{ .directory = recovery.bindings.directory, .file_read = recovery.bindings.file_read });
-    while (file_host.state(recovery.bindings.directory).?.phase != .ready) {
+    while (true) {
+        const state = file_host.state(recovery.bindings.directory);
+        if (state != null and state.?.phase == .ready) break;
+        if (state == null or state.?.phase != .connecting) {
+            printDirectoryState("recovery connection", &file_host, &model, recovery.bindings.directory);
+            return error.RecoveryBindingFailed;
+        }
         _ = try file_host.safeTick();
-        if (clock.monotonicNs() > deadline) return error.RecoveryReadyTimeout;
+        if (clock.monotonicNs() > deadline) {
+            printDirectoryState("recovery connection timeout", &file_host, &model, recovery.bindings.directory);
+            return error.RecoveryReadyTimeout;
+        }
         pause();
     }
     try std.testing.expect(try host.sftpDirectoryRecoveryReady(original.handle, recovery.key, recovery.bindings));
@@ -207,7 +252,10 @@ test "SFTP directory recovery actual SourceFactory libssh2 FIN new trust auth an
         try tick(&file_host, &model, local);
         if (clock.monotonicNs() > deadline) return error.RecoveryListTimeout;
     }
-    const restored = model.projection().?;
+    const restored = model.projection() orelse {
+        printDirectoryState("recovery projection unavailable", &file_host, &model, recovery.bindings.directory);
+        return error.RecoveryDirectoryProjectionUnavailable;
+    };
     try std.testing.expectEqual(controller.View.State.ready, restored.panes[1].state);
     try std.testing.expectEqualStrings("/fixture", restored.panes[1].resolved_path);
     try std.testing.expectEqualStrings(old_name, restored.panes[1].entries[0].raw_name);

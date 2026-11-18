@@ -3484,7 +3484,7 @@ const AiHost = struct {
             const failure = @import("ai/step_failure.zig");
             const description = try failure.describe(self.allocator, step.*);
             defer description.deinit(self.allocator);
-            try self.appendRetainedStep(parent, .{ .title = view.title(step.name), .tool_name = step.name, .tool_arguments = step.command, .projection = description.summary, .projection_is_status = true, .detail = description.detail, .phase = step.phase, .elapsed_ms = 0, .show_elapsed = false, .expanded = &step.expanded, .test_id = "ai.request.unsent", .on_toggle = on_toggle }, retained);
+            try self.appendRetainedStep(parent, .{ .title = view.title(step.name), .tool_name = step.name, .projection = description.summary, .projection_is_status = true, .detail = description.detail, .phase = step.phase, .elapsed_ms = 0, .show_elapsed = false, .expanded = &step.expanded, .test_id = "ai.request.unsent", .on_toggle = on_toggle }, retained);
             return true;
         }
         if (record) |result_record| {
@@ -6636,9 +6636,6 @@ const AiHost = struct {
             self.request_tools = try @import("ai/plugin_tools.zig").providerDefinitions(self.tool_bridge.requestTable().?, self.request_config.?.arena.allocator());
             self.request_tools_len = self.request_tools.len;
             self.request_tool_tokens = try @import("ai/local_text_request.zig").toolTokens(self.request_tools[0..self.request_tools_len]);
-            const scoped_rules = try self.buildAssistantPrompt(self.allocator, self.request_tools[0..self.request_tools_len], workspace_snapshot);
-            self.allocator.free(self.request_context.?.text);
-            self.request_context.?.text = scoped_rules;
 
             self.managerRef().tool_host = self.tool_bridge.interface();
             self.managerRef().scope = self.tool_bridge.requestTable().?.captured_scope;
@@ -6650,7 +6647,9 @@ const AiHost = struct {
             const controller = lookupLifecycleTask(self, authority.conversation_id, authority.task_id).?;
             const summary = try @import("ui/ai_host_queries.zig").requestSummary(app, self.roster, .{ .execution_policy = controller.execution_policy, .permission_mode = self.request_permission_mode, .host_contributions = self.tool_bridge.host_binding.?.contributions }, self.host_cursor_key, authority, self.allocator);
             defer self.allocator.free(summary);
-            const combined = try std.fmt.allocPrint(self.allocator, "{s}\n<host_session_facts>\n{s}\n</host_session_facts>\n", .{ self.request_context.?.text, summary });
+            const scoped_rules = try self.buildAssistantPrompt(self.allocator, self.request_tools[0..self.request_tools_len], workspace_snapshot, input.wire, summary.len +| 48);
+            defer self.allocator.free(scoped_rules);
+            const combined = try std.fmt.allocPrint(self.allocator, "{s}\n<host_session_facts>\n{s}\n</host_session_facts>\n", .{ scoped_rules, summary });
             self.allocator.free(self.request_context.?.text);
             self.request_context.?.text = combined;
             self.request_context.?.tokens = @import("ai/card.zig").estimateTokens(combined.len);
@@ -8274,7 +8273,7 @@ const AiHost = struct {
                 var table = try @import("ai/plugin_tools.zig").cloneTable(next.requestTable().?, value.allocator);
                 errdefer table.deinit();
                 staged.tool_tokens = try @import("ai/local_text_request.zig").toolTokens(next.wire);
-                const system = try backend.buildAssistantPrompt(value.allocator, next.wire, if (workspace_enabled) workspace else null);
+                const system = try backend.buildAssistantPrompt(value.allocator, next.wire, if (workspace_enabled) workspace else null, backend.request_text orelse "", 0);
                 errdefer value.allocator.free(system);
                 const handoff_buffer = try value.allocator.alloc(PendingHostNotice, self.execution().pending_host_notices.items.len);
                 defer value.allocator.free(handoff_buffer);
@@ -8927,7 +8926,7 @@ const AiHost = struct {
         return if (self.request_swarm_mode == .swarm) .prefer_reuse else self.request_config.?.value.ai.child_reuse_policy;
     }
 
-    fn buildAssistantPrompt(self: *AiHost, allocator: std.mem.Allocator, tools: []const ai_provider.ToolDefinition, workspace: ?@import("host/local_workspace.zig").Snapshot) ![]u8 {
+    fn buildAssistantPrompt(self: *AiHost, allocator: std.mem.Allocator, tools: []const ai_provider.ToolDefinition, workspace: ?@import("host/local_workspace.zig").Snapshot, draft: []const u8, additional_bytes: usize) ![]u8 {
         const prompt = @import("ai/session_prompt.zig");
         var skills: std.ArrayList(@import("config/ai_extensions.zig").Skill) = .empty;
         defer skills.deinit(allocator);
@@ -8945,11 +8944,14 @@ const AiHost = struct {
             .swarm => swarm_prompts.coordinator_prompt,
             .boost => swarm_prompts.deep_lead_prompt,
         } else "";
-        const base = try prompt.buildWithSkills(allocator, self.request_execution_policy.execution_mode, tools, .{
+        const budget = @import("ai/local_text_request.zig");
+        const history = if (self.attached_runner) |runner| if (runner.record) |record| record.history.messages else &.{} else &.{};
+        const reserved_input = budget.draftTokens(draft) +| budget.textTokens(additional_bytes +| orchestration.len) +| (try budget.messageTextTokens(history));
+        const base = try prompt.buildWithSkillWindow(allocator, self.request_execution_policy.execution_mode, tools, .{
             .context_mode = ai.child_context_mode,
             .reuse_policy = self.requestChildReuse(),
             .batch_fallback = ai.interactive_batch_fallback,
-        }, workspace, skills.items);
+        }, workspace, skills.items, if (self.native_binding) |binding| binding.config.context_window else null, reserved_input);
         if (orchestration.len == 0) return base;
         defer allocator.free(base);
         return std.mem.concat(allocator, u8, &.{ base, "\n\n", orchestration });
@@ -8984,7 +8986,7 @@ const AiHost = struct {
             };
         } else {
             for (frozen.frozen.skills) |selected| if (selected.enabled and std.mem.eql(u8, key, selected.id)) {
-                for (live.value.ai.extensions.skills) |current| if (current.enabled and std.mem.eql(u8, current.id, key)) return true;
+                for (live.value.ai.extensions.skills) |current| if (current.enabled and std.mem.eql(u8, current.id, key)) return std.mem.eql(u8, selected.revision, current.revision);
             };
         }
         return false;

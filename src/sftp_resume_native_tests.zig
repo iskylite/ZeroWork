@@ -141,6 +141,9 @@ fn runResume(mode: Mode) !void {
         engine.deinit();
     }
     engine.attachSession(&session);
+    // Keep the peer's gated READ in the destination-writing pass. Staged
+    // downloads finish reading the peer before writing destination bytes.
+    engine.remote_files.stage_download = false;
     const first = try engine.open(.{ .session_id = 603, .direction = .download, .sources = &.{name}, .remote_dir = "/", .local_dir = directory });
     try fixture.wait(name, "read-entered");
     try engine.pause(first);
