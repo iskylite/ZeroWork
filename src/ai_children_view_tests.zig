@@ -206,4 +206,10 @@ test "v0.7 graph ring keeps the deterministic ≤16 member cap" {
         members += 1;
     };
     try std.testing.expectEqual(@as(usize, 16), members);
+    entries[0].name = "重新投影的成员任务";
+    try view.updateGraph(&entries, &.{});
+    const updated = find(view.graph_canvas.?, "ai.children.graph.member").?;
+    try std.testing.expectEqualStrings("#1 重新投影的成员任务，运行中", updated.behavior.interaction.a11y.?.label.?);
+    try view.updateGraph(&.{}, &.{});
+    try std.testing.expectEqual(@as(usize, 0), view.graph_canvas.?.children.items.len);
 }

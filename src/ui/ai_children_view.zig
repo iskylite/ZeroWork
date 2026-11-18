@@ -28,6 +28,11 @@ const GraphPick = struct {
     view: *View,
     agent: id.AgentId,
     revision: u64,
+    allocator: std.mem.Allocator,
+    accessible: []u8 = &.{},
+    fn release(self: *GraphPick) void {
+        self.allocator.free(self.accessible);
+    }
     fn choose(self: *GraphPick) void {
         self.view.graph_open.set(false);
         self.view.hooks.select(self.view.hooks.context, self.agent, self.revision);
@@ -458,13 +463,16 @@ pub const View = struct {
             const y = center_y + radius * @sin(angle);
             const tint = if (entry.awaiting_approval or entry.waiting_user) colors.warn else if (entry.running) colors.accent else if (std.mem.eql(u8, entry.status, "已完成")) colors.ok else colors.fg_2;
             const width = card_width;
-            const pick = try scope.createState(GraphPick, .{ .view = self, .agent = entry.agent, .revision = entry.revision });
-            const accessible = try std.fmt.allocPrint(scope.allocator, "#{d} {s}，{s}", .{ entry.seq, entry.name, entry.status });
-            const node = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = accessible, .base_style = S.graphNode(x, y, width, tint), .on_click = self.cx.on(GraphPick, pick, GraphPick.choose) }).mount(scope, self.cx);
+            const pick = try scope.createState(GraphPick, .{ .view = self, .agent = entry.agent, .revision = entry.revision, .allocator = scope.allocator });
+            try scope.onCleanup(GraphPick, pick, GraphPick.release);
+            pick.accessible = try std.fmt.allocPrint(scope.allocator, "#{d} {s}，{s}", .{ entry.seq, entry.name, entry.status });
+            const node = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = pick.accessible, .base_style = S.graphNode(x, y, width, tint), .on_click = self.cx.on(GraphPick, pick, GraphPick.choose) }).mount(scope, self.cx);
             node.setStyleInline(self.cx.allocator, S.graphNode(x, y, width, tint));
             node.meta.ownership.meta.test_id = "ai.children.graph.member";
             const caption = try ui.textStyled(self.cx, S.name, "");
-            try caption.setTextContent(self.cx.allocator, try std.fmt.allocPrint(scope.allocator, "#{d}  {s}", .{ entry.seq, entry.name }));
+            const caption_text = try std.fmt.allocPrint(scope.allocator, "#{d}  {s}", .{ entry.seq, entry.name });
+            defer scope.allocator.free(caption_text);
+            try caption.setTextContent(self.cx.allocator, caption_text);
             try node.appendChild(self.cx.allocator, caption);
             try canvas.appendChild(self.cx.allocator, node);
         }
