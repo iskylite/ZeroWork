@@ -15060,7 +15060,6 @@ const AppNavHost = struct {
     empty_choose_icon: ?*ui.Signal(?ui.SvgAsset) = null,
     empty_has_hosts: ?bool = null,
     host_artwork: [@import("ui/host_os_assets.zig").pixels.len]?u32 = @splat(null),
-    tab_mask_artwork: [@import("ui/host_os_assets.zig").pixels.len]?u32 = @splat(null),
     empty_logo_texture: ?u32 = null,
     ai_logo_texture: ?u32 = null,
     chrome: struct {
@@ -15374,31 +15373,21 @@ const AppNavHost = struct {
     fn syncHostArtwork(self: *AppNavHost) void {
         const workspace = self.workspace orelse return;
         for (workspace.host_rows.items) |row| self.paintHostArtwork(row.view.dot);
-        for (workspace.tab_nodes.items) |tab| self.paintTabArtwork(tab.type_icon, tab.icon_asset, workspace.tabIconState(tab.tab_id));
+        for (workspace.tab_nodes.items) |tab| self.paintTabArtwork(tab.type_icon, tab.icon_asset);
         if (self.session_menu) |menu| if (menu.isOpen()) {
             for (menu.saved_rows.items) |row| self.paintHostArtwork(row.icon);
             for (menu.more_rows.items) |row| self.paintHostArtwork(row.icon);
         };
     }
 
-    fn paintTabArtwork(self: *AppNavHost, node: *ui.Node, asset: ui.SvgAsset, state: @import("ui/session_icon.zig").TabState) void {
+    fn paintTabArtwork(self: *AppNavHost, node: *ui.Node, asset: ui.SvgAsset) void {
         const app = self.app_runtime orelse return;
         self.paintArtworkBackdrop(node, @import("ui/session_icon.zig").artworkBackdrop(asset.icon_id.?));
         const assets = @import("ui/host_os_assets.zig");
         const index = assets.index(asset.icon_id.?) orelse return;
-        const texture = if (state == .normal) &self.host_artwork[index] else &self.tab_mask_artwork[index];
-        if (texture.* == null) {
-            var mask: [72 * 72 * 4]u8 = undefined;
-            const pixels = if (state == .normal) assets.display_pixels[index] else blk: {
-                for (0..72 * 72) |i| {
-                    @memset(mask[i * 4 ..][0..3], 255);
-                    mask[i * 4 + 3] = assets.status_pixels[index][i * 4 + 3];
-                }
-                break :blk &mask;
-            };
-            texture.* = app.renderer.image_renderer.loadTexture(72, 72, pixels) catch return;
-        }
-        const tint = @import("ui/session_icon.zig").tabTint(state, asset);
+        const texture = &self.host_artwork[index];
+        if (texture.* == null) texture.* = app.renderer.image_renderer.loadTexture(72, 72, assets.display_pixels[index]) catch return;
+        const tint = @import("ui/session_icon.zig").tabTint(.normal, asset);
         if (node.getImage()) |current| if (current.texture_id == texture.*.? and ui.Color.eql(current.tint, tint)) return;
         node.setIcon(null);
         node.setImage(.{ .texture_id = texture.*.?, .tint = tint });
@@ -16138,7 +16127,6 @@ const AppNavHost = struct {
         if (self.app_runtime) |app| if (self.ai_logo_texture) |id| app.renderer.image_renderer.unloadTexture(id);
         if (self.app_runtime) |app| if (self.empty_logo_texture) |id| app.renderer.image_renderer.unloadTexture(id);
         if (self.app_runtime) |app| for (self.host_artwork) |texture| if (texture) |id| app.renderer.image_renderer.unloadTexture(id);
-        if (self.app_runtime) |app| for (self.tab_mask_artwork) |texture| if (texture) |id| app.renderer.image_renderer.unloadTexture(id);
         self.cx.removeAfterLayoutHook(self);
         if (self.ai) |ai| {
             ai.cancelRef().cancel();

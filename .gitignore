@@ -5,6 +5,7 @@ zig-cache/
 zig-out/
 .DS_Store
 .claude
+.zcode
 /data
 /exports
 /figma-review

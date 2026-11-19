@@ -1569,11 +1569,14 @@ pub const Workspace = struct {
             const background = !(self.cx.window_active and self.model.active == node.tab_id);
             if (!unread or !background or self.command_held) {
                 if (node.type_icon.style.translate_y != 0) node.type_icon.setStyle(self.allocator, .translate_y, @as(f32, 0));
+                if (node.connection_dot) |indicator| if (indicator.style.translate_y != 0) indicator.setStyle(self.allocator, .translate_y, @as(f32, 0));
                 continue;
             }
             if (tab.attention_started_ms == null) tab.attention_started_ms = self.cx.frame_time_ms;
             const elapsed = @max(0, self.cx.frame_time_ms - tab.attention_started_ms.?);
-            node.type_icon.setStyle(self.allocator, .translate_y, tab_styles.attentionOffset(elapsed));
+            const offset = tab_styles.attentionOffset(elapsed);
+            node.type_icon.setStyle(self.allocator, .translate_y, offset);
+            if (node.connection_dot) |indicator| indicator.setStyle(self.allocator, .translate_y, offset);
             // Keep presenting the same real unread fact until a read receipt
             // clears it. This clock publishes no new activity or notification.
             // Inside a burst 60fps is needed; between bursts one coarse wake-up
@@ -1780,8 +1783,8 @@ pub const Workspace = struct {
             tab_box.behavior.events.on_blur = .{ .callback = tabLeave, .context = select_ctx };
             const icon_slot = try ui.box(self.cx, tab_styles.iconSlot(), .{});
             const tab_icon_asset = if (group_id != null) ui.icons.get("panels-top-left").? else self.tabIcon(tab.?);
-            const connection_color = session_icon.tabTint(self.tabIconState(model_tab.id), tab_icon_asset);
-            const type_icon = try ui.iconTint(self.cx, tab_icon_asset, connection_color, .{ .width = .{ .px = 14 }, .height = .{ .px = 14 } });
+            const icon_color = session_icon.tabTint(.normal, tab_icon_asset);
+            const type_icon = try ui.iconTint(self.cx, tab_icon_asset, icon_color, .{ .width = .{ .px = 14 }, .height = .{ .px = 14 } });
             try icon_slot.appendChild(self.cx.allocator, type_icon);
             const connection_dot = try ui.box(self.cx, .{ .position = .absolute, .inset = .{ .left = .{ .px = 10 }, .top = .{ .px = -2 } }, .width = .{ .px = 6 }, .height = .{ .px = 6 }, .background = self.tabConnectionColor(model_tab.id), .border = .{ .width = 1, .color = app_theme.baseColors().overlay, .radius = 3 }, .hit_behavior = .pass_through }, .{});
             connection_dot.meta.ownership.meta.test_id = "tabs.connection.state";
@@ -1867,8 +1870,7 @@ pub const Workspace = struct {
         const model_tab = &self.model.tabs.items[index];
         for (self.tab_nodes.items) |node| if (node.tab_id == model_tab.id) {
             const asset = node.icon_asset;
-            const state = self.tabIconState(model_tab.id);
-            const tint = session_icon.tabTint(state, asset);
+            const tint = session_icon.tabTint(.normal, asset);
             const backdrop = session_icon.artworkBackdrop(asset.icon_id.?);
             const artwork = @import("host_os_assets.zig");
             return .{
@@ -1876,8 +1878,8 @@ pub const Workspace = struct {
                 .order = index,
                 .title = model_tab.name(),
                 .icon_svg = asset.svg_data,
-                .icon_rgba = if (artwork.index(asset.icon_id.?)) |i| if (state == .normal) artwork.display_pixels[i] else artwork.status_pixels[i] else &.{},
-                .icon_original = state == .normal and artwork.index(asset.icon_id.?) != null,
+                .icon_rgba = if (artwork.index(asset.icon_id.?)) |i| artwork.display_pixels[i] else &.{},
+                .icon_original = artwork.index(asset.icon_id.?) != null,
                 .icon_bouncing = self.tabIsBouncing(model_tab.id),
                 .icon_id = asset.icon_id.?,
                 .icon_tint = (@as(u32, tint.r) << 24) | (@as(u32, tint.g) << 16) | (@as(u32, tint.b) << 8) | tint.a,
@@ -1894,8 +1896,8 @@ pub const Workspace = struct {
             const index = self.tabIndexById(node.tab_id) orelse continue;
             const tab = self.tabs.items[index];
             if (tabShowsHistory(tab) == (node.icon_asset.icon_id == session_icon.resolve(.history).icon_id)) continue;
-            const tint = session_icon.tabTint(self.tabIconState(node.tab_id), self.tabIcon(tab));
             const asset = self.tabIcon(tab);
+            const tint = session_icon.tabTint(.normal, asset);
             node.icon_asset = asset;
             node.type_icon.setImage(null);
             node.type_icon.setIcon(.{ .icon_id = asset.icon_id.?, .rep = asset.pickRep(14).?, .tint = tint });
@@ -1970,7 +1972,7 @@ pub const Workspace = struct {
                 if (!ui.Color.eql(indicator.getBackground(), color)) indicator.setBackground(color);
             }
             if (node.type_icon.getIcon()) |icon| {
-                const tint = session_icon.tabTint(self.tabIconState(node.tab_id), node.icon_asset);
+                const tint = session_icon.tabTint(.normal, node.icon_asset);
                 if (!ui.Color.eql(icon.tint, tint)) _ = node.type_icon.setTint(tint);
             }
         }
@@ -7794,7 +7796,9 @@ test "notification output keeps marker colors and keeps bouncing across rebuilds
     try std.testing.expectEqual(app_theme.current().fg_2, workspace.tab_nodes.items[0].label.getText().?.color);
     try std.testing.expectEqual(ui.Color.hex(0x67b88b), workspace.tab_nodes.items[0].node.children.items[0].getBackground());
     try std.testing.expectEqual(session_icon.tabTint(.normal, workspace.tab_nodes.items[0].icon_asset), workspace.tab_nodes.items[0].type_icon.getIcon().?.tint);
-    try std.testing.expectEqual(workspace.palette.red, workspace.tab_nodes.items[1].type_icon.getIcon().?.tint);
+    try std.testing.expectEqual(session_icon.tabTint(.normal, workspace.tab_nodes.items[1].icon_asset), workspace.tab_nodes.items[1].type_icon.getIcon().?.tint);
+    try std.testing.expectEqual(app_theme.current().ok, workspace.tab_nodes.items[0].connection_dot.?.getBackground());
+    try std.testing.expectEqual(app_theme.current().danger, workspace.tab_nodes.items[1].connection_dot.?.getBackground());
     const first_presentation = workspace.tabPresentation(.{ .session = first_owner }).?;
     const second_presentation = workspace.tabPresentation(.{ .session = second_owner }).?;
     const live_icon = workspace.tab_nodes.items[0].type_icon.getIcon().?;
@@ -7846,7 +7850,9 @@ test "notification output keeps marker colors and keeps bouncing across rebuilds
     try std.testing.expectEqual(app_theme.current().fg_2, workspace.tab_nodes.items[0].label.getText().?.color);
     try std.testing.expectEqual(ui.Color.hex(0x67b88b), workspace.tab_nodes.items[0].node.children.items[0].getBackground());
     try std.testing.expectEqual(session_icon.tabTint(.normal, workspace.tab_nodes.items[0].icon_asset), workspace.tab_nodes.items[0].type_icon.getIcon().?.tint);
-    try std.testing.expectEqual(workspace.palette.red, workspace.tab_nodes.items[1].type_icon.getIcon().?.tint);
+    try std.testing.expectEqual(session_icon.tabTint(.normal, workspace.tab_nodes.items[1].icon_asset), workspace.tab_nodes.items[1].type_icon.getIcon().?.tint);
+    try std.testing.expectEqual(app_theme.current().ok, workspace.tab_nodes.items[0].connection_dot.?.getBackground());
+    try std.testing.expectEqual(app_theme.current().danger, workspace.tab_nodes.items[1].connection_dot.?.getBackground());
     try std.testing.expect(coordinator.markRead(.{ .session = second_owner }, 3, true));
     workspace.refreshNotificationAttention();
     try std.testing.expect(!coordinator.hasDot(.{ .session = second_owner }));
@@ -7859,7 +7865,9 @@ test "notification output keeps marker colors and keeps bouncing across rebuilds
     cx.frame_time_ms = 220;
     workspace.refreshNotificationAttention();
     try std.testing.expectApproxEqAbs(@as(f32, -3), workspace.tab_nodes.items[0].type_icon.style.translate_y, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, -3), workspace.tab_nodes.items[0].connection_dot.?.style.translate_y, 0.01);
     try std.testing.expectEqual(@as(f32, 0), workspace.tab_nodes.items[1].type_icon.style.translate_y);
+    try std.testing.expectEqual(@as(f32, 0), workspace.tab_nodes.items[1].connection_dot.?.style.translate_y);
     try std.testing.expect(workspace.tabPresentation(.{ .session = first_owner }).?.icon_bouncing);
     try std.testing.expect(!workspace.tabPresentation(.{ .session = second_owner }).?.icon_bouncing);
     // One real unread fact is presented continuously. Repeat boundaries and
@@ -7869,16 +7877,19 @@ test "notification output keeps marker colors and keeps bouncing across rebuilds
     cx.frame_time_ms = 2000;
     workspace.refreshNotificationAttention();
     try std.testing.expect(workspace.tab_nodes.items[0].type_icon.style.translate_y != 0);
+    try std.testing.expectEqual(workspace.tab_nodes.items[0].type_icon.style.translate_y, workspace.tab_nodes.items[0].connection_dot.?.style.translate_y);
     try std.testing.expect(workspace.tabPresentation(.{ .session = first_owner }).?.icon_bouncing);
     try workspace.renderTabBar();
     workspace.refreshNotificationAttention();
     try std.testing.expect(workspace.tab_nodes.items[0].type_icon.style.translate_y != 0);
+    try std.testing.expectEqual(workspace.tab_nodes.items[0].type_icon.style.translate_y, workspace.tab_nodes.items[0].connection_dot.?.style.translate_y);
     try std.testing.expect(workspace.tabPresentation(.{ .session = first_owner }).?.icon_bouncing);
     try std.testing.expectEqual(started, workspace.model.tabs.items[workspace.model.indexOf(first_tab_id).?].attention_started_ms.?);
     // A real read receipt is the only thing that stops the animation.
     try std.testing.expect(coordinator.markRead(.{ .session = first_owner }, 7, true));
     workspace.refreshNotificationAttention();
     try std.testing.expectEqual(@as(f32, 0), workspace.tab_nodes.items[0].type_icon.style.translate_y);
+    try std.testing.expectEqual(@as(f32, 0), workspace.tab_nodes.items[0].connection_dot.?.style.translate_y);
     try std.testing.expect(!workspace.tabPresentation(.{ .session = first_owner }).?.icon_bouncing);
     _ = try coordinator.observeOutput(.{ .session = first_owner }, 8);
     workspace.model.active = first_tab_id;
@@ -7886,10 +7897,12 @@ test "notification output keeps marker colors and keeps bouncing across rebuilds
     try std.testing.expect(workspace.model.tabs.items[workspace.model.indexOf(first_tab_id).?].attention_started_ms == null);
     workspace.sessionTab(second).?.local_state = .starting;
     workspace.refreshTabIconTints();
-    try std.testing.expectEqual(session_icon.tabTint(.connecting, workspace.tab_nodes.items[1].icon_asset), workspace.tab_nodes.items[1].type_icon.getIcon().?.tint);
+    try std.testing.expectEqual(session_icon.tabTint(.normal, workspace.tab_nodes.items[1].icon_asset), workspace.tab_nodes.items[1].type_icon.getIcon().?.tint);
+    try std.testing.expectEqual(app_theme.current().warn, workspace.tab_nodes.items[1].connection_dot.?.getBackground());
     workspace.sessionTab(second).?.local_state = .exited;
     workspace.refreshTabIconTints();
     try std.testing.expectEqual(session_icon.tabTint(.normal, workspace.tab_nodes.items[1].icon_asset), workspace.tab_nodes.items[1].type_icon.getIcon().?.tint);
+    try std.testing.expectEqual(app_theme.current().fg_3, workspace.tab_nodes.items[1].connection_dot.?.getBackground());
 }
 
 test "unread Local tab keeps bouncing until read; rebuilds and foreground switches never re-arm old output" {
