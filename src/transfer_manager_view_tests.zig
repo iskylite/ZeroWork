@@ -719,7 +719,10 @@ test "transfer projection unchanged Manager refresh keeps task nodes focus and u
     p.show();
     h.frames();
 
-    // Management starts enabled, so the selection box is already mounted.
+    // Management starts disabled; clicking manage reveals the selection box.
+    try std.testing.expect(id(p.root, "transfer.task.select").?.style.display == .none);
+    click(h, id(p.root, "transfer.batch").?);
+    h.frames();
     click(h, id(p.root, "transfer.task.select").?);
     h.frames();
     try std.testing.expectEqual(@as(usize, 1), p.selection.items.len);
@@ -1270,13 +1273,20 @@ test "transfer projection session management stays scoped and never opens the gl
     h.frames();
     try std.testing.expect(id(p.root, "transfer.scope") == null);
     try std.testing.expect(id(p.root, "transfer.open.all") == null);
-    // Management is on by default: selection boxes are already visible.
+    // Management is off by default: selection boxes stay hidden until manage is clicked.
+    try std.testing.expect(id(p.root, "transfer.task.select").?.style.display == .none);
+    const manage_off = id(p.root, "transfer.batch").?;
+    try std.testing.expectEqualStrings("管理任务", manage_off.behavior.interaction.a11y.?.label.?);
+    try std.testing.expect(!manage_off.behavior.interaction.a11y.?.pressed);
+    try std.testing.expect(text(manage_off, "管理") == null);
+    try std.testing.expectApproxEqAbs(@as(f32, 28), manage_off.globalRect().w, 0.01);
+    click(h, manage_off);
+    h.frames();
+    try std.testing.expect(p.batch_visible);
     try std.testing.expect(id(p.root, "transfer.task.select").?.style.display != .none);
     const manage = id(p.root, "transfer.batch").?;
     try std.testing.expectEqualStrings("完成管理", manage.behavior.interaction.a11y.?.label.?);
     try std.testing.expect(manage.behavior.interaction.a11y.?.pressed);
-    try std.testing.expect(text(manage, "管理") == null);
-    try std.testing.expectApproxEqAbs(@as(f32, 28), manage.globalRect().w, 0.01);
     const before = p.root.globalRect();
     const tools = id(p.root, "transfer.batch").?.globalRect();
     const states = p.counts_row.globalRect();
@@ -1337,7 +1347,10 @@ test "transfer projection host batch hook enables and dispatches selected action
     try p.update(.{ .revision = 1, .rows = &.{ row(1, 101, .running), row(2, 101, .paused) } });
     p.show();
     h.frames();
-    // Management is already on, so rows expose their selection boxes.
+    // Management is off by default; clicking manage reveals row selection boxes.
+    try std.testing.expect(id(p.root, "transfer.task.select").?.style.display == .none);
+    click(h, id(p.root, "transfer.batch").?);
+    h.frames();
     try std.testing.expect(id(p.root, "transfer.task.select").?.style.display != .none);
     click(h, id(p.root, "transfer.task.select").?);
     h.frames();
@@ -1542,16 +1555,16 @@ test "transfer projection capacity label carries percent and speed while status 
     defer h.deinit();
     var c: Capture = .{};
     const p = try h.panel(&c, .global_popover);
-    const cases = [_]struct { phase: V.Phase, done: u64, total: ?u64, speed: u64, expected_bytes: []const u8, expected_status: []const u8 }{
-        .{ .phase = .running, .done = 74, .total = 100, .speed = 0, .expected_bytes = "74 B / 100 B · 74%", .expected_status = "传输中" },
-        .{ .phase = .failed, .done = 74, .total = 100, .speed = 0, .expected_bytes = "74 B / 100 B · 74%", .expected_status = "传输失败" },
-        .{ .phase = .paused, .done = 74, .total = 100, .speed = 0, .expected_bytes = "74 B / 100 B · 74%", .expected_status = "已暂停" },
-        .{ .phase = .succeeded, .done = 100, .total = 100, .speed = 0, .expected_bytes = "100 B / 100 B · 100%", .expected_status = "已完成" },
-        .{ .phase = .succeeded, .done = 0, .total = 0, .speed = 0, .expected_bytes = "0 B / 0 B · 100%", .expected_status = "已完成" },
-        .{ .phase = .succeeded, .done = 100, .total = null, .speed = 0, .expected_bytes = "100 B / 大小未知", .expected_status = "已完成" },
-        .{ .phase = .failed, .done = 74, .total = null, .speed = 0, .expected_bytes = "74 B / 大小未知", .expected_status = "传输失败" },
-        .{ .phase = .running, .done = 120, .total = 100, .speed = 0, .expected_bytes = "120 B / 100 B · 100%", .expected_status = "传输中" },
-        .{ .phase = .running, .done = 50, .total = 100, .speed = 2048, .expected_bytes = "50 B / 100 B · 2.0 KiB/s · 50%", .expected_status = "传输中" },
+    const cases = [_]struct { phase: V.Phase, done: u64, total: ?u64, speed: u64, expected_bytes: []const u8, expected_speed: []const u8, expected_percent: []const u8, expected_status: []const u8 }{
+        .{ .phase = .running, .done = 74, .total = 100, .speed = 0, .expected_bytes = "74 B / 100 B", .expected_speed = "", .expected_percent = "74%", .expected_status = "传输中" },
+        .{ .phase = .failed, .done = 74, .total = 100, .speed = 0, .expected_bytes = "74 B / 100 B", .expected_speed = "", .expected_percent = "74%", .expected_status = "传输失败" },
+        .{ .phase = .paused, .done = 74, .total = 100, .speed = 0, .expected_bytes = "74 B / 100 B", .expected_speed = "", .expected_percent = "74%", .expected_status = "已暂停" },
+        .{ .phase = .succeeded, .done = 100, .total = 100, .speed = 0, .expected_bytes = "100 B / 100 B", .expected_speed = "", .expected_percent = "100%", .expected_status = "已完成" },
+        .{ .phase = .succeeded, .done = 0, .total = 0, .speed = 0, .expected_bytes = "0 B / 0 B", .expected_speed = "", .expected_percent = "100%", .expected_status = "已完成" },
+        .{ .phase = .succeeded, .done = 100, .total = null, .speed = 0, .expected_bytes = "100 B / 大小未知", .expected_speed = "", .expected_percent = "", .expected_status = "已完成" },
+        .{ .phase = .failed, .done = 74, .total = null, .speed = 0, .expected_bytes = "74 B / 大小未知", .expected_speed = "", .expected_percent = "", .expected_status = "传输失败" },
+        .{ .phase = .running, .done = 120, .total = 100, .speed = 0, .expected_bytes = "120 B / 100 B", .expected_speed = "", .expected_percent = "100%", .expected_status = "传输中" },
+        .{ .phase = .running, .done = 50, .total = 100, .speed = 2048, .expected_bytes = "50 B / 100 B", .expected_speed = "2.0 KiB/s", .expected_percent = "50%", .expected_status = "传输中" },
     };
     for (cases, 0..) |case, i| {
         var task = row(1, 101, case.phase);
@@ -1561,7 +1574,15 @@ test "transfer projection capacity label carries percent and speed while status 
         try p.update(.{ .revision = i + 1, .rows = &.{task} });
         p.show();
         h.frames();
-        try std.testing.expectEqualStrings(case.expected_bytes, id(p.root, "transfer.task.bytes").?.getText().?.content);
+        const bytes_node = id(p.root, "transfer.task.bytes").?;
+        const speed_node = id(p.root, "transfer.task.speed").?;
+        const percent_node = id(p.root, "transfer.task.percent").?;
+        try std.testing.expect(bytes_node.getText().?.use_monospace_font);
+        try std.testing.expect(speed_node.getText().?.use_monospace_font);
+        try std.testing.expect(percent_node.getText().?.use_monospace_font);
+        try std.testing.expectEqualStrings(case.expected_bytes, bytes_node.getText().?.content);
+        try std.testing.expectEqualStrings(case.expected_speed, speed_node.getText().?.content);
+        try std.testing.expectEqualStrings(case.expected_percent, percent_node.getText().?.content);
         try std.testing.expectEqualStrings(case.expected_status, id(p.root, "transfer.task.status").?.getText().?.content);
     }
 }
@@ -1595,7 +1616,7 @@ test "transfer projection narrow SFTP card keeps all controls within 266px after
     try p.update(.{ .revision = 1, .rows = &.{task} });
     p.show();
     h.frames();
-    try std.testing.expect(id(p.root, "transfer.task.rate").?.style.display != .none);
+    try std.testing.expect(id(p.root, "transfer.task.rate").?.style.display == .none);
     h.cx.setViewport(266, 400);
     h.frames();
     const card = id(p.root, "transfer.task").?.globalRect();
@@ -1618,7 +1639,7 @@ test "transfer projection narrow SFTP card keeps all controls within 266px after
     try std.testing.expect(id(p.root, "transfer.task.detail") == null);
     h.cx.setViewport(620, 400);
     h.frames();
-    try std.testing.expect(id(p.root, "transfer.task.rate").?.style.display != .none);
+    try std.testing.expect(id(p.root, "transfer.task.rate").?.style.display == .none);
 }
 
 test "transfer projection completed uploads keep direct copy and events across all presentations" {
@@ -1639,9 +1660,9 @@ test "transfer projection completed uploads keep direct copy and events across a
         try std.testing.expect(id(panel.root, "transfer.task.progress") != null);
         try std.testing.expect(id(panel.root, "transfer.task.expand") == null);
         try std.testing.expect(id(panel.root, "transfer.task.more") == null);
-        // Management is on by default, but the batch action row stays hidden
-        // until a task is actually selected.
-        try std.testing.expect(panel.batch_visible);
+        // Management is off by default, and the batch action row stays hidden
+        // until management is entered and a task is selected.
+        try std.testing.expect(!panel.batch_visible);
         try std.testing.expect(panel.batch_row.style.display == .none);
         // A finished row can clear its receipt from the list.
         try std.testing.expect(id(panel.root, "transfer.task.dismiss") != null);
@@ -1663,13 +1684,22 @@ test "transfer projection status and detail retain equal right edges across mixe
         try panel.update(.{ .revision = i + 1, .rows = &.{task} });
         h.frames();
         var edges: [2]f32 = undefined;
-        for ([_][]const u8{ "transfer.task.status", "transfer.task.rate" }, [_]f32{ 76, 112 }, 0..) |test_id, width, col| {
-            const node = id(panel.root, test_id).?;
-            const rect = node.globalRect();
-            try std.testing.expectEqual(@as(@TypeOf(id(panel.root, "transfer.task.status").?.getText().?.text_align), .end), node.getText().?.text_align);
-            if (col == 1) try std.testing.expectApproxEqAbs(width, rect.w, 0.01);
-            edges[col] = rect.x + rect.w;
-            if (expected) |before| try std.testing.expectApproxEqAbs(before[col], edges[col], 0.01);
+        const status_node = id(panel.root, "transfer.task.status").?;
+        const status_rect = status_node.globalRect();
+        try std.testing.expectEqual(@as(@TypeOf(status_node.getText().?.text_align), .end), status_node.getText().?.text_align);
+        edges[0] = status_rect.x + status_rect.w;
+        const rate_node = id(panel.root, "transfer.task.rate").?;
+        if (rate_node.style.display != .none) {
+            const rate_rect = rate_node.globalRect();
+            try std.testing.expectEqual(@as(@TypeOf(rate_node.getText().?.text_align), .end), rate_node.getText().?.text_align);
+            try std.testing.expect(rate_rect.w <= 112.01);
+            edges[1] = rate_rect.x + rate_rect.w;
+        } else {
+            edges[1] = id(panel.root, "transfer.task.actions").?.globalRect().x - 6;
+        }
+        if (expected) |before| {
+            try std.testing.expectApproxEqAbs(before[0], edges[0], 0.01);
+            if (rate_node.style.display != .none) try std.testing.expectApproxEqAbs(before[1], edges[1], 0.01);
         }
         expected = edges;
     }
@@ -1882,8 +1912,8 @@ test "transfer projection speed switches units below one MiB" {
         h.frames();
         const rate = id(p.root, "transfer.task.rate").?;
         try std.testing.expectEqualStrings("", rate.getText().?.content);
-        const bytes = id(p.root, "transfer.task.bytes").?.getText().?.content;
-        try std.testing.expect(std.mem.indexOf(u8, bytes, case.expected) != null);
+        const speed = id(p.root, "transfer.task.speed").?.getText().?.content;
+        try std.testing.expectEqualStrings(case.expected, speed);
         try std.testing.expect(p.foot.style.display == .none);
     }
 }
@@ -1972,22 +2002,35 @@ test "transfer projection numeric progress retains row controls scopes and toolt
     const p = try h.panel(&capture, .window);
     var rows = [_]V.Task{ row(1, 101, .running), row(2, 101, .running) };
     rows[1].total_bytes = 1000;
+    rows[1].speed_bps = 20;
     try p.update(.{ .revision = 1, .rows = &rows });
     p.show();
     h.frames();
     const task_id = id(p.root, "transfer.task").?.id;
     const menu_id = id(p.root, "transfer.scope.select").?.id;
     const epoch = p.root.ownedTreeStructureRevision();
+    const initial_bytes_rect = id(p.root, "transfer.task.bytes").?.globalRect();
+    const initial_speed_rect = id(p.root, "transfer.task.speed").?.globalRect();
+    const initial_percent_rect = id(p.root, "transfer.task.percent").?.globalRect();
     for (2..122) |revision| {
         rows[1].done_bytes = revision;
         rows[1].speed_bps = revision * 10;
         try p.update(.{ .revision = revision, .rows = &rows });
     }
+    h.frames();
     try std.testing.expectEqual(epoch, p.root.ownedTreeStructureRevision());
     try std.testing.expectEqual(task_id, id(p.root, "transfer.task").?.id);
     try std.testing.expectEqual(menu_id, id(p.root, "transfer.scope.select").?.id);
     try std.testing.expectEqual(@as(u64, 121), p.source.?.value.rows[1].done_bytes);
-    try std.testing.expectEqualStrings("121 B / 1000 B · 1.2 KiB/s · 12%", id(p.root, "transfer.task.bytes").?.getText().?.content);
+    try std.testing.expectEqualStrings("121 B / 1000 B", id(p.root, "transfer.task.bytes").?.getText().?.content);
+    try std.testing.expectEqualStrings("1.2 KiB/s", id(p.root, "transfer.task.speed").?.getText().?.content);
+    try std.testing.expectEqualStrings("12%", id(p.root, "transfer.task.percent").?.getText().?.content);
+    try std.testing.expectApproxEqAbs(initial_bytes_rect.x, id(p.root, "transfer.task.bytes").?.globalRect().x, 0.01);
+    try std.testing.expectApproxEqAbs(initial_bytes_rect.w, id(p.root, "transfer.task.bytes").?.globalRect().w, 0.01);
+    try std.testing.expectApproxEqAbs(initial_speed_rect.x, id(p.root, "transfer.task.speed").?.globalRect().x, 0.01);
+    try std.testing.expectApproxEqAbs(initial_speed_rect.w, id(p.root, "transfer.task.speed").?.globalRect().w, 0.01);
+    try std.testing.expectApproxEqAbs(initial_percent_rect.x, id(p.root, "transfer.task.percent").?.globalRect().x, 0.01);
+    try std.testing.expectApproxEqAbs(initial_percent_rect.w, id(p.root, "transfer.task.percent").?.globalRect().w, 0.01);
     rows[1].phase = .succeeded;
     try p.update(.{ .revision = 122, .rows = &rows });
     h.frames();

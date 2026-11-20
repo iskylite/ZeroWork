@@ -447,7 +447,7 @@ pub const Panel = struct {
     owner_width_limit: f32 = 106,
     events_open: bool = false,
     event_view: ?*@import("transfer_events_view.zig").View = null,
-    batch_visible: bool = true,
+    batch_visible: bool = false,
     search_visible: bool = false,
     filter_visible: bool = false,
     dirty: bool = false,
@@ -806,7 +806,7 @@ pub const Panel = struct {
             // Keep a useful filename slot; long filenames ellipsize within it.
             const filename_width: f32 = 160;
             const available = if (self.metadata_layout_width > 0) self.metadata_layout_width else 812;
-            const reserved: f32 = 20 + 14 + 112 + 102 + 24 + (if (self.batch_visible) @as(f32, 22) else 0);
+            const reserved: f32 = 20 + 14 + 102 + 24 + (if (self.batch_visible) @as(f32, 22) else 0);
             const budget = @max(0, available - reserved);
             const filename_reserved = @min(filename_width, @max(0, budget - 48));
             self.owner_width_limit = @min(160, @max(0, budget - filename_reserved));
@@ -1018,9 +1018,11 @@ pub const Panel = struct {
         };
         const rate = try self.label(upper, description, 11, 400, true);
         rate.meta.ownership.meta.test_id = "transfer.task.rate";
-        rate.setStyleInline(cx.allocator, S.label(if (self.options.presentation == .session_tray) 76 else 112));
+        const max_rate_width: f32 = if (self.options.presentation == .session_tray) 76 else 112;
+        const rate_width: f32 = if (description.len > 0) @min(max_rate_width, @ceil(cx.text.measureTextWidth(description, 11, 400, true)) + 1) else 0;
+        rate.setStyleInline(cx.allocator, S.label(rate_width));
         if (v3HasError(task_)) rate.meta.ownership.meta.test_id = "transfer.task.error";
-        if (compact) rate.setDisplay(.none);
+        if (compact or description.len == 0) rate.setDisplay(.none);
         if (rate.getText()) |old| {
             var text_props = old;
             text_props.text_align = .end;
@@ -1056,23 +1058,21 @@ pub const Panel = struct {
         const lower = try ui.box(cx, S.row(16, 6), .{});
         lower.meta.ownership.meta.test_id = "transfer.task.meta";
         try row.appendChild(cx.allocator, lower);
-        const progress = try self.label(lower, "", 11, 400, true);
-        progress.meta.ownership.meta.test_id = "transfer.task.bytes";
-        var done_buffer: [40]u8 = undefined;
-        var total_buffer: [40]u8 = undefined;
-        var speed_buffer: [40]u8 = undefined;
-        const done_text = try byteLabel(&done_buffer, task_.done_bytes);
-        const fraction: f64 = if (task_.phase == .succeeded) 1 else if (task_.total_bytes) |total| if (total > 0) @min(@as(f64, 1), @as(f64, @floatFromInt(task_.done_bytes)) / @as(f64, @floatFromInt(total))) else 0 else 0;
-        // Byte totals first; speed and percent join on the right, joined by
-        // the middle dot so one label carries "capacity · speed · progress".
-        const speed_text = if (task_.phase == .running and task_.speed_bps > 0) formatSpeed(&speed_buffer, task_.speed_bps) else null;
-        if (task_.total_bytes) |total| {
-            const total_text = try byteLabel(&total_buffer, total);
-            if (speed_text) |speed| try self.format(progress, "{s} / {s} · {s} · {d:.0}%", .{ done_text, total_text, speed, fraction * 100 }) else try self.format(progress, "{s} / {s} · {d:.0}%", .{ done_text, total_text, fraction * 100 });
-        } else if (speed_text) |speed| {
-            try self.format(progress, "{s} / 大小未知 · {s}", .{ done_text, speed });
-        } else try self.format(progress, "{s} / 大小未知", .{done_text});
-        progress.setStyleInline(cx.allocator, .{ .width = .{ .px = if (compact) @max(@as(f32, 1), (self.tray_layout_width - 40) * 0.48) else if (self.options.presentation == .session_tray) 160 else 270 }, .min_width = 0, .flex_shrink = 1, .overflow = .hidden, .overflow_hidden = true });
+        const metrics_width: f32 = if (compact) @max(@as(f32, 1), (self.tray_layout_width - 40) * 0.48) else if (self.options.presentation == .session_tray) 160 else 276;
+        const metrics = try ui.box(cx, S.row(16, if (compact) 4 else 8), .{});
+        metrics.setStyleInline(cx.allocator, .{ .width = .{ .px = metrics_width }, .min_width = 0, .flex_shrink = 1, .overflow = .hidden, .overflow_hidden = true });
+        try lower.appendChild(cx.allocator, metrics);
+        const bytes = try self.monoMetricLabel(metrics, "transfer.task.bytes", false);
+        const speed = try self.monoMetricLabel(metrics, "transfer.task.speed", true);
+        const percent = try self.monoMetricLabel(metrics, "transfer.task.percent", true);
+        if (compact or self.options.presentation == .session_tray) {
+            bytes.setStyleInline(cx.allocator, .{ .width = .fill(), .flex = 1, .min_width = 0, .overflow = .hidden, .overflow_hidden = true });
+        } else {
+            bytes.setStyleInline(cx.allocator, .{ .width = .{ .px = 140 }, .min_width = 0, .flex_shrink = 0, .overflow = .hidden, .overflow_hidden = true });
+        }
+        speed.setStyleInline(cx.allocator, .{ .width = .{ .px = if (self.options.presentation == .session_tray) 68 else 82 }, .min_width = 0, .flex_shrink = 0, .overflow = .hidden, .overflow_hidden = true });
+        percent.setStyleInline(cx.allocator, .{ .width = .{ .px = 34 }, .min_width = 0, .flex_shrink = 0, .overflow = .hidden, .overflow_hidden = true });
+        const fraction = try self.applyMetrics(bytes, speed, percent, task_);
         const status = try self.label(lower, "", 11, 400, true);
         const status_label = if (task_.reading_source) "读取源文件" else phaseLabel(task_.phase);
         try self.format(status, "{s}", .{status_label});
@@ -1131,20 +1131,52 @@ pub const Panel = struct {
         for (root.children.items) |child| if (progressNode(child, id)) |found| return found;
         return null;
     }
-    fn patchProgress(self: *Panel, root: *ui.Node, task_: Task) !void {
+    fn monoMetricLabel(self: *Panel, parent: *ui.Node, test_id: []const u8, align_end: bool) !*ui.Node {
+        var style = S.text(11, 400, true);
+        style.use_monospace_font = true;
+        style.text_align = if (align_end) .end else .start;
+        style.text_overflow = .ellipsis;
+        style.wrap = .none;
+        const node = try ui.text(self.cx, "", style);
+        node.meta.ownership.meta.test_id = test_id;
+        try parent.appendChild(self.cx.allocator, node);
+        return node;
+    }
+    fn applyMetrics(self: *Panel, bytes_node: *ui.Node, speed_node: ?*ui.Node, percent_node: ?*ui.Node, task_: Task) !f64 {
         var speed_buffer: [40]u8 = undefined;
         var done_buffer: [40]u8 = undefined;
         var total_buffer: [40]u8 = undefined;
-        const progress = progressNode(root, "transfer.task.bytes") orelse return;
         const done = try byteLabel(&done_buffer, task_.done_bytes);
         const fraction: f64 = if (task_.phase == .succeeded) 1 else if (task_.total_bytes) |total| if (total > 0) @min(@as(f64, 1), @as(f64, @floatFromInt(task_.done_bytes)) / @as(f64, @floatFromInt(total))) else 0 else 0;
         const speed_text = if (task_.phase == .running and task_.speed_bps > 0) formatSpeed(&speed_buffer, task_.speed_bps) else null;
         if (task_.total_bytes) |total| {
             const total_text = try byteLabel(&total_buffer, total);
-            if (speed_text) |speed| try self.format(progress, "{s} / {s} · {s} · {d:.0}%", .{ done, total_text, speed, fraction * 100 }) else try self.format(progress, "{s} / {s} · {d:.0}%", .{ done, total_text, fraction * 100 });
-        } else if (speed_text) |speed| {
-            try self.format(progress, "{s} / 大小未知 · {s}", .{ done, speed });
-        } else try self.format(progress, "{s} / 大小未知", .{done});
+            try self.format(bytes_node, "{s} / {s}", .{ done, total_text });
+            if (percent_node) |node| {
+                try self.format(node, "{d:.0}%", .{fraction * 100});
+                node.setDisplay(.flex);
+            }
+        } else {
+            try self.format(bytes_node, "{s} / 大小未知", .{done});
+            if (percent_node) |node| {
+                try node.setTextContent(self.cx.allocator, "");
+                node.setDisplay(.none);
+            }
+        }
+        if (speed_node) |node| {
+            if (speed_text) |speed| {
+                try self.format(node, "{s}", .{speed});
+                node.setDisplay(.flex);
+            } else {
+                try node.setTextContent(self.cx.allocator, "");
+                node.setDisplay(.none);
+            }
+        }
+        return fraction;
+    }
+    fn patchProgress(self: *Panel, root: *ui.Node, task_: Task) !void {
+        const bytes_node = progressNode(root, "transfer.task.bytes") orelse return;
+        const fraction = try self.applyMetrics(bytes_node, progressNode(root, "transfer.task.speed"), progressNode(root, "transfer.task.percent"), task_);
         if (progressNode(root, "transfer.task.status")) |status| {
             const label_ = if (task_.reading_source) "读取源文件" else phaseLabel(task_.phase);
             try self.format(status, "{s}", .{label_});
