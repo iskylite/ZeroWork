@@ -9,6 +9,33 @@ pub fn panel(_: *const ui.ThemeTokens) ui.BoxStyle {
 pub fn gripRow(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 14 }, .flex_shrink = 0, .align_items = .center, .justify = .center };
 }
+const new_message_height: f32 = 24;
+pub fn newMessageOverlay(_: *const ui.ThemeTokens) ui.BoxStyle {
+    return .{
+        .position = .absolute,
+        .inset = .{ .left = .{ .px = 0 }, .right = .{ .px = 0 }, .bottom = .{ .px = 8 } },
+        .width = .fill(),
+        .height = .{ .px = new_message_height },
+        .direction = .row,
+        .justify = .center,
+        .hit_roles = .{ .pointer = false, .scroll = false },
+        .z_index = 2,
+    };
+}
+pub fn newMessageButton() ButtonStyle {
+    const colors = theme.current();
+    return .{
+        .width = .{ .px = 80 },
+        .height = .{ .px = new_message_height },
+        .padding = .{},
+        .gap = 5,
+        .corner_radius = new_message_height / 2,
+        .font_size = 12,
+        .font_weight = 560,
+        .text_color = colors.fg_1,
+        .background = colors.overlay.withAlpha(255),
+    };
+}
 pub fn grip(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .{ .px = 36 }, .height = .{ .px = 4 }, .background = theme.current().fg_3, .border = .{ .radius = 2 } };
 }

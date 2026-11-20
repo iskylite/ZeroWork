@@ -3201,13 +3201,20 @@ pub const Workspace = struct {
             const index = self.workspace.tabIndex(self.session) orelse return;
             self.workspace.focusGroupMemberContent(index);
         }
-        fn event(event_value: ui.events.Event, raw: ?*anyopaque) ui.events.EventResult {
+        fn paneEvent(event_value: ui.events.Event, raw: ?*anyopaque) ui.events.EventResult {
             const self: *@This() = @ptrCast(@alignCast(raw orelse return .ignored));
             switch (event_value) {
                 .mouse_down => {
                     const index = self.workspace.tabIndex(self.session) orelse return .ignored;
                     self.workspace.selectGroupMember(self.group, index);
                 },
+                else => {},
+            }
+            return .ignored;
+        }
+        fn dialogEvent(event_value: ui.events.Event, raw: ?*anyopaque) ui.events.EventResult {
+            const self: *@This() = @ptrCast(@alignCast(raw orelse return .ignored));
+            switch (event_value) {
                 .key_down => |key| if (key.key == .escape) {
                     self.cancel();
                     return .stop;
@@ -3262,7 +3269,8 @@ pub const Workspace = struct {
         // A live group's status/layout refresh must not take input from an
         // outside editor. An explicit tab activation still hands input to the
         // member: its prior group root is hidden, or focus is on the tab strip.
-        const preserve_outside_focus = if (self.cx.focus_manager.getFocused()) |focused|
+        const focused_before_rebuild = self.cx.focus_manager.getFocused();
+        const preserve_outside_focus = if (focused_before_rebuild) |focused|
             if (view.root) |old_root|
                 old_root.isDisplayedInTree() and !focused.isDescendantOf(old_root) and
                     !focused.isDescendantOf(self.tab_bar)
@@ -3270,6 +3278,12 @@ pub const Workspace = struct {
                 false
         else
             false;
+        const preserved_member_focus: ?*ui.Node = if (!preserve_outside_focus) blk: {
+            const focused = focused_before_rebuild orelse break :blk null;
+            const member_id = view.focused orelse break :blk null;
+            const member_tab = self.sessionTab(member_id) orelse break :blk null;
+            break :blk if (focused.isDescendantOf(member_tab.root)) focused else null;
+        } else null;
         errdefer self.syncPluginPresentation();
         self.restoreGroupRoots();
         view.resizing = false;
@@ -3314,7 +3328,7 @@ pub const Workspace = struct {
             pane.meta.ownership.meta.test_id = try std.fmt.bufPrint(&cell.test_id, "groups.pane.{d}", .{tab.id});
             try view.panes.append(self.allocator, .{ .session = tab.id, .node = pane });
             pane.behavior.events.capture_context = cell;
-            pane.behavior.events.on_event_capture = GroupCell.event;
+            pane.behavior.events.on_event_capture = GroupCell.paneEvent;
             const header = try ui.box(self.cx, group_styles.header(), .{});
             // A header selects its member but is not an editor. Let the
             // pointer's default focus transfer settle on that member's content
@@ -3460,7 +3474,13 @@ pub const Workspace = struct {
             if (!(preserve_outside_focus and self.cx.focus_manager.getFocused() != null) and
                 self.confirming_id == null and (view.dialog_open == null or !view.dialog_open.?.peek()))
             {
-                self.cx.setFocus(if (self.tabs.items[index].terminal) |terminal| terminal.root else self.tabs.items[index].root);
+                const tab = self.tabs.items[index];
+                const default_target = if (tab.terminal) |terminal| terminal.root else tab.root;
+                const target = if (preserved_member_focus) |node|
+                    if (node.isDisplayedInTree() and node.isDescendantOf(tab.root)) node else default_target
+                else
+                    default_target;
+                self.cx.setFocus(target);
             }
         };
         if (view.persist_pending and view.saved_layout == null) {
@@ -3743,7 +3763,7 @@ pub const Workspace = struct {
         _ = try scoped_modal.bind(self.cx, scope, modal, .{ .owner = .{ .resolve = .{ .context = cell, .get = groupCloseOverlayOwner } } });
         cell.close_dialog_open = open;
         modal.dialog.behavior.events.capture_context = cell;
-        modal.dialog.behavior.events.on_event_capture = GroupCell.event;
+        modal.dialog.behavior.events.on_event_capture = GroupCell.dialogEvent;
         const plan = if (view.close) |*p| p else return;
         const roster = self.group_roster orelse return;
         const group = roster.findById(view.id) orelse return;
@@ -8299,6 +8319,13 @@ test "group close cancel has no resource effects and membership change needs new
     defer workspace.model.deinit();
     defer workspace.tabs.deinit(allocator);
     defer workspace.group_views.deinit(allocator);
+    defer {
+        for (workspace.click_ctxs.items) |item| allocator.destroy(item);
+        workspace.click_ctxs.deinit(allocator);
+        workspace.tab_nodes.deinit(allocator);
+        workspace.strip_widths.deinit(allocator);
+        workspace.strip_advances.deinit(allocator);
+    }
     try workspace.tabs.appendSlice(allocator, &.{ &first, &second });
     const view = try allocator.create(group_view.View);
     var view_retired = false;
@@ -9223,4 +9250,97 @@ test "review repair workspace saved-host entrypoints retain current fields and r
     try std.testing.expectEqual(workspace.registry.source_hash, disk.source_hash);
     try std.testing.expectEqualStrings("after.test", disk.hosts[0].host);
     try std.testing.expectEqualStrings("imported edited", disk.hosts[1].name);
+}
+
+test "group pane forwards escape to focused content and preserves member subfocus across rebuilds" {
+    const allocator = std.testing.allocator;
+    const cx = try ui.Cx.init(allocator, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(1100, 720);
+    const scope = try ui.Scope.init(allocator, null, cx.owner);
+    defer scope.dispose();
+    const area = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
+    const empty_state = try ui.box(cx, .{}, .{});
+    const dummy_bar = try ui.box(cx, .{}, .{});
+    cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
+    try cx.root.?.appendChild(allocator, area);
+    try cx.root.?.appendChild(allocator, empty_state);
+    try cx.root.?.appendChild(allocator, dummy_bar);
+    const first_root = try ui.box(cx, .{}, .{});
+    const first_sub = try ui.box(cx, .{}, .{});
+    first_sub.behavior.interaction.focusable = true;
+    var escape_count: usize = 0;
+    const Probe = struct {
+        fn onKey(key: ui.events.KeyCode, _: ui.events.Modifiers, raw: ?*anyopaque) ui.events.EventResult {
+            const count: *usize = @ptrCast(@alignCast(raw orelse return .ignored));
+            if (key == .escape) {
+                count.* += 1;
+                return .stop;
+            }
+            return .ignored;
+        }
+    };
+    first_sub.behavior.events.key_context = &escape_count;
+    first_sub.behavior.events.on_key_down = Probe.onKey;
+    try first_root.appendChild(allocator, first_sub);
+    const second_root = try ui.box(cx, .{}, .{});
+    try area.appendChild(allocator, first_root);
+    try area.appendChild(allocator, second_root);
+    const config: config_mod.Config = .{};
+    var roster = group_model.Roster.init(allocator);
+    defer roster.deinit();
+    const first_id: u64 = 0x1_0000_0021;
+    const second_id: u64 = 0x1_0000_0022;
+    const group_id = (try roster.join("vim group", first_id, 0xff818cf8)).id;
+    _ = try roster.join("vim group", second_id, 0xff818cf8);
+    var first: SessionTab = .{ .id = first_id, .tab_id = @fromBackingInt(1), .content_owner = .{ .session = .{ .session_id = @fromBackingInt(first_id) } }, .host_id = 0, .host_index = 0, .host_snapshot = null, .root = first_root, .local = true };
+    first.setTitle("vim-1");
+    var second: SessionTab = .{ .id = second_id, .tab_id = @fromBackingInt(2), .content_owner = .{ .session = .{ .session_id = @fromBackingInt(second_id) } }, .host_id = 0, .host_index = 0, .host_snapshot = null, .root = second_root, .local = true };
+    second.setTitle("vim-2");
+    var workspace: Workspace = .{ .allocator = allocator, .cx = cx, .scope = scope, .io = std.testing.io, .app_config = &config, .palette = Palette.fromTheme(), .registry = .{ .arena = std.heap.ArenaAllocator.init(allocator), .hosts = &.{} }, .hosts_path = "", .sidebar_list = dummy_bar, .tab_bar = dummy_bar, .terminal_area = area, .empty_state = empty_state, .model = .{ .allocator = allocator, .window = @fromBackingInt(1), .workspace = @fromBackingInt(1) }, .group_roster = &roster };
+    defer if (workspace.poll_hook) |hook| {
+        cx.removeAfterLayoutHook(hook);
+        allocator.destroy(hook);
+    };
+    defer workspace.registry.deinit();
+    defer workspace.model.deinit();
+    defer workspace.tabs.deinit(allocator);
+    defer workspace.group_views.deinit(allocator);
+    defer {
+        for (workspace.click_ctxs.items) |item| allocator.destroy(item);
+        workspace.click_ctxs.deinit(allocator);
+        workspace.tab_nodes.deinit(allocator);
+        workspace.strip_widths.deinit(allocator);
+        workspace.strip_advances.deinit(allocator);
+    }
+    try workspace.tabs.appendSlice(allocator, &.{ &first, &second });
+    workspace.active_tab = 0;
+
+    try workspace.openGroup(&roster, group_id);
+    const view = workspace.groupView(group_id).?;
+    defer {
+        view.deinit(allocator);
+        allocator.destroy(view);
+    }
+    try workspace.presentGroup(view);
+    cx.layout();
+    cx.setFocus(first_sub);
+    try std.testing.expectEqual(@as(?*ui.Node, first_sub), cx.focus_manager.getFocused());
+    cx.handleKeyDown(.escape, .{});
+    try std.testing.expectEqual(@as(usize, 1), escape_count);
+
+    // Rebuilding the group layout while a member sub-widget has focus preserves it.
+    try workspace.presentGroup(view);
+    try std.testing.expectEqual(@as(?*ui.Node, first_sub), cx.focus_manager.getFocused());
+
+    // Close dialog still cancels on Escape.
+    workspace.requestCloseGroup(group_id);
+    for (0..3) |_| {
+        cx.frame_count += 1;
+        cx.frame_time_ms += 16;
+        _ = cx.render();
+    }
+    try std.testing.expect(view.dialog_open.?.peek());
+    cx.handleKeyDown(.escape, .{});
+    try std.testing.expect(!view.dialog_open.?.peek());
 }

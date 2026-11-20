@@ -1423,6 +1423,14 @@ pub const Store = struct {
                 }
             }
             if (!root_found or self.find(event.conversation) == null) return error.InvalidSessionJournal;
+            // Older rows used a text-derived post_id and may share it even
+            // when they represent distinct posts. Only invocation-keyed rows
+            // carry a safe replay deduplication identity.
+            if (post.call_keyed) for (self.board_posts.items) |prior| {
+                if (!prior.post.call_keyed or !std.mem.eql(u8, &prior.post.post_id, &post.post_id)) continue;
+                if (!prior.conversation.eql(event.conversation) or !@import("swarm_board.zig").sameContent(prior.post, post) or prior.post.auto_reply != post.auto_reply) return error.InvalidSessionJournal;
+                return;
+            };
             var owned = try BoardPostOwned.init(self.allocator, event.conversation, post);
             errdefer owned.deinit();
             try self.board_posts.ensureUnusedCapacity(self.allocator, 1);

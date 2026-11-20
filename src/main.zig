@@ -759,12 +759,13 @@ const AiHost = struct {
     card_box: ?*ui.Node = null,
     conversation_viewport: ?*ui.Node = null,
     tail_follow: ?@import("ui/ai_tail_follow.zig").Follow = null,
+    new_message_overlay: ?*ui.Node = null,
     stop_button: ?*ui.Node = null,
     input_node: ?*ui.Node = null,
     input_placeholder: ?*ui.Node = null,
     request_config: ?@import("config/runtime_config.zig").Snapshot = null,
     extension_session: ?@import("ai/extension_gateway.zig").Session = null,
-    request_context: ?@import("ai/assembler.zig").Assembled = null,
+    request_context: ?@import("ai/session_prompt.zig").Prompt = null,
     request_swarm_mode: @import("ai/swarm_mode.zig").Mode = .auto,
     request_execution_policy: @import("config/config.zig").ExecutionPolicy = .{ .execution_mode = .auto, .session_retention = .auto_idle },
     request_permission_mode: @import("config/config.zig").PermissionMode = .confirm,
@@ -3075,12 +3076,12 @@ const AiHost = struct {
         parts.appendAssumeCapacity(.{ .name = "未发送草稿", .tokens = draft_tokens, .estimated = true, .kind = .draft });
         const used = sources.total() +| draft_tokens;
         const estimated = history_usage.estimated or draft_tokens > 0 or live_tokens > 0;
-        std.hash.autoHash(&hash, .{ history_usage.measured_tokens, estimated, sources, draft_tokens, history_usage.reserved_image_tokens });
+        std.hash.autoHash(&hash, .{ history_usage.measured_tokens, estimated, sources, draft_tokens, history_usage.reserved_image_tokens, fixed_usage.skill_catalog });
         const orchestration_mode = if (self.child_identity == null) controls.swarm_mode else null;
         std.hash.autoHash(&hash, orchestration_mode);
         const fingerprint = hash.final();
         if (self.composer_hash == fingerprint) return;
-        const usage: ?@import("ui/ai_composer_controls_view.zig").Usage = if (selected) |model_config| .{ .used_tokens = used, .limit_tokens = model_config.context_window, .estimated = estimated, .parts = parts.items, .measured_input = history_usage.measured_tokens, .compaction = compact_status, .can_compact = can_compact, .compaction_before = self.compaction.before_tokens, .compaction_after = self.compaction.after_tokens } else null;
+        const usage: ?@import("ui/ai_composer_controls_view.zig").Usage = if (selected) |model_config| .{ .used_tokens = used, .limit_tokens = model_config.context_window, .estimated = estimated, .parts = parts.items, .measured_input = history_usage.measured_tokens, .skill_catalog = fixed_usage.skill_catalog, .compaction = compact_status, .can_compact = can_compact, .compaction_before = self.compaction.before_tokens, .compaction_after = self.compaction.after_tokens } else null;
         const key: ?@import("ui/ai_composer_controls_view.zig").ModelKey = if (controls.model) |value| .{ .provider_id = value.provider_id, .model_id = value.model_id } else if (selected) |value| .{ .provider_id = config.ai.default_provider, .model_id = value.model } else null;
         try view.update(.{ .owner = owner, .revision = self.controlsRevision(), .workspace = workspace_ticket, .providers = config.ai.providers[0..@min(config.ai.provider_count, config.ai.providers.len)], .current = key, .model_selection_required = controls.model_selection_required, .default_model_status = self.model_discovery.defaultStatus(runtime.value.ai, runtime.modelDiscoveryRevision()), .usage = usage, .permission = if (self.child_identity != null and self.parentPermission() != .auto) .confirm else controls.permission orelse config.ai.permission_mode, .allow_auto_permission = self.child_identity == null or self.parentPermission() == .auto, .inventory_authorized = false, .inventory_conversation_id = null, .global_execution_mode = config.ai.execution_mode, .global_session_retention = config.ai.session_retention, .execution_mode_override = controls.execution_mode, .session_retention_override = controls.session_retention, .effort = controls.effort, .effort_fallback_from = controls.effort_fallback_from, .thinking = controls.thinking, .attachments = .{ .image = true, .local_text = true, .remote_file = remote_files_available }, .editable = self.child_identity == null or self.childCanWrite(), .swarm_mode = orchestration_mode });
         if (catalog_changed) view.preserveModelPopup();
@@ -3237,7 +3238,21 @@ const AiHost = struct {
     /// 对话流重建：用户气泡（右缘 acc.07 底 10/10/3/10）+ 每张卡片一个
     /// 响应块（12.5px，code 卡 mono）。卡片数据仍来自 controller.cardView。
     fn pauseConversationFollow(self: *AiHost) void {
-        if (self.tail_follow) |*follow| follow.following = false;
+        if (self.tail_follow) |*follow| follow.pause();
+    }
+
+    fn jumpToNewMessages(self: *AiHost) void {
+        if (self.tail_follow) |*follow| follow.jumpToLatest();
+        self.cx.requestRedraw();
+    }
+
+    fn refreshNewMessageOverlay(self: *AiHost, preview_open: bool) bool {
+        const overlay = self.new_message_overlay orelse return false;
+        const follow = self.tail_follow orelse return false;
+        const visible = follow.has_unread and !preview_open;
+        if ((overlay.style.display != .none) == visible) return false;
+        overlay.setDisplay(if (visible) .flex else .none);
+        return true;
     }
 
     fn presentationDisclosureChanged(self: *AiHost) void {
@@ -6598,7 +6613,7 @@ const AiHost = struct {
         self.reconnect_environment = null;
         self.lost_ssh_session = null;
         self.managerRef().tool_host = null;
-        if (self.request_context) |*old| old.deinit(self.allocator);
+        if (self.request_context) |old| self.allocator.free(old.text);
         self.request_context = null;
         const workspace_store = &self.shared_service.?.service.store;
         const workspace_enabled = self.workspaceScopeRevision(context.owner) != null;
@@ -6612,7 +6627,7 @@ const AiHost = struct {
         self.request_file_references = self.shared_service.?.referenceProjection(context.fence.conversation);
         self.workspace_notice = null;
         const rules = try @import("ai/session_prompt.zig").buildForWorkspace(self.allocator, self.request_execution_policy.execution_mode, &.{}, .{}, workspace_snapshot);
-        self.request_context = .{ .text = rules, .tokens = @import("ai/card.zig").estimateTokens(rules.len), .truncated = false };
+        self.request_context = .{ .text = rules };
         const tab = if (context.owner == .session) self.tabForSession(context.owner.session) else if (allowed.memberIds().len != 0) self.tabForSession(allowed.memberIds()[0]) else null;
         self.request_session = if (tab) |value| value.id else null;
         if (self.application_host) |app| if (self.assistantToolsAvailable(context.owner)) {
@@ -6624,6 +6639,7 @@ const AiHost = struct {
             self.tool_bridge.configureFiles(self.file_application);
             self.tool_bridge.configurePolicy(self.managerRef().permission_engine, self.request_policy_revision);
             self.tool_bridge.execution_mode = self.request_execution_policy.execution_mode;
+            self.tool_bridge.interactive_batch_fallback = self.request_config.?.value.ai.interactive_batch_fallback;
             self.tool_bridge.session_retention = self.request_execution_policy.session_retention;
             try self.tool_bridge.configureRouting(self.approvalsRef(), authority, input.text, if (context.owner == .session) tab.?.content_owner.session else null);
             if (self.lifecycle_runtime == null) self.lifecycle_runtime = .{ .journal_owner = try @import("ai/lifecycle_runtime.zig").ProcessJournal.acquire(.{ .data_root = self.data_root }), .controller = .{ .context = self, .invoke = lifecycleCall }, .approval = self.approvalsRef() };
@@ -6648,11 +6664,10 @@ const AiHost = struct {
             const summary = try @import("ui/ai_host_queries.zig").requestSummary(app, self.roster, .{ .execution_policy = controller.execution_policy, .permission_mode = self.request_permission_mode, .host_contributions = self.tool_bridge.host_binding.?.contributions, .execution_supported = self.execution_driver != null }, self.host_cursor_key, authority, self.allocator);
             defer self.allocator.free(summary);
             const scoped_rules = try self.buildAssistantPrompt(self.allocator, self.request_tools[0..self.request_tools_len], workspace_snapshot, input.wire, summary.len +| 48);
-            defer self.allocator.free(scoped_rules);
-            const combined = try std.fmt.allocPrint(self.allocator, "{s}\n<host_session_facts>\n{s}\n</host_session_facts>\n", .{ scoped_rules, summary });
+            defer self.allocator.free(scoped_rules.text);
+            const combined = try std.fmt.allocPrint(self.allocator, "{s}\n<host_session_facts>\n{s}\n</host_session_facts>\n", .{ scoped_rules.text, summary });
             self.allocator.free(self.request_context.?.text);
-            self.request_context.?.text = combined;
-            self.request_context.?.tokens = @import("ai/card.zig").estimateTokens(combined.len);
+            self.request_context = .{ .text = combined, .skill_catalog = scoped_rules.skill_catalog };
         };
         if (self.request_text) |old| self.allocator.free(old);
         self.request_text = try self.allocator.dupe(u8, input.wire);
@@ -6718,6 +6733,7 @@ const AiHost = struct {
         self.provider = self.native_binding.?.asProvider();
         var prepared_request = self.native_binding.?.config.chatRequest(.{ .model = self.model, .system = self.request_context.?.text, .messages = &.{}, .effort = self.request_effort, .thinking = self.request_thinking, .tools = self.request_tools[0..self.request_tools_len], .tool_table = self.tool_bridge.requestTable(), .tool_images = self.request_vision, .max_output = self.request_max_output });
         prepared_request.workspace_revision = self.request_workspace_revision;
+        prepared_request.skill_catalog = self.request_context.?.skill_catalog;
         self.request_usage_fixed = try @import("ai/context_usage.zig").Fixed.capture(prepared_request);
         return .{ .context = self, .destroy = finishPreparedAttached, .reasoning = &self.live_reasoning, .file_references = self.request_file_references, .skills = if (self.extension_session) |*session| .{ .session = session, .context = self, .check = checkExplicitSkill } else null, .provider = self.provider, .request = prepared_request, .scope = if (self.answer_only) self.managerRef().tool_run.?.scope else self.managerRef().scope.?, .host = self.managerRef().tool_host, .policy = self.managerRef().permission_engine, .policy_revision = self.request_policy_revision, .limits = .{ .context_window = self.native_binding.?.config.context_window }, .compaction = self.native_binding.?.config, .observer = .{ .context = self, .reset = streamReset, .delta = streamDelta, .tool_rejected = streamToolRejected, .round_start = streamRoundStart, .context_usage = streamContextUsage, .input_consumed = streamInputConsumed } };
     }
@@ -7261,7 +7277,7 @@ const AiHost = struct {
         self.step_mailbox.deinit();
         self.history_submissions.deinit(self.allocator);
         if (self.request_config) |*value| value.deinit();
-        if (self.request_context) |*value| value.deinit(self.allocator);
+        if (self.request_context) |value| self.allocator.free(value.text);
         if (self.native_binding) |value| self.allocator.destroy(value);
         if (self.native_client) |value| self.allocator.destroy(value);
         if (self.native_context) |value| self.allocator.destroy(value);
@@ -7719,6 +7735,7 @@ const AiHost = struct {
             } else try stream.appendText(index, batch.bytes);
         }
         if (same_owner) {
+            if (batch.bytes.len > 0 or batch.thinking.len > 0) if (self.tail_follow) |*follow| follow.noteOutput();
             if (self.live_timeline != null and !self.execution().answer_only) self.invalidateTimeline() else if (batch.bytes.len > 0 and batch.thinking.len == 0 and !batch.reset and self.live_card != null and !self.execution().answer_only) self.live_dirty = true else self.conversation_dirty = true;
             self.cx.requestRedraw();
         }
@@ -8274,7 +8291,7 @@ const AiHost = struct {
                 errdefer table.deinit();
                 staged.tool_tokens = try @import("ai/local_text_request.zig").toolTokens(next.wire);
                 const system = try backend.buildAssistantPrompt(value.allocator, next.wire, if (workspace_enabled) workspace else null, backend.request_text orelse "", 0);
-                errdefer value.allocator.free(system);
+                errdefer value.allocator.free(system.text);
                 const handoff_buffer = try value.allocator.alloc(PendingHostNotice, self.execution().pending_host_notices.items.len);
                 defer value.allocator.free(handoff_buffer);
                 const pending_handoffs = self.pendingInputNotices(next_context.conversation_id, handoff_buffer);
@@ -8343,7 +8360,8 @@ const AiHost = struct {
                     .table = table,
                     .notice = notice,
                     .notice_revision = notice_revision,
-                    .system = system,
+                    .system = system.text,
+                    .skill_catalog = system.skill_catalog,
                     .workspace_revision = workspace.revision,
                     .publication = .{ .context = staged, .publish = Staged.publish, .destroy = Staged.destroy },
                 };
@@ -8785,9 +8803,38 @@ const AiHost = struct {
         try ChildGatewayCall.run(&call);
         var result = call.result orelse return error.InvalidControllerReceipt;
         defer result.deinit(self.allocator);
+        const valid_receipt = if (result.validate(authority, invocation.operation_id)) |_| true else |_| false;
+        const uncertain = !valid_receipt or result.status == .outcome_unknown or result.receipt.remote_effect_unknown or !result.receipt.local_released;
+        const payload = if (valid_receipt and result.blocks.len == 1 and result.blocks[0] == .structured)
+            std.json.parseFromSlice(std.json.Value, self.allocator, result.blocks[0].structured, .{}) catch null
+        else
+            null;
+        defer if (payload) |body| body.deinit();
+        const fields = if (payload) |body| if (body.value == .object) body.value.object else null else null;
+        if (uncertain or result.status != .succeeded) {
+            const reason = if (fields) |object| object.get("error_code") else null;
+            const message = if (uncertain)
+                "派发结果待核对，请先检查子智能体，避免重复派发"
+            else if (reason != null and reason.? == .string)
+                @import("ai/step_failure.zig").explanation(reason.?.string)
+            else
+                "未能派发给子智能体，输入已保留";
+            if (self.feedback) |view| view.show(message, .warning);
+            self.cx.scheduleRedrawAfterNs(16 * std.time.ns_per_ms);
+            return true;
+        }
         self.prompt.set("");
         self.promptChanged("");
-        if (self.feedback) |view| view.show("已派发给子智能体", .completion);
+        if (self.feedback) |view| {
+            const child = if (fields) |object| object.get("task") else null;
+            const seq = if (child != null and child.? == .object) child.?.object.get("seq") else null;
+            var buffer: [96]u8 = undefined;
+            const message = if (seq != null and seq.? == .integer and seq.?.integer > 0)
+                std.fmt.bufPrint(&buffer, "已派发给子智能体 #{d}", .{seq.?.integer}) catch "已派发给子智能体"
+            else
+                "已派发给子智能体";
+            view.show(message, .completion);
+        }
         self.cx.scheduleRedrawAfterNs(16 * std.time.ns_per_ms);
         return true;
     }
@@ -8806,78 +8853,45 @@ const AiHost = struct {
         const Gate = struct {
             host: *AiHost,
             invocation: @import("ai/host_tools.zig").Invocation,
-            parsed: board.Parsed,
             fn run(context: *anyopaque) !void {
                 const gate: *@This() = @ptrCast(@alignCast(context));
                 try gate.host.validateHostContext(gate.invocation.context);
                 const origin = gate.invocation.context.child_origin orelse return error.ChildCannotPost;
                 const parent = gate.host.child_parent orelse return error.ScopeChanged;
                 const root = parent.attached_runner.?.task_root orelse return error.ScopeChanged;
-                root.lock();
-                defer root.mutex.unlock();
-                for (root.facts[0..root.count]) |fact| {
-                    if (fact.parent != null and fact.agent.eql(origin.agent)) return;
-                }
-                return error.ScopeChanged;
+                const fact = try root.factForTask(gate.invocation.context.task_id);
+                if (fact.parent == null or !fact.agent.eql(origin.agent)) return error.ScopeChanged;
             }
         };
-        var gate: Gate = .{ .host = self, .invocation = invocation, .parsed = parsed };
+        var gate: Gate = .{ .host = self, .invocation = invocation };
         bridge.callController(&gate, Gate.run, null) catch |err| return rejectedHostInvocation(invocation, allocator, err);
-        // Persist into the parent root's board; ask debounce auto-reply when
-        // this member's consecutive asks hit 4.
         const origin = invocation.context.child_origin orelse return error.ChildCannotPost;
         const parent = self.child_parent orelse return error.ScopeChanged;
         const root = parent.attached_runner.?.task_root orelse return error.ScopeChanged;
-        // The posting member's fact carries the author seq and scopes @seq
-        // resolution to the same parent task (V0.7 §2.1).
-        const origin_fact: @import("ai/task_budget.zig").Fact = blk: {
-            root.lock();
-            defer root.mutex.unlock();
-            for (root.facts[0..root.count]) |fact| {
-                if (fact.parent != null and fact.agent.eql(origin.agent)) break :blk fact;
-            }
-            return error.ScopeChanged;
+        const origin_fact = try root.factForTask(invocation.context.task_id);
+        if (origin_fact.parent == null or !origin_fact.agent.eql(origin.agent)) return error.ScopeChanged;
+        const target = switch (parsed.to) {
+            .member => |seq| root.factForSeq(origin_fact.parent.?, seq) catch |err| return rejectedHostInvocation(invocation, allocator, err),
+            else => null,
         };
-        const seq: u32 = origin_fact.seq;
-        var post: board.Post = .{ .origin = seq, .to = parsed.to, .category = parsed.category, .text = parsed.text, .ts = @import("platform/realtime.zig").milliseconds(undefined) };
-        const digest = board.textDigest(parsed.text);
-        @memcpy(post.post_id[0..16], digest[0..16]);
-        const auto_reply: ?[]const u8 = if (parsed.category == .ask) blk: {
-            root.lock();
-            defer root.mutex.unlock();
-            // Debounce per member keyed by display seq (never recycled, §2.1).
-            // The guard only rejects a non-delegated author; a seq past the
-            // 16-active-children window still owns its counter.
-            if (seq == 0) return error.ScopeChanged;
-            const entry = try root.board_ask_counts.getOrPut(root.allocator, seq);
-            if (!entry.found_existing) entry.value_ptr.* = 0;
-            entry.value_ptr.* += 1;
-            if (entry.value_ptr.* >= 4) break :blk "按当前最佳判断继续";
-            break :blk null;
-        } else null;
-        try root.postBoard(post);
-        // V0.7 §11.2 delivery rules (board.deliversToRoot): a parent post
-        // wakes the parent now, a member post wakes its target now, @all
-        // stays board-only. markPostDelivered prevents a duplicate delivery
-        // through turn_manager.deliverSettledReports; a failed delivery
-        // leaves the undelivered row on the board for history.
-        switch (board.deliversToRoot(post)) {
-            .parent_next_round => {
-                if (parent.wakeForBoardPost(post)) _ = root.markPostDelivered(post.post_id);
-            },
-            .member_next_round => {
-                const target: ?@import("ai/task_budget.zig").Fact = root.factForSeq(origin_fact.parent.?, parsed.to.member) catch null;
-                if (target) |member| {
-                    if (parent.wakeMemberForBoardPost(post, member.conversation)) _ = root.markPostDelivered(post.post_id);
-                }
-            },
-            .board_only => {},
-        }
-        if (parsed.category == .ask and auto_reply == null) {
-            // ask 打断父依赖等待循环（§11.2）：由父 runner 的等待轮询在
-            // needsChildren 检查后走 deliverSettledReports 时发现新帖。
-        }
-        const body = try std.json.Stringify.valueAlloc(allocator, .{ .accepted = true, .post_id = std.fmt.bytesToHex(post.post_id, .lower), .note = auto_reply }, .{});
+        var post: board.Post = .{
+            .origin = origin_fact.seq,
+            .to = parsed.to,
+            .category = parsed.category,
+            .text = parsed.text,
+            .ts = @import("platform/realtime.zig").milliseconds(undefined),
+        };
+        const posted = root.submitBoard(post, origin_fact.task, invocation.turn_id, invocation.call_id) catch |err| {
+            if (err == error.BoardCallConflict or err == error.ScopeChanged) return rejectedHostInvocation(invocation, allocator, err);
+            return err;
+        };
+        post.post_id = posted.post_id;
+        if (!posted.duplicate) switch (post.to) {
+            .parent => _ = root.finishBoardDelivery(post.post_id, parent.wakeForBoardPost(post)),
+            .member => _ = root.finishBoardDelivery(post.post_id, parent.wakeMemberForBoardPost(post, target.?.conversation)),
+            .all => {},
+        };
+        const body = try std.json.Stringify.valueAlloc(allocator, .{ .accepted = true, .post_id = std.fmt.bytesToHex(post.post_id, .lower), .note = posted.auto_reply }, .{});
         errdefer allocator.free(body);
         const blocks = try allocator.alloc(@import("ai/host_tools.zig").Block, 1);
         blocks[0] = .{ .structured = body };
@@ -8939,7 +8953,7 @@ const AiHost = struct {
         return if (self.request_swarm_mode == .swarm) .prefer_reuse else self.request_config.?.value.ai.child_reuse_policy;
     }
 
-    fn buildAssistantPrompt(self: *AiHost, allocator: std.mem.Allocator, tools: []const ai_provider.ToolDefinition, workspace: ?@import("host/local_workspace.zig").Snapshot, draft: []const u8, additional_bytes: usize) ![]u8 {
+    fn buildAssistantPrompt(self: *AiHost, allocator: std.mem.Allocator, tools: []const ai_provider.ToolDefinition, workspace: ?@import("host/local_workspace.zig").Snapshot, draft: []const u8, additional_bytes: usize) !@import("ai/session_prompt.zig").Prompt {
         const prompt = @import("ai/session_prompt.zig");
         var skills: std.ArrayList(@import("config/ai_extensions.zig").Skill) = .empty;
         defer skills.deinit(allocator);
@@ -8960,14 +8974,16 @@ const AiHost = struct {
         const budget = @import("ai/local_text_request.zig");
         const history = if (self.attached_runner) |runner| if (runner.record) |record| record.history.messages else &.{} else &.{};
         const reserved_input = budget.draftTokens(draft) +| budget.textTokens(additional_bytes +| orchestration.len) +| (try budget.messageTextTokens(history));
-        const base = try prompt.buildWithSkillWindow(allocator, self.request_execution_policy.execution_mode, tools, .{
+        var base = try prompt.buildWithSkillWindow(allocator, self.request_execution_policy.execution_mode, tools, .{
             .context_mode = ai.child_context_mode,
             .reuse_policy = self.requestChildReuse(),
             .batch_fallback = ai.interactive_batch_fallback,
         }, workspace, skills.items, if (self.native_binding) |binding| binding.config.context_window else null, reserved_input);
         if (orchestration.len == 0) return base;
-        defer allocator.free(base);
-        return std.mem.concat(allocator, u8, &.{ base, "\n\n", orchestration });
+        const original = base.text;
+        defer allocator.free(original);
+        base.text = try std.mem.concat(allocator, u8, &.{ original, "\n\n", orchestration });
+        return base;
     }
 
     fn checkExplicitSkill(raw: *anyopaque, skill: @import("config/ai_extensions.zig").Skill, cancel: ?*ai_provider.CancelToken) !void {
@@ -9595,6 +9611,8 @@ const AiHost = struct {
             if (!std.mem.eql(u8, invocation.tool_id, "host.run_in_terminal")) return driver.executeAlloc(invocation, allocator, cancel);
             var prepared = @import("ui/ai_execution_backend.zig").prepare(invocation, allocator) catch |err| return rejectedHostInvocation(invocation, allocator, err);
             defer prepared.deinit();
+            const Execution = @import("ai/host_execution.zig");
+            const occupied_policy = try Execution.occupiedPolicy(prepared.invocation.arguments);
             const target_value = prepared.invocation.arguments.object.get("session_ref") orelse return error.InvalidArguments;
             if (target_value != .string) return error.InvalidArguments;
             const target = try @import("ai/host_terminal_queries.zig").resolveSession(invocation.context, target_value.string);
@@ -9623,12 +9641,25 @@ const AiHost = struct {
                 backend: *@import("ui/ai_execution_backend.zig").Context,
                 prepared: *@import("ui/ai_execution_backend.zig").Prepared,
                 evidence: @import("ui/ai_execution_backend.zig").ApprovalEvidence = .{},
+                waiting: @import("ui/ai_execution_backend.zig").OccupiedWait = .{},
+                occupied_policy: Execution.OccupiedPolicy,
+                waited: bool = false,
                 fn run(context: *anyopaque) !void {
                     const value: *@This() = @ptrCast(@alignCast(context));
+                    if (value.occupied_policy == .wait) {
+                        return runWaiting(context) catch |err| {
+                            if (err != error.TerminalBusy and !value.waited) value.waiting = .{};
+                            return err;
+                        };
+                    }
                     value.evidence = try value.backend.preflight(value.prepared.invocation, value.prepared.command, value.prepared.command_hash);
                 }
+                fn runWaiting(context: *anyopaque) !void {
+                    const value: *@This() = @ptrCast(@alignCast(context));
+                    value.evidence = try value.backend.preflightWaiting(value.prepared.invocation, value.prepared.command, value.prepared.command_hash, &value.waiting);
+                }
             };
-            var preflight: Preflight = .{ .backend = if (self.execution().execution_backend) |*backend| backend else return error.ToolNotAvailable, .prepared = &prepared };
+            var preflight: Preflight = .{ .backend = if (self.execution().execution_backend) |*backend| backend else return error.ToolNotAvailable, .prepared = &prepared, .occupied_policy = occupied_policy };
             var consume_route = false;
             defer if (consume_route) bridge.consumeHostRoute(prepared.invocation, target, prepared.command);
             var reconfirm = false;
@@ -9637,71 +9668,83 @@ const AiHost = struct {
             while (true) {
                 if (prepared.invocation.dispatch_fence) |fence| try fence.check();
                 bridge.callController(&preflight, Preflight.run, cancel) catch |err| {
-                    // V0.7 §2.2 auto-shell: recover the observed-prompt fence
-                    // inside the same tool call instead of bouncing the model
-                    // through the manual read/attach dance. One bounded
-                    // recovery per call; the original blocker is reported
-                    // unchanged when recovery does not reach prompt_ready.
-                    if (err != error.ShellPromptNotObserved or auto_shell_attempts != 0) {
-                        if (err != error.InputConflict or conflict_attempts != 0) return rejectedHostInvocation(invocation, allocator, err);
-                        // Queued/trusted input fails promptly with a read-only
-                        // retry hint. The UI scheduler must remain free to pump.
-                        // Only an exact isolated IME/paste draft is discardable.
-                        conflict_attempts += 1;
-                        const Backend = @import("ui/ai_execution_backend.zig").Context;
-                        const Probe = struct {
-                            backend: *Backend,
+                    if (err == error.TerminalBusy) {
+                        if (occupied_policy != .wait) return Execution.occupiedResult(allocator, prepared.invocation, occupied_policy, 0);
+                        if (preflight.waited) return Execution.occupiedResult(allocator, prepared.invocation, .reject, 0);
+                        preflight.waited = true;
+                        const wait_ms = 30000;
+                        bridge.emitHostStep(prepared.invocation, .running, "等待原终端就绪");
+                        bridge.waitOccupiedPreflight(&preflight, Preflight.runWaiting, prepared.invocation, cancel, wait_ms) catch |wait_err| {
+                            if (wait_err == error.TerminalWaitTimedOut) return Execution.occupiedResult(allocator, prepared.invocation, .wait, wait_ms);
+                            return rejectedHostInvocation(invocation, allocator, wait_err);
+                        };
+                    } else {
+                        // V0.7 §2.2 auto-shell: recover the observed-prompt fence
+                        // inside the same tool call instead of bouncing the model
+                        // through the manual read/attach dance. One bounded
+                        // recovery per call; the original blocker is reported
+                        // unchanged when recovery does not reach prompt_ready.
+                        if (err != error.ShellPromptNotObserved or auto_shell_attempts != 0) {
+                            if (err != error.InputConflict or conflict_attempts != 0) return rejectedHostInvocation(invocation, allocator, err);
+                            // Queued/trusted input fails promptly with a read-only
+                            // retry hint. The UI scheduler must remain free to pump.
+                            // Only an exact isolated IME/paste draft is discardable.
+                            conflict_attempts += 1;
+                            const Backend = @import("ui/ai_execution_backend.zig").Context;
+                            const Probe = struct {
+                                backend: *Backend,
+                                invocation: @import("ai/host_tools.zig").Invocation,
+                                hash: [32]u8,
+                                staged: ?Backend.StagedInput = null,
+                                fn run(context: *anyopaque) !void {
+                                    const value: *@This() = @ptrCast(@alignCast(context));
+                                    value.staged = try value.backend.stagedInput(value.invocation, value.hash);
+                                }
+                            };
+                            var probe: Probe = .{ .backend = preflight.backend, .invocation = prepared.invocation, .hash = prepared.command_hash };
+                            bridge.callController(&probe, Probe.run, cancel) catch |probe_err| return rejectedHostInvocation(invocation, allocator, probe_err);
+                            const staged = probe.staged.?;
+                            const arbiter_kind: @import("ai/host_conflict_arbiter.zig").Kind = switch (staged.decision.kind) {
+                                .ime => .ime,
+                                .paste => .paste,
+                                .backlog, .trusted_edit => unreachable,
+                            };
+                            const ticket = self.conflictsRef().begin(prepared.invocation.context, arbiter_kind) catch |begin_err| return rejectedHostInvocation(invocation, allocator, begin_err);
+                            defer self.conflictsRef().finish(ticket);
+                            bridge.emitHostStep(prepared.invocation, .approval, "终端输入被占用，等待你处理");
+                            const decision = self.conflictsRef().wait(ticket, cancel) catch |wait_err| return rejectedHostInvocation(invocation, allocator, wait_err);
+                            if (decision != .clear_and_proceed) return rejectedHostInvocation(invocation, allocator, err);
+                            const Clear = struct {
+                                backend: *Backend,
+                                invocation: @import("ai/host_tools.zig").Invocation,
+                                hash: [32]u8,
+                                staged: Backend.StagedInput,
+                                fn run(context: *anyopaque) !void {
+                                    const value: *@This() = @ptrCast(@alignCast(context));
+                                    try value.backend.clearTerminalInputStaging(value.invocation, value.hash, value.staged);
+                                }
+                            };
+                            var clear: Clear = .{ .backend = preflight.backend, .invocation = prepared.invocation, .hash = prepared.command_hash, .staged = staged };
+                            bridge.callController(&clear, Clear.run, cancel) catch |clear_err| return rejectedHostInvocation(invocation, allocator, clear_err);
+                            // Consent was to clear only the old draft, not to install
+                            // Shell hooks or to approve the business command.
+                            auto_shell_attempts = 1;
+                            continue;
+                        }
+                        auto_shell_attempts += 1;
+                        const Recovery = struct {
+                            backend: *@import("ui/ai_execution_backend.zig").Context,
                             invocation: @import("ai/host_tools.zig").Invocation,
                             hash: [32]u8,
-                            staged: ?Backend.StagedInput = null,
                             fn run(context: *anyopaque) !void {
                                 const value: *@This() = @ptrCast(@alignCast(context));
-                                value.staged = try value.backend.stagedInput(value.invocation, value.hash);
+                                try value.backend.autoRecoverShell(value.invocation, value.hash, 30000);
                             }
                         };
-                        var probe: Probe = .{ .backend = preflight.backend, .invocation = prepared.invocation, .hash = prepared.command_hash };
-                        bridge.callController(&probe, Probe.run, cancel) catch |probe_err| return rejectedHostInvocation(invocation, allocator, probe_err);
-                        const staged = probe.staged.?;
-                        const arbiter_kind: @import("ai/host_conflict_arbiter.zig").Kind = switch (staged.decision.kind) {
-                            .ime => .ime,
-                            .paste => .paste,
-                            .backlog, .trusted_edit => unreachable,
-                        };
-                        const ticket = self.conflictsRef().begin(prepared.invocation.context, arbiter_kind) catch |begin_err| return rejectedHostInvocation(invocation, allocator, begin_err);
-                        defer self.conflictsRef().finish(ticket);
-                        bridge.emitHostStep(prepared.invocation, .approval, "终端输入被占用，等待你处理");
-                        const decision = self.conflictsRef().wait(ticket, cancel) catch |wait_err| return rejectedHostInvocation(invocation, allocator, wait_err);
-                        if (decision != .clear_and_proceed) return rejectedHostInvocation(invocation, allocator, err);
-                        const Clear = struct {
-                            backend: *Backend,
-                            invocation: @import("ai/host_tools.zig").Invocation,
-                            hash: [32]u8,
-                            staged: Backend.StagedInput,
-                            fn run(context: *anyopaque) !void {
-                                const value: *@This() = @ptrCast(@alignCast(context));
-                                try value.backend.clearTerminalInputStaging(value.invocation, value.hash, value.staged);
-                            }
-                        };
-                        var clear: Clear = .{ .backend = preflight.backend, .invocation = prepared.invocation, .hash = prepared.command_hash, .staged = staged };
-                        bridge.callController(&clear, Clear.run, cancel) catch |clear_err| return rejectedHostInvocation(invocation, allocator, clear_err);
-                        // Consent was to clear only the old draft, not to install
-                        // Shell hooks or to approve the business command.
-                        auto_shell_attempts = 1;
+                        var recovery: Recovery = .{ .backend = preflight.backend, .invocation = prepared.invocation, .hash = prepared.command_hash };
+                        bridge.callController(&recovery, Recovery.run, cancel) catch |recover_err| return rejectedHostInvocation(invocation, allocator, recover_err);
                         continue;
                     }
-                    auto_shell_attempts += 1;
-                    const Recovery = struct {
-                        backend: *@import("ui/ai_execution_backend.zig").Context,
-                        invocation: @import("ai/host_tools.zig").Invocation,
-                        hash: [32]u8,
-                        fn run(context: *anyopaque) !void {
-                            const value: *@This() = @ptrCast(@alignCast(context));
-                            try value.backend.autoRecoverShell(value.invocation, value.hash, 30000);
-                        }
-                    };
-                    var recovery: Recovery = .{ .backend = preflight.backend, .invocation = prepared.invocation, .hash = prepared.command_hash };
-                    bridge.callController(&recovery, Recovery.run, cancel) catch |recover_err| return rejectedHostInvocation(invocation, allocator, recover_err);
-                    continue;
                 };
                 prepared.subject.impact = preflight.evidence.text();
                 prepared.subject.reconfirmation = reconfirm;
@@ -10431,7 +10474,10 @@ const AiHost = struct {
             if (self.workspace) |workspace| workspace.status(@errorName(err));
             break :failed false;
         };
-        if (retained_results) self.conversation_dirty = true;
+        if (retained_results) {
+            self.conversation_dirty = true;
+            if (self.requestDisplayed()) if (self.tail_follow) |*follow| follow.noteOutput();
+        }
         if (self.execution().request_attachments) |*bundle| bundle.deinit();
         self.execution().request_attachments = null;
         if (self.execution().request_images) |*bundle| bundle.deinit();
@@ -10542,7 +10588,7 @@ const AiHost = struct {
             completed_turn.output_tokens = null;
         }
         if (completed_turn.thinking.items.len > 0 and completed_turn.thinking_ended_ms == null) completed_turn.thinking_ended_ms = @intCast(@divTrunc(@import("platform/realtime.zig").monotonicNs(), std.time.ns_per_ms));
-        if (self.allocator.dupe(u8, if (state == 2) self.managerRef().round_text.items else "")) |answer| {
+        if (self.allocator.dupe(u8, if (state == 2) self.managerRef().finalAnswer() else "")) |answer| {
             self.allocator.free(completed_turn.answer);
             completed_turn.answer = answer;
         } else |_| {}
@@ -11047,9 +11093,12 @@ const AiHost = struct {
             }
             const live_updated = if (!rebuild) host.refreshLiveMarkdown() catch false else false;
             const bubbles_resized = host.resizeConversationBubbles();
+            const preview_open = (if (host.attachments_view) |view| view.isPreviewOpen() else false) or
+                (if (host.images_view) |view| view.isPreviewOpen() else false);
             if (!transcript_changed and !live_updated and !composer_resized and !bubbles_resized) if (host.tail_follow) |*follow| {
-                if ((host.attachments_view == null or !host.attachments_view.?.isPreviewOpen()) and (host.images_view == null or !host.images_view.?.isPreviewOpen())) follow.update();
+                if (!preview_open) follow.update();
             };
+            const new_message_changed = host.refreshNewMessageOverlay(preview_open);
             const child_reflow = if (host.child_identity != null and host.child_parent.?.child_dialog != null) blk: {
                 const dialog = host.child_parent.?.child_dialog.?;
                 const changed = dialog.reflow();
@@ -11057,7 +11106,7 @@ const AiHost = struct {
                 break :blk changed;
             } else false;
             if (state == 1) host.cx.scheduleRedrawAfterNs(33 * 1_000_000);
-            return if (transcript_changed or live_updated or composer_resized or bubbles_resized or feedback_expired or child_reflow) .needs_layout else .done;
+            return if (transcript_changed or live_updated or composer_resized or bubbles_resized or feedback_expired or child_reflow or new_message_changed) .needs_layout else .done;
         }
     };
 
@@ -11220,7 +11269,7 @@ const AiHost = struct {
         if (self.native_client) |client| self.allocator.destroy(client);
         if (self.native_context) |context| self.allocator.destroy(context);
         if (self.request_config) |*snapshot| snapshot.deinit();
-        if (self.request_context) |*context| context.deinit(self.allocator);
+        if (self.request_context) |context| self.allocator.free(context.text);
         if (self.ai_io) |io| {
             io.deinit();
             self.allocator.destroy(io);
@@ -11918,7 +11967,8 @@ const MenuHost = struct {
         const session_ended = self.targetSessionEnded(self.context_tab);
         const retained_terminal_available = if (self.context_tab) |index| if (self.workspace) |workspace|
             index < workspace.tabs.items.len and workspace.tabs.items[index].terminal != null and !workspace.tabs.items[index].closing
-        else false else false;
+        else
+            false else false;
         self.state.show(kind, .{
             .capability_snapshot = self.capabilitiesForTab(self.context_tab),
             .has_saved_connection = if (self.workspace) |workspace| if (self.context_tab) |index| workspace.savedConnectionForTab(index) != null else null else null,
@@ -17861,6 +17911,35 @@ const PresentationWindow = struct {
 fn mountAssistantConversation(ai_host: *AiHost, scope: *ui.Scope, ai_card_box: *ui.Node, ai_scroll: ui.widgets.ScrollAreaResult, ai_conversation: *ui.Node, ai_prompt: *ui.Signal([]const u8)) !void {
     const cx = ai_host.cx;
     const ai_styles = @import("ui/ai_assistant_styles.zig");
+    const new_message_overlay = try ui.boxStyled(cx, ai_styles.newMessageOverlay, .{});
+    new_message_overlay.setDisplay(.none);
+    const message_base = try scope.createSignal(ui.BoxStyle, ai_styles.newMessageButton());
+    const message_hover = try scope.createSignal(?ui.BoxStyle, .{ .background = app_theme.popupSelection().withAlpha(255) });
+    const message_tint = try scope.createSignal(?ui.Color, app_theme.current().accent_ink);
+    const new_message = try ui.widgets.Button(.{
+        .label = "新消息",
+        .a11y_label = "新消息，跳到最新",
+        .variant = .ghost,
+        .icon_asset = ui.icons.get("arrow-down").?,
+        .icon_size = 12,
+        .icon_tint = message_tint,
+        .base_style = message_base,
+        .hover_style = message_hover,
+        .on_click = cx.on(AiHost, ai_host, AiHost.jumpToNewMessages),
+    }).mount(scope, cx);
+    new_message.meta.ownership.meta.test_id = "ai.new_message";
+    new_message.setStyleInline(cx.allocator, .{ .shadow = .{ .offset_y = 2, .blur = 5, .color = ui.Color.rgba(0, 0, 0, 24) } });
+    try new_message_overlay.appendChild(cx.allocator, new_message);
+    try ai_scroll.container.appendChild(cx.allocator, new_message_overlay);
+    ai_host.new_message_overlay = new_message_overlay;
+    try scope.createEffect(.{ .theme = try cx.themeSignal(scope), .base = message_base, .hover = message_hover, .tint = message_tint }, struct {
+        fn run(ctx: anytype) void {
+            _ = ctx.theme.get();
+            ctx.base.set(ai_styles.newMessageButton());
+            ctx.hover.set(.{ .background = app_theme.popupSelection().withAlpha(255) });
+            ctx.tint.set(app_theme.current().accent_ink);
+        }
+    }.run);
     ai_host.approval_view = try @import("ui/ai_tool_approval_view.zig").View.mount(cx, scope, .{ .context = ai_host, .decide = AiHost.decideTool });
     try ai_scroll.content.appendChild(cx.allocator, ai_host.approval_view.?.root);
     ai_host.host_approval_view = try @import("ui/ai_host_approval_view.zig").View.mount(cx, scope, .{ .context = ai_host, .on_decision = AiHost.decideHostApproval, .on_route = AiHost.chooseHostRoute });

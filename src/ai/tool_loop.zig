@@ -129,6 +129,7 @@ pub const AuthorityRefresh = struct {
     notice: []const u8 = "",
     notice_revision: u64 = 0,
     system: ?[]const u8 = null,
+    skill_catalog: provider.SkillCatalogStatus = .{},
     workspace_revision: ?u64 = null,
     publication: ?Publication = null,
 
@@ -327,7 +328,10 @@ pub const Loop = struct {
         var candidate = self.request;
         candidate.tools = definitions;
         candidate.tool_table = &next.table;
-        if (next.system) |system| candidate.system = try a.dupe(u8, system);
+        if (next.system) |system| {
+            candidate.system = try a.dupe(u8, system);
+            candidate.skill_catalog = next.skill_catalog;
+        }
         if (next.workspace_revision) |revision| candidate.workspace_revision = revision;
         const notice: ?provider.Message = if (next.notice.len != 0) .{ .role = .user, .content = try a.dupe(u8, next.notice), .origin = .host_context_notice } else null;
         const with_notice = if (notice) |message| try self.transcriptWithTail(self.compactableMessages(), message) else null;
@@ -371,6 +375,7 @@ pub const Loop = struct {
         self.request.tools = definitions;
         self.request.tool_table = &self.tool_table.?;
         self.request.system = candidate.system;
+        self.request.skill_catalog = candidate.skill_catalog;
         self.request.workspace_revision = candidate.workspace_revision;
         if (notice != null) {
             self.notice_revision = next.notice_revision;

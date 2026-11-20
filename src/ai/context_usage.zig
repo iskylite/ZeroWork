@@ -10,6 +10,7 @@ pub const Fixed = struct {
     fingerprint: u64 = 0,
     system_tokens: usize = 0,
     tool_tokens: usize = 0,
+    skill_catalog: provider.SkillCatalogStatus = .{},
     pub fn capture(request: provider.ChatRequest) !Fixed {
         var hash = std.hash.Wyhash.init(0);
         hashText(&hash, request.system);
@@ -26,7 +27,7 @@ pub const Fixed = struct {
                 hashText(&hash, dynamic.schema);
             }
         }
-        return .{ .fingerprint = hash.final(), .system_tokens = budget.textTokens(request.system.len), .tool_tokens = try budget.toolTokens(request.tools) };
+        return .{ .fingerprint = hash.final(), .system_tokens = budget.textTokens(request.system.len), .tool_tokens = try budget.toolTokens(request.tools), .skill_catalog = request.skill_catalog };
     }
     pub fn tokens(self: Fixed) usize {
         return self.system_tokens +| self.tool_tokens;

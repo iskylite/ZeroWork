@@ -27,6 +27,9 @@ function tool(res:ServerResponse,id:string,name:string,args:unknown){
 let fixtureError:string|undefined,mainRef:string|undefined,childRef:string|undefined;
 let existingId:number|undefined;
 let rootRequests=0,childRequests=0;
+// Keep the first child active without putting an approval over the composer.
+let startChild!:()=>void;
+const childMayProceed=new Promise<void>(resolveChild=>{startChild=resolveChild;});
 let calls:string[]=[];
 const server=createServer(async(req,res)=>{
     try {
@@ -76,6 +79,7 @@ const server=createServer(async(req,res)=>{
             }
             throw Error('Child completion was absent from the root reports');
         }
+        await childMayProceed;
         childRequests++;
         const prompt=body.messages.filter((m:any)=>m.role==='user').map((m:any)=>String(m.content)).join(' ');
         assert.match(prompt,/CHILD_WORK_IN_PARALLEL/);
@@ -127,6 +131,7 @@ default_provider="parallel-fixture"
 permission_mode="confirm"
 execution_mode="attached_pty"
 follow_up_mode="queue"
+child_max_active=1
 [[ai.providers]]
 id="parallel-fixture"
 kind="openai_compat"
@@ -151,10 +156,14 @@ async function click(id:string){
     await visible(id);
     assert((await h.clickTestId(id)).ok,id);
 }
-async function send(text:string){
+async function send(text:string,keyboard=false){
     await click('ai.prompt');
     assert((await h.type_(text)).ok);
-    await click('ai.send');
+    if(keyboard){
+        await h.waitFor(async()=>((await h.inputState('ai.prompt')).buffer===text)||null,3000);
+        assert((await h.key('return')).ok);
+    }
+    else await click('ai.send');
 }
 function treeText(node:any):string{
     return (node?.text??'')+(node?.children??[]).map(treeText).join(' ');
@@ -208,7 +217,15 @@ try {
     await waitForFile(mainStarted,['ai.interaction.approve','ai.host_approval.accept']);
     const terminal=await visible('terminal.surface');
     const parent=await visible('ai.panel');
-    await send('另开一个子智能体：CHILD_WORK_IN_PARALLEL');
+    await send('另开一个子智能体：CHILD_WORK_IN_PARALLEL',true);
+    await h.waitFor(async()=>(await h.query('ai.feedback.text')).filter(shown).some((node:any)=>treeText(node).includes('已派发给子智能体 #1'))||null,5000);
+    assert.equal((await h.inputState('ai.prompt')).buffer,'','successful delegation clears the composer');
+    const rejectedDraft='另开一个子智能体：CHILD_OVER_LIMIT';
+    await send(rejectedDraft,true);
+    await h.waitFor(async()=>(await h.query('ai.feedback.text')).filter(shown).some((node:any)=>treeText(node).includes('已达到子任务数量上限，本次未派发'))||null,5000);
+    assert.equal((await h.inputState('ai.prompt')).buffer,rejectedDraft,'rejected delegation retains the exact composer draft');
+    await h.screenshot(join(out,'delegation-rejected.png'));
+    startChild();
     assert(!(await h.query('ai.child.dialog')).some(shown),'launch keeps the child dialog in the background');
     const childRow=await (async()=>{
         await click('ai.children');
@@ -228,13 +245,14 @@ try {
     await writeFile(release,'release\n');
     await h.waitFor(async()=>treeText(await visible('ai.panel')).includes('PARENT_WORK_AND_CHILD_REPORT_DONE')||null,45000);
     assert(await seen(mainFinished));
-    outcome={status:'passed',reuse,mainRef,childRef,rootRequests,childRequests,calls};
+    outcome={status:'passed',reuse,mainRef,childRef,rootRequests,childRequests,calls,delegationFeedbackAndDraft:'passed'};
 } catch(e) {
     outcome={status:'failed',error:fixtureError??String(e),mainRef,childRef,rootRequests,childRequests,calls};
     await h.screenshot(join(out,'failure.png')).catch(()=>{});
     await writeFile(join(out,'tree.json'),JSON.stringify(await h.tree().catch(()=>null)));
     process.exitCode=1;
 } finally {
+    startChild();
     await writeFile(release,'release\n');
     if(running())app.kill('SIGTERM');
     server.closeAllConnections();

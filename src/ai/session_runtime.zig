@@ -843,7 +843,7 @@ pub const Service = struct {
             };
             if (runner.task_root) |root| if (runner.context) |context| {
                 runner.task_outcome = if (runner.worker.?.manager.tool_run != null and runner.worker.?.manager.tool_run.?.uncertain) .outcome_unknown else if (state == .stopped) .cancelled else if (runner.failure != null) .failed else .succeeded;
-                const summary = if (runner.worker) |worker| if (worker.manager.saw_done) worker.manager.round_text.items else "" else "";
+                const summary = if (runner.worker) |worker| if (worker.manager.saw_done) worker.manager.finalAnswer() else "" else "";
                 const queued_input = runner.end_when_idle and queuedInputs(runner.record.?);
                 if (queued_input) {
                     const ready = runner.record.?.inbox.next() != null;

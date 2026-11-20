@@ -264,6 +264,108 @@ fn handoff(fixture: *Fixture, store: *assistants.Store, roster: *groups.Roster, 
     return current;
 }
 
+test "occupied wait revalidates shell and submits only after foreground completion and approval" {
+    const Dispatch = struct {
+        fn request(api: @import("../ai/host_execution.zig").Backend, service: terminal.Service, value: execution.Request) !void {
+            _ = try api.terminal_call.?(api.context, service, .{ .request = value });
+        }
+    };
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    var roster = groups.Roster.init(a);
+    defer roster.deinit();
+    defer fixture.deinit();
+    const target = try fixture.local();
+    var store = assistants.Store.init(a);
+    defer store.deinit();
+    var bridge = Bridge.init(a);
+    defer bridge.deinit();
+    var controller = try makeController(&fixture, &store, &roster, &bridge, target, .auto);
+    defer controller.deinitAfterWorker();
+    var lookup: Lookup = .{ .controller = &controller };
+    var broker: approvals.Broker = .{};
+    var ctx = try backend.Context.init(.{ .app = fixture.app, .roster = &roster, .store = &store, .lookup_context = &lookup, .lookup_task = Lookup.find, .approval = &broker });
+    defer ctx.deinit();
+    try ctx.captureTask(&controller);
+    var first_call = try Call.init(controller.authority, target, "sleep 1", 801);
+    defer first_call.deinit();
+    var first = try backend.prepare(first_call.value, a);
+    defer first.deinit();
+    const permit = try approve(&ctx, &broker, &first);
+    const accepted = try authorize(&ctx, first);
+    broker.finish(permit);
+    const api = ctx.backend();
+    const initial = try accepted.service.executionSnapshot();
+    const first_id = accepted.execution_id.?;
+    const request: execution.Request = .{ .execution_id = first_id, .task_id = controller.authority.task_id, .expected_input_epoch = initial.input_epoch, .expected_shell_id = initial.shell.id, .expected_shell_revision = initial.shell.revision, .ownership_revision = accepted.ownership_revision, .command = first.command, .command_hash = first.command_hash };
+    const deadline = @import("../platform/realtime.zig").monotonicNs() + 8 * std.time.ns_per_s;
+    try awaitWorker(&fixture, deadline, Dispatch.request, .{ api, accepted.service, request });
+    while (true) {
+        try fixture.tick();
+        const snapshot = accepted.service.executionSnapshot() catch |err| {
+            if (err == error.WorkerBusy) continue;
+            return err;
+        };
+        if (snapshot.state == .running and !snapshot.input_ready) break;
+        if (@import("../platform/realtime.zig").monotonicNs() >= deadline) return error.ForegroundNotObserved;
+    }
+    var second_call = try Call.init(controller.authority, target, "printf 'occupied-wait-done\\n'", 802);
+    defer second_call.deinit();
+    var second = try backend.prepare(second_call.value, a);
+    defer second.deinit();
+    try std.testing.expectError(error.TerminalBusy, ctx.preflight(second.invocation, second.command, second.command_hash));
+    var waiting: backend.OccupiedWait = .{};
+    while (waiting.boundary == null) {
+        _ = ctx.preflightWaiting(second.invocation, second.command, second.command_hash, &waiting) catch |err| {
+            if (err == error.TerminalBusy or err == error.WorkerBusy) {
+                try fixture.tick();
+                continue;
+            }
+            return err;
+        };
+        return error.ExpectedForegroundBusy;
+    }
+    try std.testing.expectError(error.ApprovalRequired, authorize(&ctx, second));
+    // A shell switch invalidates the queued plan even when the caller omitted
+    // optional shell arguments; it must never silently follow the new shell.
+    waiting.boundary.?.shell.revision += 1;
+    try std.testing.expectError(error.ShellContextChanged, ctx.preflightWaiting(second.invocation, second.command, second.command_hash, &waiting));
+    waiting.boundary.?.shell.revision -= 1;
+    var evidence: backend.ApprovalEvidence = undefined;
+    while (true) {
+        evidence = ctx.preflightWaiting(second.invocation, second.command, second.command_hash, &waiting) catch |err| {
+            if (err == error.TerminalBusy or err == error.WorkerBusy) {
+                if (@import("../platform/realtime.zig").monotonicNs() >= deadline) return error.OccupiedWaitTimedOut;
+                try fixture.tick();
+                continue;
+            }
+            return err;
+        };
+        break;
+    }
+    second.subject.impact = evidence.text();
+    const second_permit = try broker.beginSubject(second.invocation, second.subject, 1, a);
+    defer broker.finish(second_permit);
+    try broker.decide(second_permit.sequence, second_permit.arguments_hash, true);
+    second.invocation.approval_sequence = second_permit.sequence;
+    const second_target = try awaitWorker(&fixture, deadline, authorize, .{ &ctx, second });
+    const ready = try awaitWorker(&fixture, deadline, terminal.Service.executionSnapshot, .{accepted.service});
+    const second_request: execution.Request = .{ .execution_id = second_target.execution_id.?, .task_id = controller.authority.task_id, .expected_input_epoch = ready.input_epoch, .expected_shell_id = ready.shell.id, .expected_shell_revision = ready.shell.revision, .ownership_revision = second_target.ownership_revision, .command = second.command, .command_hash = second.command_hash };
+    try awaitWorker(&fixture, deadline, Dispatch.request, .{ api, second_target.service, second_request });
+    while (true) {
+        try fixture.tick();
+        const current = second_target.service.executionSnapshot() catch |err| {
+            if (err == error.WorkerBusy) continue;
+            return err;
+        };
+        if (current.execution_id != null and current.execution_id.?.eql(second_request.execution_id) and current.state == .interval_recorded) break;
+        if (@import("../platform/realtime.zig").monotonicNs() >= deadline) return error.ExecutionNotFinished;
+    }
+    var output = try second_target.service.executionOutput(second_request.execution_id, a, 0, 8192);
+    defer output.deinit(a);
+    try std.testing.expect(std.mem.indexOf(u8, output.bytes, "occupied-wait-done") != null);
+}
+
 test "execution backend real Local service requires precise approval and runs the normalized bytes" {
     var fixture: Fixture = undefined;
     try fixture.init();

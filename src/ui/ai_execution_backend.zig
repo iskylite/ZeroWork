@@ -104,6 +104,18 @@ const Boundary = struct {
     next_input: u64,
     input: InputAuthority,
 };
+/// Captured after an occupied response, on the controller thread. Pending
+/// foreground work may change input/revision, but never the target or shell.
+pub const OccupiedWait = struct { boundary: ?Boundary = null };
+
+fn validateOccupiedBoundary(before: Boundary, now: Boundary) !void {
+    if (!now.handle.eql(before.handle) or !sameService(now.service, before.service)) return error.StaleBinding;
+    if (now.capability_revision != before.capability_revision) return error.CapabilityChanged;
+    if (now.membership_revision != before.membership_revision) return error.ScopeChanged;
+    if (now.ownership_revision != before.ownership_revision) return error.OwnershipChanged;
+    if (now.input.instance != before.input.instance or now.input.revision != before.input.revision or now.input.authorized != before.input.authorized) return error.StaleInputLease;
+    if (!std.meta.eql(now.shell.id, before.shell.id) or now.shell.revision != before.shell.revision) return error.ShellContextChanged;
+}
 pub const AttachmentPrepared = struct {
     boundary: Boundary,
     expected: execution.ShellAttachment,
@@ -276,6 +288,23 @@ pub const Context = struct {
             }
         };
         try self.admissions.append(self.app.allocator, record);
+        return evidence;
+    }
+    /// One non-blocking controller-thread poll. Approval is requested only
+    /// after this succeeds; the ordinary preflight and dispatch gates remain
+    /// authoritative. A changed shell or target never inherits this wait.
+    pub fn preflightWaiting(self: *Context, invocation: host.Invocation, command: []const u8, hash: [32]u8, waiting: *OccupiedWait) !ApprovalEvidence {
+        try validateNormalized(invocation, command, hash);
+        if (invocation.dispatch_fence) |fence| try fence.check();
+        const controller = try self.current(invocation.context, false);
+        const handle = try parseSession(invocation.context, try string(invocation.arguments, "session_ref"));
+        try controller.bridge.checkCommandTarget(self.app, invocation.context, invocation.operation_id, handle, hash);
+        const current_boundary = try self.captureBoundary(controller, handle, false, hash);
+        try validateShellExpectation(invocation.arguments, current_boundary.shell);
+        if (waiting.boundary) |before| try validateOccupiedBoundary(before, current_boundary) else waiting.boundary = current_boundary;
+        const evidence = try self.preflight(invocation, command, hash);
+        const admitted = self.admission(invocation) orelse return error.ScopeChanged;
+        try validateOccupiedBoundary(waiting.boundary.?, admitted.boundary);
         return evidence;
     }
     /// V0.7 §2.2 auto-shell: recover an unobserved shell prompt inside the
@@ -879,8 +908,9 @@ fn validateInputInvocation(invocation: host.Invocation) !void {
 }
 fn validateRun(invocation: host.Invocation) !void {
     if (invocation.authority != .execution_control or !std.mem.eql(u8, invocation.tool_id, "host.run_in_terminal") or invocation.arguments != .object) return error.InvalidArguments;
-    const expected = @as(usize, 3) + @intFromBool(invocation.arguments.object.contains("shell_id")) + @intFromBool(invocation.arguments.object.contains("shell_revision")) + @intFromBool(invocation.arguments.object.contains("wait_ms"));
+    const expected = @as(usize, 3) + @intFromBool(invocation.arguments.object.contains("shell_id")) + @intFromBool(invocation.arguments.object.contains("shell_revision")) + @intFromBool(invocation.arguments.object.contains("wait_ms")) + @intFromBool(invocation.arguments.object.contains("occupied_policy"));
     if (invocation.arguments.object.count() != expected) return error.InvalidArguments;
+    _ = try supervisor.occupiedPolicy(invocation.arguments);
     if (invocation.arguments.object.get("wait_ms")) |value| if (value != .integer or value.integer < 0 or value.integer > 30000) return error.InvalidArguments;
     const reference = try string(invocation.arguments, "session_ref");
     const key = try string(invocation.arguments, "request_key");
@@ -935,6 +965,26 @@ test "efficiency execution backend accepts bounded wait without weakening strict
         const invocation: host.Invocation = .{ .context = ctx, .authority = .execution_control, .operation_id = 1, .turn_id = 1, .call_id = "wait-run", .tool_id = "host.run_in_terminal", .arguments = parsed.value, .arguments_json = json, .arguments_hash = execution.digest(json), .canonical_arguments_hash = try canonical.digest(a, parsed.value) };
         if (index < 3) try validateRun(invocation) else try std.testing.expectError(error.InvalidArguments, validateRun(invocation));
     }
+}
+
+test "occupied policy is validated and retained through command normalization" {
+    const a = std.testing.allocator;
+    const ctx: host.Context = .{ .conversation_id = .generate(), .task_id = .generate(), .binding = .{ .session = 1 }, .binding_revision = 1, .grant_revision = 1 };
+    for ([_][]const u8{ "\"wait\"", "\"new_session\"", "\"reject\"", "\"other\"", "true", "null" }, 0..) |value, index| {
+        const json = try std.fmt.allocPrint(a, "{{\"session_ref\":\"s1:test\",\"command\":\"echo test\",\"request_key\":\"once\",\"occupied_policy\":{s}}}", .{value});
+        defer a.free(json);
+        const parsed = try std.json.parseFromSlice(std.json.Value, a, json, .{});
+        defer parsed.deinit();
+        const invocation: host.Invocation = .{ .context = ctx, .authority = .execution_control, .operation_id = 1, .turn_id = 1, .call_id = "occupied", .tool_id = "host.run_in_terminal", .arguments = parsed.value, .arguments_json = json, .arguments_hash = execution.digest(json), .canonical_arguments_hash = try canonical.digest(a, parsed.value) };
+        if (index < 3) {
+            var prepared = try prepare(invocation, a);
+            defer prepared.deinit();
+            try std.testing.expectEqualStrings(parsed.value.object.get("occupied_policy").?.string, prepared.invocation.arguments.object.get("occupied_policy").?.string);
+        } else try std.testing.expectError(error.InvalidArguments, prepare(invocation, a));
+    }
+    const defaults = try std.json.parseFromSlice(std.json.Value, a, "{}", .{});
+    defer defaults.deinit();
+    try std.testing.expectEqual(supervisor.OccupiedPolicy.wait, try supervisor.occupiedPolicy(defaults.value));
 }
 
 test "nested shell execution requires the observed instance and revision" {

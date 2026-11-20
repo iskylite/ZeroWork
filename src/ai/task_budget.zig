@@ -220,6 +220,9 @@ pub const Root = struct {
     /// same delivery watermark as settle reports; stage-3 UI reads them via
     /// the same cursor.
     board_posts: std.ArrayList(@import("swarm_board.zig").Post) = .empty,
+    /// Direct delivery owns a post from its initial publication until its
+    /// submit finishes. The model-round fallback skips claimed rows.
+    board_delivery_claims: std.AutoHashMapUnmanaged([16]u8, void) = .empty,
     /// V0.7 §11.2 ask debounce counters keyed by the member's display seq.
     /// Seq is never recycled (§2.1), so it identifies the member for the
     /// root's lifetime without a ≤16 slot cap; the 4th consecutive ask gets
@@ -257,6 +260,7 @@ pub const Root = struct {
         self.display_facts.deinit(self.allocator);
         for (self.board_posts.items) |post| self.allocator.free(post.text);
         self.board_posts.deinit(self.allocator);
+        self.board_delivery_claims.deinit(self.allocator);
         self.board_ask_counts.deinit(self.allocator);
         for (self.decisions.items) |decision| self.allocator.free(decision.reason);
         self.decisions.deinit(self.allocator);
@@ -293,6 +297,11 @@ pub const Root = struct {
         var owned = post;
         owned.text = try self.allocator.dupe(u8, post.text);
         errdefer self.allocator.free(owned.text);
+        try self.board_posts.ensureUnusedCapacity(self.allocator, 1);
+        try self.persistBoardLocked(owned);
+        self.board_posts.appendAssumeCapacity(owned);
+    }
+    fn persistBoardLocked(self: *Root, owned: @import("swarm_board.zig").Post) !void {
         // 写入即落板：the journal write precedes the in-memory append so an
         // acknowledged post is durable. A failed write fails the request like
         // a fact write and halts further storage (same contract as write()).
@@ -305,7 +314,59 @@ pub const Root = struct {
                 return err;
             };
         }
-        try self.board_posts.append(self.allocator, owned);
+    }
+    pub const BoardSubmission = struct {
+        post_id: [16]u8,
+        duplicate: bool,
+        auto_reply: ?[]const u8,
+    };
+    /// A logical tool call creates one durable row and one direct-delivery
+    /// claim. Retries return the original receipt without incrementing asks.
+    pub fn submitBoard(self: *Root, post: @import("swarm_board.zig").Post, task: id.TaskId, turn: u64, call_id: []const u8) !BoardSubmission {
+        const board = @import("swarm_board.zig");
+        const post_id = board.invocationPostId(task, turn, call_id);
+        self.lock();
+        defer self.mutex.unlock();
+        for (self.board_posts.items) |prior| {
+            if (!prior.call_keyed or !std.mem.eql(u8, &prior.post_id, &post_id)) continue;
+            if (!board.sameContent(prior, post)) return error.BoardCallConflict;
+            return .{ .post_id = prior.post_id, .duplicate = true, .auto_reply = if (prior.auto_reply) "按当前最佳判断继续" else null };
+        }
+        if (self.failed_storage) return error.TaskPersistenceFailed;
+        const fact = self.facts[try self.index(task)];
+        if (fact.parent == null or fact.seq == 0 or fact.seq != post.origin or terminal(fact.status)) return error.ScopeChanged;
+        var owned = post;
+        owned.post_id = post_id;
+        owned.call_keyed = true;
+        const asks = if (post.category == .ask) (self.board_ask_counts.get(post.origin) orelse 0) +| 1 else 0;
+        owned.auto_reply = asks >= 4;
+        owned.delivered = false;
+        owned.text = try self.allocator.dupe(u8, post.text);
+        errdefer self.allocator.free(owned.text);
+        // Complete all allocations before the durable write, so success in
+        // the journal cannot be followed by a failed in-memory append.
+        try self.board_posts.ensureUnusedCapacity(self.allocator, 1);
+        if (post.category == .ask) try self.board_ask_counts.ensureUnusedCapacity(self.allocator, 1);
+        if (post.to != .all) try self.board_delivery_claims.ensureUnusedCapacity(self.allocator, 1);
+        try self.persistBoardLocked(owned);
+        self.board_posts.appendAssumeCapacity(owned);
+        if (post.category == .ask) self.board_ask_counts.putAssumeCapacity(post.origin, asks) else _ = self.board_ask_counts.remove(post.origin);
+        if (post.to != .all) self.board_delivery_claims.putAssumeCapacity(post_id, {});
+        return .{ .post_id = post_id, .duplicate = false, .auto_reply = if (owned.auto_reply) "按当前最佳判断继续" else null };
+    }
+    /// Complete a direct attempt, publishing its success or releasing it for
+    /// the parent-round fallback after failure. Never creates another wake.
+    pub fn finishBoardDelivery(self: *Root, post_id: [16]u8, delivered: bool) bool {
+        self.lock();
+        defer self.mutex.unlock();
+        if (!self.board_delivery_claims.remove(post_id)) return false;
+        if (delivered) for (self.board_posts.items) |*post| {
+            if (std.mem.eql(u8, &post.post_id, &post_id)) {
+                post.delivered = true;
+                break;
+            }
+        };
+        return true;
     }
     /// Mark one stored post as already delivered directly to the parent inbox.
     /// Returns false when the post is absent (for example after a prior delivery).
@@ -517,6 +578,7 @@ pub const Root = struct {
         done.status = outcome;
         done.event_sequence = 0;
         self.facts[index_] = try self.write(done);
+        if (prior.seq != 0) _ = self.board_ask_counts.remove(prior.seq);
         self.facts[self.count] = try self.write(next);
         self.count += 1;
     }
@@ -665,7 +727,7 @@ pub const Root = struct {
         self.facts[i] = try self.write(fact);
         if (fact.parent == null and (status == .failed or status == .cancelled or status == .interrupted)) self.cancelled = true;
         // V0.7 §11.2: a settled member's ask debounce counter clears.
-        if (fact.parent != null and fact.seq != 0) _ = self.board_ask_counts.remove(fact.seq);
+        if (terminal(status) and fact.parent != null and fact.seq != 0) _ = self.board_ask_counts.remove(fact.seq);
     }
     pub fn usage(self: *Root, task: id.TaskId, stats: ?provider.ChatStats) !void {
         self.lock();

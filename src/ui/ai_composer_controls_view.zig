@@ -37,12 +37,17 @@ pub const Usage = struct {
     estimated: bool = false,
     parts: []const UsagePart = &.{},
     measured_input: ?u64 = null,
+    skill_catalog: @import("../ai/provider.zig").SkillCatalogStatus = .{},
     request_tokens: ?u64 = null,
     redacted: ?bool = null,
     compaction: @import("../ai/context_compaction.zig").Status = .idle,
     can_compact: bool = false,
     compaction_before: u64 = 0,
     compaction_after: u64 = 0,
+
+    fn rowCount(self: Usage) usize {
+        return self.parts.len + @intFromBool(self.measured_input != null) + @intFromBool(self.skill_catalog.incomplete());
+    }
 };
 const DefaultStatus = @import("../ai/model_discovery.zig").DefaultStatus;
 
@@ -1017,7 +1022,7 @@ pub const View = struct {
                     style.min_height = panel_height;
                 }
                 if (kind == .usage) if (self.source) |source| if (source.value.usage) |usage| {
-                    const panel_height = S.usageHeight(usage.parts.len, usage.measured_input != null, self.cx.viewport.height);
+                    const panel_height = S.usageHeight(usage.rowCount(), self.cx.viewport.height);
                     style.height = .{ .px = panel_height };
                     style.min_height = panel_height;
                     style.max_height = panel_height;
@@ -1494,6 +1499,20 @@ pub const View = struct {
             value.meta.ownership.meta.test_id = "ai.usage.part.value";
             try self.usage_body.appendChild(self.cx.allocator, row);
         }
+        if (usage.skill_catalog.incomplete()) {
+            const row = try ui.box(self.cx, S.usageRow(), .{});
+            row.meta.ownership.meta.test_id = "ai.usage.skill_catalog";
+            _ = try self.label(row, "技能目录", S.text(11, 400, 18, true), S.label(64, 18));
+            const status = usage.skill_catalog;
+            const detail = if (status.shortened == 0)
+                try std.fmt.bufPrint(&buffer, "{d} 项未列出", .{status.omitted})
+            else if (status.omitted == 0)
+                try std.fmt.bufPrint(&buffer, "{d} 条描述已截断", .{status.shortened})
+            else
+                try std.fmt.bufPrint(&buffer, "{d} 条描述已截断 · {d} 项未列出", .{ status.shortened, status.omitted });
+            _ = try self.label(row, detail, value_style, S.flexibleLabel(18));
+            try self.usage_body.appendChild(self.cx.allocator, row);
+        }
         if (usage.measured_input) |measured| {
             const reference = try ui.box(self.cx, S.usageRow(), .{});
             reference.meta.ownership.meta.test_id = "ai.usage.measured";
@@ -1501,7 +1520,7 @@ pub const View = struct {
             _ = try self.label(reference, try tokenText(&used_buffer, measured), value_style, S.label(64, 18));
             try self.usage_body.appendChild(self.cx.allocator, reference);
         }
-        const desired_height = S.usageHeight(usage.parts.len, usage.measured_input != null, self.cx.viewport.height);
+        const desired_height = S.usageHeight(usage.rowCount(), self.cx.viewport.height);
         self.popups[@backingInt(S.Kind.usage)].widget.chrome.setStyleInline(self.cx.allocator, .{ .height = .{ .px = desired_height }, .min_height = desired_height, .max_height = desired_height });
     }
     fn afterLayout(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
@@ -1693,6 +1712,7 @@ fn usageEql(first: ?Usage, second: ?Usage) bool {
     const one = first orelse return second == null;
     const two = second orelse return false;
     if (one.compaction_before != two.compaction_before or one.compaction_after != two.compaction_after or one.compaction != two.compaction or one.can_compact != two.can_compact or one.used_tokens != two.used_tokens or one.limit_tokens != two.limit_tokens or one.estimated != two.estimated or one.measured_input != two.measured_input or one.request_tokens != two.request_tokens or one.redacted != two.redacted or one.parts.len != two.parts.len) return false;
+    if (!std.meta.eql(one.skill_catalog, two.skill_catalog)) return false;
     for (one.parts, two.parts) |left, right| if (left.tokens != right.tokens or left.estimated != right.estimated or left.kind != right.kind or !std.mem.eql(u8, left.name, right.name)) return false;
     return true;
 }

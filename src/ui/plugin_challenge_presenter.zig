@@ -68,6 +68,8 @@ pub const Presenter = struct {
     choices: [32]Choice = undefined,
     choice_scroll: *ui.Node = undefined,
     trust_actions: [2]*ui.Node = undefined,
+    trust_action_boxes: [2]*ui.Node = undefined,
+    trust_labels: [2]*ui.Signal([]const u8) = undefined,
     certificate: *Certificate.View = undefined,
     certificate_mode: bool = false,
     current: ?Current = null,
@@ -155,19 +157,30 @@ pub const Presenter = struct {
         self.problem.setDisplay(.none);
         const footer = try ui.box(cx, S.footer(), .{});
         try self.modal.body.appendChild(cx.allocator, footer);
-        const cancel_button = try ui.widgets.Button(.{ .label = "取消", .variant = .secondary, .on_click = cx.on(Presenter, self, cancel) }).mount(scope, cx);
+        const cancel_button = try ui.widgets.Button(.{
+            .label = "取消",
+            .variant = .secondary,
+            .base_style = .{ .width = .{ .px = 72 }, .height = .{ .px = S.footer_height }, .padding = .{}, .border = .{ .radius = 8 } },
+            .on_click = cx.on(Presenter, self, cancel),
+        }).mount(scope, cx);
         cancel_button.meta.ownership.meta.test_id = "plugin.challenge.cancel";
-        cancel_button.setStyleInline(cx.allocator, S.button(72, false, false));
-        styleActionText(cancel_button, false);
         try footer.appendChild(cx.allocator, cancel_button);
         for (&self.trust_actions, 0..) |*action, i| {
+            const label_signal = try scope.createText(" ", .{});
+            self.trust_labels[i] = label_signal;
             const variant: ui.widgets.button.ButtonVariant = if (i == 1) .primary else .secondary;
-            const button = try ui.widgets.Button(.{ .label = self.choices[i].value, .variant = variant, .on_click = cx.on(Choice, &self.choices[i], Choice.choose) }).mount(scope, cx);
-            button.setStyleInline(cx.allocator, S.button(108, i == 1, false));
-            styleActionText(button, i == 1);
-            button.setDisplay(.none);
+            const button = try ui.widgets.Button(.{
+                .label = label_signal,
+                .variant = variant,
+                .base_style = .{ .width = .{ .px = 108 }, .height = .{ .px = S.footer_height }, .padding = .{}, .border = .{ .radius = 8 } },
+                .on_click = cx.on(Choice, &self.choices[i], Choice.choose),
+            }).mount(scope, cx);
+            if (i == 1) try @import("app_theme.zig").stylePrimary(cx, scope, button, null);
+            const slot = try ui.box(cx, .{ .width = .{ .fit = .{} }, .height = .{ .fit = .{} }, .display = .none, .flex_shrink = 0 }, .{});
+            try slot.appendChild(cx.allocator, button);
+            self.trust_action_boxes[i] = slot;
             action.* = button;
-            try footer.appendChild(cx.allocator, button);
+            try footer.appendChild(cx.allocator, slot);
         }
         self.submit_disabled = try scope.createSignal(bool, true);
         self.submit_label = try scope.createText("确认", .{});
@@ -223,6 +236,8 @@ pub const Presenter = struct {
         }
         self.remember.setDisplay(if (view.payload.allow_save_password) .flex else .none);
         try self.title.setTextContent(self.cx.allocator, view.payload.title);
+        self.title.clearTextLayout();
+        self.title.markSizingDirty();
         const secret_fields = for (view.payload.fields) |field| {
             if (field.secret) break true;
         } else false;
@@ -232,10 +247,16 @@ pub const Presenter = struct {
         const tint = if (changed_key) S.theme.current().danger_ink else if (view.kind == .trust_material) S.theme.current().warn_ink else S.theme.current().accent;
         if (icon.icon_id) |id| if (icon.pickRep(18)) |rep| self.title_icon.setIcon(.{ .icon_id = id, .rep = rep, .tint = tint });
         try self.detail.setTextContent(self.cx.allocator, view.payload.detail);
+        self.detail.clearTextLayout();
+        self.detail.markSizingDirty();
         self.detail.setDisplay(if (view.payload.detail.len == 0) .none else .flex);
         try self.source.setTextContent(self.cx.allocator, if (view.background and view.payload.source_name.len == 0) "来自后台会话的请求" else view.payload.source_name);
+        self.source.clearTextLayout();
+        self.source.markSizingDirty();
         self.source.setDisplay(if (view.background or view.payload.source_name.len > 0) .flex else .none);
         try self.material.setTextContent(self.cx.allocator, view.payload.material);
+        self.material.clearTextLayout();
+        self.material.markSizingDirty();
         self.material_scroll.setDisplay(if (view.payload.material.len != 0) .flex else .none);
         self.material_scroll.setStyle(self.cx.allocator, .height, .{ .px = @min(120, @max(60, self.cx.viewport.height - 460)) });
         self.input.node.setDisplay(if (view.kind == .secret_input and view.payload.fields.len == 0) .flex else .none);
@@ -270,7 +291,8 @@ pub const Presenter = struct {
             choice.root.meta.ownership.meta.test_id = if (trust_actions) null else std.fmt.bufPrint(&choice.id, "plugin.challenge.choice.{d}", .{i}) catch unreachable;
         }
         for (self.trust_actions, 0..) |button, i| {
-            button.setDisplay(if (trust_actions) .flex else .none);
+            if (trust_actions) self.trust_labels[i].set(view.payload.choices[i].label);
+            self.trust_action_boxes[i].setDisplay(if (trust_actions) .flex else .none);
             button.meta.ownership.meta.test_id = if (trust_actions) (if (i == 0) "plugin.challenge.choice.0" else "plugin.challenge.choice.1") else null;
         }
         self.refreshSubmit();
@@ -709,4 +731,54 @@ test "certificate trust presenter keeps complete material scrollable and all thr
     try std.testing.expect(presenter.certificate.root.style.display == .none);
     try std.testing.expect(presenter.input.node.style.display == .flex);
     try std.testing.expect(presenter.remember.style.display == .none);
+}
+
+test "trust material host key layout check" {
+    const allocator = std.testing.allocator;
+    const cx = try ui.Cx.init(allocator, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(860, 600);
+    cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
+    const scope = try ui.Scope.init(allocator, null, cx.owner);
+    defer scope.dispose();
+    const services = try @import("challenge_window_host.zig").Services.mount(cx, scope);
+    const presenter = services.view;
+    cx.setTheme(S.theme.widgetTheme(.dark));
+    const owner: identity.SessionHandle = .{ .session_id = @fromBackingInt(94), .generation = 1 };
+    services.active_owner = owner;
+    for (0..4) |_| {
+        cx.advanceFrameClock();
+        cx.layout();
+        _ = cx.render();
+    }
+    try services.host.offer(owner, 1, 1, .trust_material, .{
+        .title = "核对主机密钥",
+        .source_name = "R97N1 · root@192.168.27.129:22 · 第 1 跳",
+        .detail = "请通过可信渠道核对指纹。仅本次信任不写记录；保存并继续会记录本次核对的密钥。",
+        .material = "ecdsa-sha2-nistp256\nSHA256:GQN8tvXmiXYctrGCZxVaeSwneDWP/tkJE4VnMha92L0\n记录路径：",
+        .choices = &.{ .{ .value = "trust_once", .label = "仅本次信任" }, .{ .value = "trust_save", .label = "保存并继续" } },
+    }, std.math.maxInt(u64));
+    try presenter.update(owner);
+    for (0..4) |_| {
+        cx.advanceFrameClock();
+        cx.layout();
+        _ = cx.render();
+    }
+    const title_rect = presenter.title.globalRect();
+    const icon_rect = presenter.title_icon.globalRect();
+    try std.testing.expect(title_rect.w > 0 and title_rect.h > 0);
+    try std.testing.expect(title_rect.x >= icon_rect.x + icon_rect.w);
+    const footer = presenter.submit_button.parent.?;
+    const cancel_btn = footer.children.items[0];
+    const cancel_rect = cancel_btn.globalRect();
+    const trust0_rect = presenter.trust_actions[0].globalRect();
+    const trust1_rect = presenter.trust_actions[1].globalRect();
+    try std.testing.expectEqual(@as(f32, 108), trust0_rect.w);
+    try std.testing.expectEqual(@as(f32, 108), trust1_rect.w);
+    try std.testing.expectEqual(@as(f32, 34), trust0_rect.h);
+    try std.testing.expectEqual(@as(f32, 34), trust1_rect.h);
+    try std.testing.expect(cancel_rect.x + cancel_rect.w < trust0_rect.x);
+    try std.testing.expect(trust0_rect.x + trust0_rect.w < trust1_rect.x);
+    try std.testing.expectApproxEqAbs(cancel_rect.y, trust0_rect.y, 0.5);
+    try std.testing.expectApproxEqAbs(cancel_rect.y, trust1_rect.y, 0.5);
 }

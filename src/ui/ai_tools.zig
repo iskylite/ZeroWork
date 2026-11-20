@@ -105,6 +105,9 @@ pub const Bridge = struct {
     policy: tools.Policy = .{},
     live_permission: @import("../ai/permission.zig").LiveMode = .{},
     execution_mode: @import("../config/config.zig").ExecutionMode = .auto,
+    /// Captured per request. Strict until configured from the request snapshot.
+    interactive_batch_fallback: bool = false,
+    batch_fallback_active: bool = false,
     session_retention: @import("../config/config.zig").SessionRetention = .auto_idle,
     route_broker: ?*approvals.Broker = null,
     route_source: ?identity.SessionHandle = null,
@@ -242,9 +245,13 @@ pub const Bridge = struct {
     /// Before backend preflight, freeze any trusted intent to this exact
     /// command. The backend still owns capability, forbidden and mode gates.
     pub fn prepareHostRoute(self: *Bridge, invocation: host_tools.Invocation, subject: *approvals.Subject, target: identity.SessionHandle, proposed: routing.Route, allocator: std.mem.Allocator) !?host_tools.Result {
+        return self.prepareHostRouteWithFallback(invocation, subject, target, proposed, false, allocator);
+    }
+    fn prepareHostRouteWithFallback(self: *Bridge, invocation: host_tools.Invocation, subject: *approvals.Subject, target: identity.SessionHandle, proposed: routing.Route, fallback_allowed: bool, allocator: std.mem.Allocator) !?host_tools.Result {
         if (self.queries_only) return error.ToolNotAvailable;
         const broker = self.route_broker orelse return null;
         var fixed = routing.fixedRoute(self.execution_mode, proposed);
+        if (self.execution_mode == .interactive and proposed == .batch and self.interactive_batch_fallback and fallback_allowed) fixed = .batch;
         // The UI preflight only proposes new_terminal for a ready session
         // created by this exact task. Its lifecycle approval permits the
         // independent target; the command still needs its own approval.
@@ -852,6 +859,30 @@ pub const Bridge = struct {
         }
         if (task.failure) |err| return err;
     }
+    /// Called by the tool worker after an occupied preflight. Each probe is a
+    /// short UI-thread call; waiting itself never blocks the UI scheduler.
+    pub fn waitOccupiedPreflight(self: *Bridge, context: *anyopaque, invoke_fn: *const fn (*anyopaque) anyerror!void, invocation: host_tools.Invocation, cancel: ?*provider.CancelToken, timeout_ms: u32) !void {
+        const start = @import("../platform/realtime.zig").monotonicNs();
+        const deadline = start + @as(i128, @min(timeout_ms, 30000)) * std.time.ns_per_ms;
+        while (true) {
+            if (self.stopped.load(.acquire) or (if (cancel) |token| token.isCancelled() else false)) return error.CancelledBeforeDispatch;
+            if (invocation.dispatch_fence) |fence| try fence.check();
+            if (@import("../platform/realtime.zig").monotonicNs() >= deadline) return error.TerminalWaitTimedOut;
+            self.callController(context, invoke_fn, cancel) catch |err| {
+                // After a proven occupied interval, SSH may release its lease
+                // before the next prompt arrives. Keep observing the pinned
+                // shell within the same deadline; never attach automatically.
+                if (err != error.TerminalBusy and err != error.WorkerBusy and err != error.ShellPromptNotObserved) return err;
+                var duration: std.c.timespec = .{ .sec = 0, .nsec = 50 * std.time.ns_per_ms };
+                _ = std.c.nanosleep(&duration, null);
+                continue;
+            };
+            if (self.stopped.load(.acquire) or (if (cancel) |token| token.isCancelled() else false)) return error.CancelledBeforeDispatch;
+            if (invocation.dispatch_fence) |fence| try fence.check();
+            if (@import("../platform/realtime.zig").monotonicNs() >= deadline) return error.TerminalWaitTimedOut;
+            return;
+        }
+    }
     fn pumpControllerTask(self: *Bridge) void {
         self.lock();
         const task = self.controller_task orelse {
@@ -1017,6 +1048,7 @@ pub const Bridge = struct {
         var route_permit: ?approvals.Permit = null;
         defer {
             self.active_route = null;
+            self.batch_fallback_active = false;
             if (route_permit) |permit| self.route_broker.?.finish(permit);
         }
         if (batch_command and invocation.table.captured_scope.owner == .group and self.host_binding != null) {
@@ -1050,7 +1082,16 @@ pub const Bridge = struct {
                 const binding = self.host_binding orelse return error.InvalidHostAuthority;
                 route_invocation = .{ .context = binding.context, .authority = .execution_control, .operation_id = invocation.operation_id, .turn_id = invocation.turn_id, .call_id = invocation.call_id, .tool_id = "run_command", .arguments = invocation.parsed.json.value, .arguments_json = invocation.arguments, .arguments_hash = invocation.parsed.arguments_hash, .canonical_arguments_hash = try @import("../ai/canonical_arguments.zig").digest(allocator, invocation.parsed.json.value) };
                 route_subject = .{ .kind = .terminal_command, .target = try std.fmt.bufPrint(&route_label, "会话 #{d} · generation {d}", .{ @backingInt(target.session_id), target.generation }), .detail = command_value.string };
-                if (try self.prepareHostRoute(route_invocation, &route_subject, target, .batch, allocator)) |changed| return try self.dynamicRouteResult(invocation, target, changed, allocator);
+                var fallback_allowed = false;
+                if (self.execution_mode == .interactive and self.interactive_batch_fallback) {
+                    const normalized = try @import("../host/terminal_execution.zig").normalizeCommand(allocator, command_value.string);
+                    defer allocator.free(normalized);
+                    var check: BatchFallbackCheck = .{ .bridge = self, .owner = target, .operation = invocation.operation_id, .command = @import("../host/terminal_execution.zig").digest(normalized) };
+                    try self.callController(&check, BatchFallbackCheck.run, cancel);
+                    fallback_allowed = check.occupied;
+                }
+                if (try self.prepareHostRouteWithFallback(route_invocation, &route_subject, target, .batch, fallback_allowed, allocator)) |changed| return try self.dynamicRouteResult(invocation, target, changed, allocator);
+                self.batch_fallback_active = self.execution_mode == .interactive and fallback_allowed;
                 if (self.execution_mode == .ask or route_subject.route.?.choice.route == .batch and self.route_broker.?.execution_route.resolve(binding.context, target, command_value.string, .batch).trusted) {
                     const permit = try self.requestHostRoute(route_invocation, route_subject, allocator, cancel);
                     route_permit = permit;
@@ -1374,9 +1415,46 @@ pub const Bridge = struct {
         }
     };
 
+    const BatchFallbackCheck = struct {
+        bridge: *Bridge,
+        owner: identity.SessionHandle,
+        operation: u64,
+        command: [32]u8,
+        occupied: bool = false,
+
+        fn run(raw: *anyopaque) !void {
+            const check: *@This() = @ptrCast(@alignCast(raw));
+            const binding = check.bridge.host_binding orelse return error.ScopeChanged;
+            const app = check.bridge.reconnect_app orelse return error.ScopeChanged;
+            try check.bridge.checkCommandTarget(app, binding.context, check.operation, check.owner, check.command);
+            const legacy_id = app.legacyForHandle(check.owner) orelse return error.StaleReference;
+            const state = app.sessions.queryState(check.owner) orelse return error.StaleReference;
+            const tab = app.workspace.sessionTab(legacy_id) orelse return error.StaleReference;
+            if (!tab.content_owner.eql(.{ .session = check.owner }) or tab.generation != check.owner.generation or tab.archived or tab.closing or tab.failed or tab.owned_pending) return error.StaleReference;
+            if (state.lifecycle != .ready and state.lifecycle != .attached) return error.SessionNotReady;
+            const service = if (tab.terminal) |view| if (view.terminal_surface) |surface| blk: {
+                if (!surface.owner.eql(check.owner)) return error.StaleReference;
+                break :blk surface.composite.raw;
+            } else if (tab.runtime) |runtime| try runtime.terminalService() else return error.IntegrationUnavailable else if (tab.runtime) |runtime| try runtime.terminalService() else return error.IntegrationUnavailable;
+            if (service.binding.kind != .terminal or service.binding.resource_owner != .session or !service.binding.resource_owner.session.eql(check.owner) or !app.sessions.bindingIsLive(service.binding)) return error.StaleBinding;
+            const snapshot = try service.executionSnapshot();
+            if (!snapshot.owner.eql(check.owner)) return error.StaleReference;
+            check.occupied = interactiveBatchOccupied(snapshot);
+        }
+    };
+
     fn invoke(raw: *anyopaque, target: tools.TargetBinding, request: tools.Invocation, allocator: std.mem.Allocator, cancel: ?*provider.CancelToken) !tools.ToolResult {
         const self: *Bridge = @ptrCast(@alignCast(raw));
         if (std.mem.eql(u8, request.tool_id, "run_command")) {
+            if (self.batch_fallback_active) {
+                const command = request.arguments.object.get("command") orelse return error.InvalidToolArguments;
+                if (command != .string) return error.InvalidToolArguments;
+                const normalized = try @import("../host/terminal_execution.zig").normalizeCommand(allocator, command.string);
+                defer allocator.free(normalized);
+                var check: BatchFallbackCheck = .{ .bridge = self, .owner = target.owner, .operation = request.operation_id, .command = @import("../host/terminal_execution.zig").digest(normalized) };
+                try self.callController(&check, BatchFallbackCheck.run, cancel);
+                if (!self.interactive_batch_fallback or !check.occupied) return error.ModeConflict;
+            }
             if (self.host_binding != null and self.host_binding.?.context.binding == .group) {
                 const command = request.arguments.object.get("command") orelse return error.InvalidToolArguments;
                 if (command != .string) return error.InvalidToolArguments;
@@ -1751,9 +1829,112 @@ pub const Bridge = struct {
         return cancel;
     }
 };
+/// A missing SSH prompt alone is not evidence of foreground occupancy.
+fn interactiveBatchOccupied(snapshot: @import("../host/terminal_execution.zig").Snapshot) bool {
+    if (!snapshot.interactive_execution) return false;
+    if (snapshot.grant != null or !snapshot.local_released) return true;
+    if (snapshot.completion_source == .private_protocol and !snapshot.input_ready) return true;
+    return snapshot.execution_id != null and snapshot.state == .running and !(if (snapshot.process) |process| process.foreground_finished else false);
+}
 fn pause() void {
     var duration: std.c.timespec = .{ .sec = 0, .nsec = 5 * std.time.ns_per_ms };
     _ = std.c.nanosleep(&duration, null);
+}
+
+test "interactive batch fallback requires enabled setting and proven occupancy" {
+    const a = std.testing.allocator;
+    const context: host_tools.Context = .{ .conversation_id = .generate(), .task_id = .generate(), .binding = .{ .session = 1 }, .binding_revision = 1, .grant_revision = 1 };
+    const target: identity.SessionHandle = .{ .session_id = @fromBackingInt(1), .generation = 1 };
+    var snapshot: @import("../host/terminal_execution.zig").Snapshot = .{ .owner = target, .interactive_execution = true, .completion_source = .private_protocol, .input_ready = true };
+    try std.testing.expect(!interactiveBatchOccupied(snapshot));
+    snapshot.input_ready = false;
+    try std.testing.expect(interactiveBatchOccupied(snapshot));
+    snapshot.completion_source = .shell_reported;
+    try std.testing.expect(!interactiveBatchOccupied(snapshot));
+    snapshot.local_released = false;
+    try std.testing.expect(interactiveBatchOccupied(snapshot));
+    snapshot.interactive_execution = false;
+    try std.testing.expect(!interactiveBatchOccupied(snapshot));
+
+    var broker: approvals.Broker = .{};
+    try broker.configure(context, 1);
+    var bridge = Bridge.init(a);
+    defer bridge.deinit();
+    bridge.route_broker = &broker;
+    bridge.execution_mode = .interactive;
+    const invocation: host_tools.Invocation = .{ .context = context, .authority = .execution_control, .operation_id = 1, .turn_id = 1, .call_id = "batch-fallback", .tool_id = "run_command", .arguments = .null, .arguments_json = "{}", .arguments_hash = @splat(0), .canonical_arguments_hash = @splat(0) };
+    for ([_]struct { enabled: bool, occupied: bool, permitted: bool }{ .{ .enabled = false, .occupied = true, .permitted = false }, .{ .enabled = true, .occupied = false, .permitted = false }, .{ .enabled = true, .occupied = true, .permitted = true } }) |case| {
+        bridge.interactive_batch_fallback = case.enabled;
+        var subject: approvals.Subject = .{ .kind = .terminal_command, .target = "session", .detail = "pwd" };
+        const changed = try bridge.prepareHostRouteWithFallback(invocation, &subject, target, .batch, case.occupied, a);
+        if (case.permitted) {
+            try std.testing.expect(changed == null);
+            try std.testing.expectEqual(routing.Route.batch, subject.route.?.choice.route);
+        } else {
+            var result = changed orelse return error.ExpectedPlanChange;
+            defer result.deinit(a);
+            try std.testing.expectEqual(tools.Status.cancelled_unsent, result.status);
+        }
+    }
+}
+
+test "occupied wait polls controller without blocking and stops on cancellation or deadline" {
+    const a = std.testing.allocator;
+    const Probe = struct {
+        calls: usize = 0,
+        busy_before: usize = 2,
+        prompt_gap: bool = false,
+        fn run(raw: *anyopaque) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.calls += 1;
+            if (self.prompt_gap and self.calls == 2) return error.ShellPromptNotObserved;
+            if (self.calls <= self.busy_before) return error.TerminalBusy;
+        }
+    };
+    const Runner = struct {
+        bridge: *Bridge,
+        probe: *Probe,
+        invocation: host_tools.Invocation,
+        cancel: ?*provider.CancelToken = null,
+        done: std.atomic.Value(bool) = .init(false),
+        failure: ?anyerror = null,
+        fn run(self: *@This()) void {
+            self.bridge.waitOccupiedPreflight(self.probe, Probe.run, self.invocation, self.cancel, 1000) catch |err| {
+                self.failure = err;
+            };
+            self.done.store(true, .release);
+        }
+    };
+    var bridge = Bridge.init(a);
+    defer bridge.deinit();
+    const context: host_tools.Context = .{ .conversation_id = .generate(), .task_id = .generate(), .binding = .{ .session = 1 }, .binding_revision = 1, .grant_revision = 1 };
+    const invocation: host_tools.Invocation = .{ .context = context, .authority = .execution_control, .operation_id = 1, .turn_id = 1, .call_id = "wait", .tool_id = "host.run_in_terminal", .arguments = .{ .object = .empty }, .arguments_json = "{}", .arguments_hash = @splat(0), .canonical_arguments_hash = @splat(0) };
+    var probe: Probe = .{ .prompt_gap = true };
+    var runner: Runner = .{ .bridge = &bridge, .probe = &probe, .invocation = invocation };
+    const thread = try std.Thread.spawn(.{}, Runner.run, .{&runner});
+    while (!runner.done.load(.acquire)) {
+        bridge.pumpControllerTask();
+        pause();
+    }
+    thread.join();
+    try std.testing.expect(runner.failure == null);
+    try std.testing.expectEqual(@as(usize, 3), probe.calls);
+    try std.testing.expectError(error.TerminalWaitTimedOut, bridge.waitOccupiedPreflight(&probe, Probe.run, invocation, null, 0));
+    var cancel: provider.CancelToken = .{};
+    cancel.cancel();
+    try std.testing.expectError(error.CancelledBeforeDispatch, bridge.waitOccupiedPreflight(&probe, Probe.run, invocation, &cancel, 1000));
+    try std.testing.expectEqual(@as(usize, 3), probe.calls);
+    var active_cancel: provider.CancelToken = .{};
+    var busy: Probe = .{ .busy_before = 1000 };
+    var cancelled_runner: Runner = .{ .bridge = &bridge, .probe = &busy, .invocation = invocation, .cancel = &active_cancel };
+    const cancelled_thread = try std.Thread.spawn(.{}, Runner.run, .{&cancelled_runner});
+    while (busy.calls == 0 and !cancelled_runner.done.load(.acquire)) {
+        bridge.pumpControllerTask();
+        pause();
+    }
+    active_cancel.cancel();
+    cancelled_thread.join();
+    try std.testing.expectEqual(error.CancelledBeforeDispatch, cancelled_runner.failure.?);
 }
 
 test {

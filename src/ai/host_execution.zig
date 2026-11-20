@@ -13,7 +13,7 @@ const until_field = "\"until\":{\"type\":\"string\",\"enum\":[\"revision\",\"dec
 const output_fields = "\"output_cursor\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":128,\"description\":\"Use the exact next_cursor string from the previous result.\"},\"max_bytes\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":65536}";
 const default_decision_wait_ms = 5 * std.time.ms_per_min;
 pub const contributions = [_]host.Contribution{
-    tool("run_in_terminal", "Execute the exact approved command in the same authorized, ready terminal and shell. Local private integration and SSH shell events provide different evidence: inspect snapshot.completion_source. shell_reported events are cooperative shell reports, not tamper-proof private receipts. Saves the same-PTY START/END observation interval; output_scope=session_interval and output_attribution describe its limits, never complete exclusive command output. Requires a durable recording barrier and a ready input boundary. Fixed modes and write approvals still apply. Optional wait_ms (suggest 2000 for short commands) waits for a decision in this same call. Returns the real result or original execution_ref; use host.wait_execution with until=decision for ongoing work. wait_interrupted describes only an interrupted observation wait: preserve the original execution and never assume the command was unsent. Provide shell_id and shell_revision together or omit both. For nested shells, both are required; map control.shell_context.id and revision from host.read_terminal (include_control=true) or host.get_session to shell_id and shell_revision, only for the same intended terminal and shell. On ShellContextRequired no command was sent: follow the read-only next_tool hint, then use the observed pair and a fresh request_key only after verifying the intended shell. Do not retry unchanged or switch to a parent shell. Use ordinary ssh/su/bash/zsh/container interactive commands. A shell_switch notice is a candidate, not proof of entry. When the terminal is occupied, occupied_policy selects the behavior: wait (default) queues the command behind the foreground work and submits it once the terminal is ready; new_session opens a separate work session through the authorized lifecycle; reject fails fast with the occupier summary. On ShellPromptNotObserved the host recovers the shell automatically within this same call; only when automatic recovery fails, inspect host.read_terminal/host.get_session and use host.attach_shell manually, then submit only the unsent business command. For unknown outcomes read the screen/output and verify results; never invent an exit code or replay effects. After ShellContextExitedWithoutCompletion, use host.get_session to confirm the parent Shell is prompt_ready and input_ready. Use its current shell_id and shell_revision for a new command on that parent. The child result stays unknown. Do not repeat failed execution until readiness or shell context changes. IntegrationUnavailable writes no command. Never replay an unknown outcome with a new request_key.", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"session_ref\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":128},\"command\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":65534},\"shell_id\":{\"type\":\"string\",\"minLength\":32,\"maxLength\":32},\"shell_revision\":{\"type\":\"integer\",\"minimum\":0},\"occupied_policy\":{\"type\":\"string\",\"enum\":[\"wait\",\"new_session\",\"reject\"]}," ++ key_field ++ "," ++ wait_fields ++ "},\"required\":[\"session_ref\",\"command\",\"request_key\"]}"),
+    tool("run_in_terminal", "Execute the exact approved command in the same authorized, ready terminal and shell. Local private integration and SSH shell events provide different evidence: inspect snapshot.completion_source. shell_reported events are cooperative shell reports, not tamper-proof private receipts. Saves the same-PTY START/END observation interval; output_scope=session_interval and output_attribution describe its limits, never complete exclusive command output. Requires a durable recording barrier and a ready input boundary. Fixed modes and write approvals still apply. Optional wait_ms (suggest 2000 for short commands) waits for a decision in this same call. Returns the real result or original execution_ref; use host.wait_execution with until=decision for ongoing work. wait_interrupted describes only an interrupted observation wait: preserve the original execution and never assume the command was unsent. Provide shell_id and shell_revision together or omit both. For nested shells, both are required; map control.shell_context.id and revision from host.read_terminal (include_control=true) or host.get_session to shell_id and shell_revision, only for the same intended terminal and shell. On ShellContextRequired no command was sent: follow the read-only next_tool hint, then use the observed pair and a fresh request_key only after verifying the intended shell. Do not retry unchanged or switch to a parent shell. Use ordinary ssh/su/bash/zsh/container interactive commands. A shell_switch notice is a candidate, not proof of entry. When the terminal is occupied, occupied_policy selects the behavior: wait (default) waits up to 30 seconds for the same terminal and shell, revalidates its authority, and then requests command approval; new_session returns the next read-only discovery or lifecycle approval step without creating a session; reject fails immediately with the known occupancy information. A timed-out or interrupted wait has not sent the command. On ShellPromptNotObserved the host recovers the shell automatically within this same call; only when automatic recovery fails, inspect host.read_terminal/host.get_session and use host.attach_shell manually, then submit only the unsent business command. For unknown outcomes read the screen/output and verify results; never invent an exit code or replay effects. After ShellContextExitedWithoutCompletion, use host.get_session to confirm the parent Shell is prompt_ready and input_ready. Use its current shell_id and shell_revision for a new command on that parent. The child result stays unknown. Do not repeat failed execution until readiness or shell context changes. IntegrationUnavailable writes no command. Never replay an unknown outcome with a new request_key.", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"session_ref\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":128},\"command\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":65534},\"shell_id\":{\"type\":\"string\",\"minLength\":32,\"maxLength\":32},\"shell_revision\":{\"type\":\"integer\",\"minimum\":0},\"occupied_policy\":{\"type\":\"string\",\"enum\":[\"wait\",\"new_session\",\"reject\"]}," ++ key_field ++ "," ++ wait_fields ++ "},\"required\":[\"session_ref\",\"command\",\"request_key\"]}"),
     tool("get_execution", "Read a previously admitted execution by its original execution_ref. This read uses no new shell command or recording slot. Use next_cursor to read new bytes. output_retained means only previously captured output is available and later progress is unconfirmed. After reconnect use the same reference for old evidence, and an authorized read-only file tool for an existing job log. A new shell prompt or printed marker never proves the old command completed.", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{" ++ ref_field ++ "," ++ output_fields ++ "},\"required\":[\"execution_ref\"]}"),
     tool("wait_execution", "For an ongoing command, call once with its execution_ref and until=decision, omitting wait_ms. The host waits within the task budget, or up to five minutes when no task deadline is set, for a foreground result, explicit input request, failure, unknown outcome or takeover. Ordinary output stays buffered. Explicit wait_ms requests a shorter bounded observation. Use after_revision with until=revision to wait for a newer revision. If the wait times out or is interrupted, use the returned state and preserve the original execution_ref; do not replay the command or start a shell sleep to check it.", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{" ++ ref_field ++ "," ++ output_fields ++ "," ++ until_field ++ ",\"after_revision\":{\"type\":\"integer\",\"minimum\":0},\"wait_ms\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":30000}},\"required\":[\"execution_ref\"]}"),
     tool("send_execution_input", "Send input to the current execution using its live input capability, current fence and fresh per-input approval. Supply exactly one of text, key=enter, or host_secret_request=true. Omit the other two fields. controlled_line is a helper-attested consumer; terminal_stream only authorizes ordinary PTY bytes and does not prove which foreground program consumes them or that it is waiting. A written receipt means native write completed, not foreground consumption. Text is a single line of UTF-8, at most 4096 bytes, with no control characters. host_secret_request is supported only by the explicit Local native zerowork_secret_consume sink, which consumes and erases a secret without delivering it to arbitrary programs. Unknown password/OTP consumers require user takeover; never send secrets as text. Use user takeover for unknown input targets, raw/TUI interaction or secrets; never infer input authority from prompt text.", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{" ++ ref_field ++ "," ++ key_field ++ ",\"text\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":4096},\"key\":{\"type\":\"string\",\"enum\":[\"enter\"]},\"host_secret_request\":{\"type\":\"boolean\",\"enum\":[true],\"description\":\"Set to true only to request the supported native secret collector. Omit when sending text or Enter.\"}},\"required\":[\"execution_ref\",\"request_key\"]}"),
@@ -34,6 +34,96 @@ pub fn needsShellObservation(failure: anyerror) bool {
 
 pub fn needsInputObservation(failure: anyerror) bool {
     return failure == error.InputConflict or failure == error.TerminalInputConflictChanged;
+}
+
+pub const OccupiedPolicy = enum { wait, new_session, reject };
+pub fn occupiedPolicy(arguments: std.json.Value) !OccupiedPolicy {
+    if (arguments != .object) return error.InvalidArguments;
+    const value = arguments.object.get("occupied_policy") orelse return .wait;
+    if (value != .string) return error.InvalidArguments;
+    return std.meta.stringToEnum(OccupiedPolicy, value.string) orelse error.InvalidArguments;
+}
+
+/// No command or session has been created when the occupied target is
+/// rejected. A new session always goes through the regular lifecycle tools.
+pub fn occupiedResult(allocator: std.mem.Allocator, invocation: host.Invocation, policy: OccupiedPolicy, waited_ms: u64) !host.Result {
+    const reference = try string(invocation.arguments, "session_ref");
+    const needs_new_session = policy == .new_session;
+    const create_group_first = needs_new_session and invocation.context.child_origin == null and invocation.context.binding == .session;
+    var name: [64]u8 = undefined;
+    const next_tool = if (needs_new_session)
+        try @import("plugin_tools.zig").encodeName(&name, if (create_group_first) "host.create_group" else "host.get_current_context")
+    else
+        try @import("plugin_tools.zig").encodeName(&name, "host.read_terminal");
+    const lifecycle_tools = if (needs_new_session)
+        try @import("plugin_tools.zig").toolHints(allocator, if (create_group_first) &.{ "host.create_group", "host.open_session" } else if (invocation.context.child_origin != null) &.{ "host.create_group", "host.open_session" } else &.{"host.open_session"})
+    else
+        null;
+    defer if (lifecycle_tools) |value| allocator.free(value);
+    const body = try std.json.Stringify.valueAlloc(allocator, .{
+        .error_code = if (policy == .wait) "TerminalWaitTimedOut" else "TerminalBusy",
+        .state = "cancelled_unsent",
+        .message = if (create_group_first) "原终端被占用，命令未发送，也没有创建新会话。可先调用 next_tool，经现有审批流程建立工作组；成功后刷新上下文，再按可用来源调用 lifecycle_tools 并等待新会话就绪。工具可用性和权限由宿主验证。" else if (needs_new_session) "原终端被占用，命令未发送，也没有创建新会话。先调用 next_tool 只读确认当前工作组、可用来源和工具，再按结果使用 lifecycle_tools 经现有审批流程创建并等待新会话就绪；没有可用来源时不要猜测或自行创建。" else if (policy == .wait) "等待终端就绪超时，命令未发送。请先查看原终端，再决定下一步。" else "终端正被其他操作占用，命令未发送。请先查看原终端，再决定下一步。",
+        .occupier_summary = "终端正被其他操作占用，具体命令未知。",
+        .waited_ms = waited_ms,
+        .side_effect_started = false,
+        .local_released = true,
+        .remote_effect_unknown = false,
+        .next_tool = next_tool,
+        .lifecycle_tools = lifecycle_tools,
+        .next_arguments = .{
+            .initial_session_ref = if (create_group_first) reference else null,
+            .session_ref = if (!needs_new_session) reference else null,
+            .include_control = if (!needs_new_session) @as(?bool, true) else null,
+        },
+    }, .{ .emit_null_optional_fields = false });
+    errdefer allocator.free(body);
+    var result = try ownedResult(allocator, invocation.context, invocation.operation_id, body, false, false);
+    result.status = .rejected;
+    return result;
+}
+
+test "occupied new session returns the current lifecycle step without creating anything" {
+    const a = std.testing.allocator;
+    const args = try std.json.parseFromSlice(std.json.Value, a, "{\"session_ref\":\"original\",\"command\":\"pwd\",\"request_key\":\"run\"}", .{});
+    defer args.deinit();
+    var invocation: host.Invocation = .{ .context = .{ .conversation_id = .generate(), .task_id = .generate(), .binding = .{ .session = 1 }, .binding_revision = 1, .grant_revision = 1 }, .authority = .execution_control, .operation_id = 1, .turn_id = 1, .call_id = "occupied", .tool_id = "host.run_in_terminal", .arguments = args.value, .arguments_json = "{}", .arguments_hash = @splat(0), .canonical_arguments_hash = @splat(0) };
+    for ([_]bool{ false, true }) |group| {
+        if (group) invocation.context.binding = .{ .group = 7 };
+        var result = try occupiedResult(a, invocation, .new_session, 0);
+        defer result.deinit(a);
+        const body = try std.json.parseFromSlice(std.json.Value, a, result.blocks[0].structured, .{});
+        defer body.deinit();
+        try std.testing.expect(!body.value.object.get("side_effect_started").?.bool);
+        try std.testing.expectEqualStrings("cancelled_unsent", body.value.object.get("state").?.string);
+        try std.testing.expectEqualStrings(if (group) "host__get_ucurrent_ucontext" else "host__create_ugroup", body.value.object.get("next_tool").?.string);
+        const next = body.value.object.get("next_arguments").?.object;
+        if (group) {
+            try std.testing.expect(next.get("source_ref") == null);
+            try std.testing.expectEqualStrings("host__open_usession", body.value.object.get("lifecycle_tools").?.string);
+        } else try std.testing.expectEqualStrings("original", next.get("initial_session_ref").?.string);
+    }
+    invocation.context.binding = .{ .session = 1 };
+    invocation.context.child_origin = .{ .agent = .generate(), .parent = .{ .agent = .generate(), .conversation = .generate(), .binding = 1, .environment = 1 }, .worker_generation = 1, .scope_revision = 1 };
+    var child = try occupiedResult(a, invocation, .new_session, 0);
+    defer child.deinit(a);
+    const child_body = try std.json.parseFromSlice(std.json.Value, a, child.blocks[0].structured, .{});
+    defer child_body.deinit();
+    try std.testing.expectEqualStrings("host__get_ucurrent_ucontext", child_body.value.object.get("next_tool").?.string);
+    try std.testing.expect(child_body.value.object.get("next_arguments").?.object.count() == 0);
+    var rejected = try occupiedResult(a, invocation, .reject, 0);
+    defer rejected.deinit(a);
+    const reject_body = try std.json.parseFromSlice(std.json.Value, a, rejected.blocks[0].structured, .{});
+    defer reject_body.deinit();
+    try std.testing.expectEqualStrings("TerminalBusy", reject_body.value.object.get("error_code").?.string);
+    try std.testing.expectEqualStrings("host__read_uterminal", reject_body.value.object.get("next_tool").?.string);
+    try std.testing.expect(!reject_body.value.object.get("side_effect_started").?.bool);
+    var timed_out = try occupiedResult(a, invocation, .wait, 30000);
+    defer timed_out.deinit(a);
+    const body = try std.json.parseFromSlice(std.json.Value, a, timed_out.blocks[0].structured, .{});
+    defer body.deinit();
+    try std.testing.expectEqualStrings("TerminalWaitTimedOut", body.value.object.get("error_code").?.string);
+    try std.testing.expectEqual(@as(i64, 30000), body.value.object.get("waited_ms").?.integer);
 }
 
 /// Use only when this invocation is known to have sent no command bytes.

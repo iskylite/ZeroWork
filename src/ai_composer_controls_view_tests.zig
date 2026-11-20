@@ -1293,6 +1293,26 @@ test "AI composer live context usage updates the open menu without rebuilding mo
         try std.testing.expectEqual(version, f.view.model_version.peek());
         try std.testing.expectEqualStrings("alpha", f.view.labels[2].?.getText().?.content);
     }
+    for ([_]@import("ai/provider.zig").SkillCatalogStatus{
+        .{ .shortened = 21 },
+        .{ .shortened = 3, .omitted = 18 },
+        .{ .omitted = 21 },
+        .{},
+    }, [_]?[]const u8{
+        "21 条描述已截断",
+        "3 条描述已截断 · 18 项未列出",
+        "21 项未列出",
+        null,
+    }) |status, expected| {
+        snapshot.usage.?.skill_catalog = status;
+        try f.view.update(snapshot);
+        f.settle();
+        const row = find(f.cx.root.?, "ai.usage.skill_catalog");
+        if (expected) |detail| {
+            try std.testing.expect(row != null);
+            try std.testing.expect(hasText(row.?, detail));
+        } else try std.testing.expect(row == null);
+    }
 }
 
 test "AI workspace composer menu captures the displayed conversation and revision" {

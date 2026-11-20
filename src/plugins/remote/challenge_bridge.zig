@@ -93,7 +93,11 @@ pub const Bridge = struct {
             else => .secret_input,
         };
         if (request.kind == .host_key_unknown or request.kind == .host_key_changed) if (details.host_key) |key| {
-            payload.material = try std.fmt.allocPrint(allocator, "{s}\n{s}\n{s}{s}{s}\n记录路径：{s}", .{ key.algorithmSlice(), key.fingerprintSlice(), if (request.kind == .host_key_changed) "原密钥：" else "", key.old_algorithm[0..key.old_algorithm_len], key.old_fingerprint[0..key.old_fingerprint_len], key.store_path[0..key.store_path_len] });
+            const store_path = if (key.store_path_len != 0) key.store_path[0..key.store_path_len] else "尚未提供记录路径";
+            payload.material = if (request.kind == .host_key_changed and (key.old_algorithm_len != 0 or key.old_fingerprint_len != 0))
+                try std.fmt.allocPrint(allocator, "{s}\n{s}\n原密钥：{s} {s}\n记录路径：{s}", .{ key.algorithmSlice(), key.fingerprintSlice(), key.old_algorithm[0..key.old_algorithm_len], key.old_fingerprint[0..key.old_fingerprint_len], store_path })
+            else
+                try std.fmt.allocPrint(allocator, "{s}\n{s}\n记录路径：{s}", .{ key.algorithmSlice(), key.fingerprintSlice(), store_path });
         };
         switch (request.kind) {
             .host_key_unknown => {

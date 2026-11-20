@@ -543,3 +543,68 @@ test "v0.7 board post 落 journal 并在重放时恢复" {
     defer replayed_two.deinit();
     try std.testing.expectError(error.InvalidSessionJournal, journal_two.bind(&replayed_two));
 }
+
+test "board invocation identity preserves distinct posts and deduplicates replay" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var journal = try Journal.open(a, std.testing.io, tmp.dir, "board-identities.jsonl");
+    defer journal.deinit();
+    var store = lifecycle.Store.init(a);
+    defer store.deinit();
+    try journal.bind(&store);
+    const parent_agent = try store.attach(.{ .session = 11 });
+    const ticket = try store.create(parent_agent.id);
+    var root = budget.Root.init(a);
+    defer root.deinit();
+    const parent = id.TaskId.generate();
+    const first_task = id.TaskId.generate();
+    const second_task = id.TaskId.generate();
+    try root.add(.{ .root = parent, .task = parent, .conversation = ticket.conversation, .agent = parent_agent.id, .generation = 1 });
+    try lifecycle.Store.persistTask(&store, root.facts[0]);
+    try root.add(.{ .root = parent, .task = first_task, .parent = parent, .conversation = id.ConversationId.generate(), .agent = id.AgentId.generate(), .generation = 1 });
+    try root.add(.{ .root = parent, .task = second_task, .parent = parent, .conversation = id.ConversationId.generate(), .agent = id.AgentId.generate(), .generation = 1 });
+    root.board_persist = .{ .context = &store, .write = lifecycle.Store.persistBoardPost };
+
+    const first: board.Post = .{ .origin = root.facts[1].seq, .to = .parent, .category = .ask, .text = "相同内容", .ts = 1 };
+    const receipt = try root.submitBoard(first, first_task, 3, "call-a");
+    const retry = try root.submitBoard(first, first_task, 3, "call-a");
+    try std.testing.expect(!receipt.duplicate and retry.duplicate);
+    try std.testing.expectEqualSlices(u8, &receipt.post_id, &retry.post_id);
+    try std.testing.expect(root.board_delivery_claims.contains(receipt.post_id));
+    try std.testing.expectEqual(@as(usize, 1), root.board_posts.items.len);
+    // A retry cannot claim or deliver again; a finished claim is one-shot.
+    try std.testing.expect(root.finishBoardDelivery(receipt.post_id, true));
+    try std.testing.expect(!root.finishBoardDelivery(receipt.post_id, true));
+    try std.testing.expect(root.board_posts.items[0].delivered);
+    try std.testing.expect((try root.submitBoard(first, first_task, 3, "call-a")).duplicate);
+    try std.testing.expect(!root.board_delivery_claims.contains(receipt.post_id));
+
+    var other_target = first;
+    other_target.to = .{ .member = 2 };
+    try std.testing.expectError(error.BoardCallConflict, root.submitBoard(other_target, first_task, 3, "call-a"));
+    const target_receipt = try root.submitBoard(other_target, first_task, 3, "call-b");
+    var other_member = first;
+    other_member.origin = root.facts[2].seq;
+    const member_receipt = try root.submitBoard(other_member, second_task, 3, "call-a");
+    try std.testing.expect(!std.mem.eql(u8, &receipt.post_id, &target_receipt.post_id));
+    try std.testing.expect(!std.mem.eql(u8, &receipt.post_id, &member_receipt.post_id));
+    try std.testing.expect(root.finishBoardDelivery(target_receipt.post_id, false));
+    try std.testing.expect(!root.board_delivery_claims.contains(target_receipt.post_id));
+    try std.testing.expect(!root.board_posts.items[1].delivered);
+    try std.testing.expect(root.finishBoardDelivery(member_receipt.post_id, true));
+
+    // Simulate an extra journal copy of an invocation and legacy text-keyed
+    // collisions. Only the invocation-keyed duplicate may be collapsed.
+    try lifecycle.Store.persistBoardPost(&store, ticket.conversation, root.board_posts.items[0]);
+    try root.postBoard(.{ .origin = 1, .to = .parent, .category = .note, .text = "旧帖同文", .ts = 2 });
+    try root.postBoard(.{ .origin = 2, .to = .parent, .category = .note, .text = "旧帖同文", .ts = 3 });
+    var replayed = lifecycle.Store.init(a);
+    defer replayed.deinit();
+    try journal.bind(&replayed);
+    try std.testing.expectEqual(@as(usize, 5), replayed.board_posts.items.len);
+    try std.testing.expectEqualSlices(u8, &receipt.post_id, &replayed.board_posts.items[0].post.post_id);
+    try std.testing.expectEqualSlices(u8, &target_receipt.post_id, &replayed.board_posts.items[1].post.post_id);
+    try std.testing.expectEqualSlices(u8, &member_receipt.post_id, &replayed.board_posts.items[2].post.post_id);
+    try std.testing.expect(!replayed.board_posts.items[3].post.call_keyed);
+    try std.testing.expect(!replayed.board_posts.items[4].post.call_keyed);
+}

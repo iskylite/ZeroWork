@@ -735,7 +735,7 @@ fn childLimitPayload(a: std.mem.Allocator, root: *budget.Root, owner_task: id.Ta
         const entry = try std.fmt.allocPrint(a, "#{d} {s}", .{ fact.seq, if (fact.label.len != 0) fact.label else "" });
         try holders.append(a, entry);
     };
-    return .{ .active = active, .limit = 4, .holders = try a.dupe([]const u8, holders.items) };
+    return .{ .active = active, .limit = root.child_limit, .holders = try a.dupe([]const u8, holders.items) };
 }
 
 fn authorizedSessionsPayload(a: std.mem.Allocator, env: Environment) !SessionsDetails {

@@ -181,8 +181,8 @@ pub fn usageColor(index: usize) ui.Color {
         else => colors.fg_1,
     };
 }
-pub fn usageHeight(parts: usize, measured: bool, viewport_height: f32) f32 {
-    return @min(@as(f32, 116) + @as(f32, @floatFromInt(parts)) * 26 + (if (measured) @as(f32, 26) else 0), @max(0, viewport_height - 16));
+pub fn usageHeight(rows: usize, viewport_height: f32) f32 {
+    return @min(@as(f32, 116) + @as(f32, @floatFromInt(rows)) * 26, @max(0, viewport_height - 16));
 }
 pub fn compactionButton() ui.BoxStyle {
     var style = iconButton(8);

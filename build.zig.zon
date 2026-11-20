@@ -1,6 +1,6 @@
 .{
     .name = .zerowork,
-    .version = "0.7.0-rc4",
+    .version = "0.7.0-rc5",
     .fingerprint = 0xaebecab990406644,
     .minimum_zig_version = "0.17.0",
     .dependencies = .{

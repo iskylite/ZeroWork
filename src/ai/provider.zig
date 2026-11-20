@@ -181,6 +181,15 @@ pub const DispatchFence = struct {
         if (!self.current(self.context, self.revision)) return error.ScopeChanged;
     }
 };
+pub const SkillCatalogStatus = struct {
+    shortened: usize = 0,
+    omitted: usize = 0,
+
+    pub fn incomplete(self: SkillCatalogStatus) bool {
+        return self.shortened != 0 or self.omitted != 0;
+    }
+};
+
 pub const ChatRequest = struct {
     thinking: ?bool = null,
     native_effort: bool = false,
@@ -188,6 +197,8 @@ pub const ChatRequest = struct {
     model: []const u8,
     effort: ?Effort = null,
     system: []const u8,
+    /// Status of the rendered skill directory, retained locally for the usage panel.
+    skill_catalog: SkillCatalogStatus = .{},
     messages: []const Message,
     tools: []const ToolDefinition = &.{},
     tool_table: ?*const @import("plugin_tools.zig").RequestTable = null,

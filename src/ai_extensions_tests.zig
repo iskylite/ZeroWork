@@ -949,9 +949,9 @@ test "offline skill provider wire includes metadata and loads body only for expl
         .dynamic = .{ .id = "host.skills", .name = "host__skills", .schema = gateway.contributions[2].definition.schema, .description = gateway.contributions[2].definition.description },
     }};
     const prompt = try @import("ai/session_prompt.zig").buildWithSkillWindow(a, .auto, tools, .{}, null, session.frozen.skills, 64_000, 0);
-    defer a.free(prompt);
+    defer a.free(prompt.text);
     const messages = [_]provider.Message{.{ .content = "Show the previous cluster benchmark run." }};
-    var request: provider.ChatRequest = .{ .model = "fixture", .system = prompt, .messages = &messages, .tools = tools };
+    var request: provider.ChatRequest = .{ .model = "fixture", .system = prompt.text, .messages = &messages, .tools = tools };
     const discovery = try @import("ai/provider_http.zig").requestBody(a, .openai_compat, request, 64_000);
     defer a.free(discovery);
     try std.testing.expect(std.mem.indexOf(u8, discovery, imported.skill.id) != null);

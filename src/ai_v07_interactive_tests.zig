@@ -183,6 +183,116 @@ test "v0.7 board 引擎：postBoard 入流、ask 计数按 seq 键控与终态�
     try std.testing.expectEqual(@as(usize, 0), root.board_ask_counts.count());
 }
 
+test "board ask retry preserves receipt and ordinary status changes preserve consecutive count" {
+    var root = budget.Root.init(a);
+    defer root.deinit();
+    const parent = id.TaskId.generate();
+    try root.add(.{ .root = parent, .task = parent, .conversation = id.ConversationId.generate(), .agent = id.AgentId.generate(), .generation = 1 });
+    const child = delegated(parent, id.TaskId.generate());
+    try root.add(child);
+    const post: @import("ai/swarm_board.zig").Post = .{ .origin = root.facts[1].seq, .category = .ask, .text = "需要决定", .ts = 1 };
+
+    const first = try root.submitBoard(post, child.task, 7, "ask-1");
+    try std.testing.expect(!first.duplicate and first.auto_reply == null);
+    try root.state(child.task, .waiting_model, "");
+    try root.state(child.task, .running, "");
+    const retry = try root.submitBoard(post, child.task, 7, "ask-1");
+    try std.testing.expect(retry.duplicate and retry.auto_reply == null);
+    try std.testing.expectEqualSlices(u8, &first.post_id, &retry.post_id);
+    try std.testing.expect((try root.submitBoard(post, child.task, 7, "ask-2")).auto_reply == null);
+    try root.state(child.task, .waiting_children, "");
+    try std.testing.expect((try root.submitBoard(post, child.task, 7, "ask-3")).auto_reply == null);
+    const fourth = try root.submitBoard(post, child.task, 7, "ask-4");
+    try std.testing.expectEqualStrings("按当前最佳判断继续", fourth.auto_reply.?);
+    const fourth_retry = try root.submitBoard(post, child.task, 7, "ask-4");
+    try std.testing.expect(fourth_retry.duplicate);
+    try std.testing.expectEqualStrings("按当前最佳判断继续", fourth_retry.auto_reply.?);
+    try std.testing.expectEqual(@as(usize, 4), root.board_posts.items.len);
+    // Another category interrupts a consecutive series of asks.
+    var progress = post;
+    progress.category = .progress;
+    _ = try root.submitBoard(progress, child.task, 7, "progress");
+    try std.testing.expect((try root.submitBoard(post, child.task, 7, "new-ask")).auto_reply == null);
+    var next = child;
+    next.task = id.TaskId.generate();
+    try root.rollover(child.task, .succeeded, next);
+    try std.testing.expectEqual(@as(usize, 0), root.board_ask_counts.count());
+    try std.testing.expect((try root.submitBoard(post, next.task, 8, "next-ask")).auto_reply == null);
+    try root.state(next.task, .succeeded, "done");
+    try std.testing.expectEqual(@as(usize, 0), root.board_ask_counts.count());
+}
+
+test "board concurrent retries claim a single post and wake" {
+    var root = budget.Root.init(a);
+    defer root.deinit();
+    const parent = id.TaskId.generate();
+    try root.add(.{ .root = parent, .task = parent, .conversation = id.ConversationId.generate(), .agent = id.AgentId.generate(), .generation = 1 });
+    const child = delegated(parent, id.TaskId.generate());
+    try root.add(child);
+    const post: @import("ai/swarm_board.zig").Post = .{ .origin = root.facts[1].seq, .to = .parent, .category = .ask, .text = "并发重试", .ts = 1 };
+    const Worker = struct {
+        root: *budget.Root,
+        post: @import("ai/swarm_board.zig").Post,
+        task: id.TaskId,
+        start: *std.atomic.Value(bool),
+        receipt: ?budget.Root.BoardSubmission = null,
+        failure: ?anyerror = null,
+        fn run(self: *@This()) void {
+            while (!self.start.load(.acquire)) std.atomic.spinLoopHint();
+            self.receipt = self.root.submitBoard(self.post, self.task, 1, "same-call") catch |err| {
+                self.failure = err;
+                return;
+            };
+        }
+    };
+    var start: std.atomic.Value(bool) = .init(false);
+    var workers: [4]Worker = undefined;
+    var threads: [4]std.Thread = undefined;
+    for (&workers, &threads, 0..) |*worker, *thread, index| {
+        worker.* = .{ .root = &root, .post = post, .task = child.task, .start = &start };
+        thread.* = std.Thread.spawn(.{}, Worker.run, .{worker}) catch |err| {
+            start.store(true, .release);
+            for (threads[0..index]) |started| started.join();
+            return err;
+        };
+    }
+    start.store(true, .release);
+    for (threads) |thread| thread.join();
+    var new_posts: usize = 0;
+    for (workers) |worker| try std.testing.expect(worker.failure == null and worker.receipt != null);
+    const post_id = workers[0].receipt.?.post_id;
+    for (workers) |worker| {
+        const receipt = worker.receipt.?;
+        if (!receipt.duplicate) new_posts += 1;
+        try std.testing.expectEqualSlices(u8, &post_id, &receipt.post_id);
+        try std.testing.expect(receipt.auto_reply == null);
+    }
+    try std.testing.expectEqual(@as(usize, 1), new_posts);
+    try std.testing.expectEqual(@as(usize, 1), root.board_posts.items.len);
+    try std.testing.expectEqual(@as(usize, 1), root.board_delivery_claims.count());
+    try std.testing.expect(root.finishBoardDelivery(post_id, true));
+}
+
+test "board failed persistence leaves no post claim or ask count" {
+    const Fail = struct {
+        fn write(_: *anyopaque, _: id.ConversationId, _: @import("ai/swarm_board.zig").Post) !void {
+            return error.InjectedBoardFailure;
+        }
+    };
+    var root = budget.Root.init(a);
+    defer root.deinit();
+    const parent = id.TaskId.generate();
+    try root.add(.{ .root = parent, .task = parent, .conversation = id.ConversationId.generate(), .agent = id.AgentId.generate(), .generation = 1 });
+    const child = delegated(parent, id.TaskId.generate());
+    try root.add(child);
+    root.board_persist = .{ .context = &root, .write = Fail.write };
+    const post: @import("ai/swarm_board.zig").Post = .{ .origin = root.facts[1].seq, .to = .parent, .category = .ask, .text = "写入失败", .ts = 1 };
+    try std.testing.expectError(error.InjectedBoardFailure, root.submitBoard(post, child.task, 1, "failed"));
+    try std.testing.expectEqual(@as(usize, 0), root.board_posts.items.len);
+    try std.testing.expectEqual(@as(usize, 0), root.board_delivery_claims.count());
+    try std.testing.expectEqual(@as(usize, 0), root.board_ask_counts.count());
+}
+
 test "v0.7 depends_on 门控与 challenge 工具契约" {
     const gateway = @import("ai/child_gateway.zig");
     const orchestration = @import("ai/swarm_orchestration.zig");
@@ -201,7 +311,7 @@ test "v0.7 depends_on 门控与 challenge 工具契约" {
     try std.testing.expect(parsed.value.purpose == .challenge);
     try std.testing.expectEqualStrings("@1", parsed.value.challenge_target.?);
     // 依赖引用解析与环检测。
-    try std.testing.expectError(error.DependencyCycle, orchestration.containsSelf(&.{1, 2}, 2));
+    try std.testing.expectError(error.DependencyCycle, orchestration.containsSelf(&.{ 1, 2 }, 2));
 }
 
 test "v0.7 §12.3 swarm 配置键解析、范围与往返 + 停滞升级阈值读配置" {

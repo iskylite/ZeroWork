@@ -46,12 +46,16 @@ pub fn buildForWorkspace(allocator: std.mem.Allocator, mode: config.ExecutionMod
 }
 
 pub fn buildWithSkills(allocator: std.mem.Allocator, mode: config.ExecutionMode, tools: []const provider.ToolDefinition, defaults: @import("child_agent.zig").Defaults, snapshot: ?workspace.Snapshot, skills: []const @import("../config/ai_extensions.zig").Skill) ![]u8 {
-    return buildWithSkillWindow(allocator, mode, tools, defaults, snapshot, skills, null, 0);
+    return (try buildWithSkillWindow(allocator, mode, tools, defaults, snapshot, skills, null, 0)).text;
 }
 
 const Skill = @import("../config/ai_extensions.zig").Skill;
+pub const Prompt = struct {
+    text: []u8,
+    skill_catalog: provider.SkillCatalogStatus = .{},
+};
 
-pub fn buildWithSkillWindow(allocator: std.mem.Allocator, mode: config.ExecutionMode, tools: []const provider.ToolDefinition, defaults: @import("child_agent.zig").Defaults, snapshot: ?workspace.Snapshot, skills: []const Skill, context_window: ?u32, reserved_input_tokens: usize) ![]u8 {
+pub fn buildWithSkillWindow(allocator: std.mem.Allocator, mode: config.ExecutionMode, tools: []const provider.ToolDefinition, defaults: @import("child_agent.zig").Defaults, snapshot: ?workspace.Snapshot, skills: []const Skill, context_window: ?u32, reserved_input_tokens: usize) !Prompt {
     var text: std.ArrayList(u8) = .empty;
     defer text.deinit(allocator);
     try text.appendSlice(allocator, common);
@@ -165,23 +169,30 @@ pub fn buildWithSkillWindow(allocator: std.mem.Allocator, mode: config.Execution
     if (has(tools, "bmc_ikvm.keyboard") or has(tools, "bmc_ikvm.pointer")) try text.appendSlice(allocator, "KVM input requires a fresh observation_id for the same target and follows the returned image's coordinates and supported key/text limits. Queued or sent only proves dispatch, not the intended screen effect. Observe again to verify and never replay uncertain input. ");
     if (has(tools, @import("image_offload.zig").tool_id)) try text.appendSlice(allocator, "Reading a saved image returns historical pixels and never renews a live observation_id. ");
     const projected = try provider.projectToolNames(allocator, tools, text.items);
-    if (!show_skills) return projected;
+    if (!show_skills) return .{ .text = projected };
     defer allocator.free(projected);
     text.clearRetainingCapacity();
     try text.appendSlice(allocator, projected);
-    const budget = try skillCatalogBudget(context_window, tools, projected.len, reserved_input_tokens);
-    try appendSkillCatalog(allocator, &text, skills, budget);
-    return text.toOwnedSlice(allocator);
+    const budget = try skillCatalogBudget(allocator, skills, context_window, tools, projected.len, reserved_input_tokens);
+    const status = try appendSkillCatalog(allocator, &text, skills, budget);
+    return .{ .text = try text.toOwnedSlice(allocator), .skill_catalog = status };
 }
 
-fn skillCatalogBudget(window: ?u32, tools: []const provider.ToolDefinition, base_bytes: usize, reserved_input_tokens: usize) !usize {
+fn skillCatalogBudget(a: std.mem.Allocator, skills: []const Skill, window: ?u32, tools: []const provider.ToolDefinition, base_bytes: usize, reserved_input_tokens: usize) !usize {
     const budget = @import("local_text_request.zig");
     const context = window orelse return 2048;
-    // Reserve answer and transcript space before adding discovery-only data.
-    // Bytes/token are conservative here; the existing whole-request budget
-    // subsequently checks this catalog with actual messages, tools and images.
+    // Use the same byte estimator as request admission, reserving reply and
+    // transcript space before adding discovery metadata.
     const reserve = @max(@as(usize, context) / 4, 512);
     const remaining = @as(usize, context) -| (budget.textTokens(base_bytes) +| (try budget.toolTokens(tools)) +| reserve +| reserved_input_tokens);
+    const available_bytes = remaining *| 4;
+    const overhead = catalog_header.len + catalog_marker_reserve;
+    if (available_bytes >= overhead) {
+        const complete_cap = available_bytes - overhead;
+        if (try skillCost(a, skills, 1024, complete_cap) <= complete_cap) return available_bytes;
+    }
+    // Leave most of the scarce remainder available to the task if a complete
+    // directory cannot fit. The model can look up individual skills as needed.
     return @min(@min(@as(usize, context) / 50, remaining) *| 2, 8192);
 }
 
@@ -211,11 +222,15 @@ fn skillCost(a: std.mem.Allocator, skills: []const Skill, limit: usize, cap: usi
     return total;
 }
 
-fn appendSkillCatalog(a: std.mem.Allocator, text: *std.ArrayList(u8), skills: []const Skill, budget: usize) !void {
+fn appendSkillCatalog(a: std.mem.Allocator, text: *std.ArrayList(u8), skills: []const Skill, budget: usize) !provider.SkillCatalogStatus {
+    var status: provider.SkillCatalogStatus = .{};
     if (budget < catalog_header.len + catalog_marker_reserve) {
         // The policy in the base prompt still advertises the list fallback,
         // even when no optional directory records fit.
-        return;
+        for (skills) |skill| if (skill.enabled) {
+            status.omitted += 1;
+        };
+        return status;
     }
     // Stable order keeps rendering predictable when minimum rows overflow,
     // independent of registry insertion order.
@@ -240,23 +255,22 @@ fn appendSkillCatalog(a: std.mem.Allocator, text: *std.ArrayList(u8), skills: []
         }
         limit = low;
     }
-    var omitted: usize = 0;
-    var shortened: usize = 0;
     for (ordered) |skill| if (skill.enabled) {
         const entry = try skillEntry(a, skill, limit);
         defer a.free(entry);
         if (text.items.len - start + entry.len + 1 > cap) {
-            omitted += 1;
+            status.omitted += 1;
             continue; // An oversized identity must not starve later entries.
         }
         try text.appendSlice(a, entry);
         try text.append(a, '\n');
-        if (skill.description.len > limit) shortened += 1;
+        if (skill.description.len > limit) status.shortened += 1;
     };
-    if (omitted != 0 or shortened != 0) {
+    if (status.incomplete()) {
         var buf: [catalog_marker_reserve]u8 = undefined;
-        try text.appendSlice(a, try std.fmt.bufPrint(&buf, "Catalog incomplete: omitted={d}, descriptions_shortened={d}. Use skill list with a name/query.\n", .{ omitted, shortened }));
+        try text.appendSlice(a, try std.fmt.bufPrint(&buf, "Catalog incomplete: omitted={d}, descriptions_shortened={d}. Use skill list with a name/query.\n", .{ status.omitted, status.shortened }));
     }
+    return status;
 }
 
 test "session prompt follows final SFTP BMC Local SSH and mixed catalogs" {
@@ -437,15 +451,16 @@ test "skill catalog budgets twenty-one Chinese records fairly and is independent
         };
         reversed[original.len - i - 1] = skill.*;
     }
-    const all = try buildWithSkillWindow(a, .auto, tools, .{}, null, &original, 196_000, 0);
-    defer a.free(all);
-    const opposite = try buildWithSkillWindow(a, .auto, tools, .{}, null, &reversed, 196_000, 0);
-    defer a.free(opposite);
-    try std.testing.expectEqualStrings(all, opposite);
-    const start = std.mem.indexOf(u8, all, catalog_header).?;
-    try std.testing.expect(all.len - start <= 7840);
-    try std.testing.expect(std.mem.indexOf(u8, all[start..], "omitted=0, descriptions_shortened=21") != null);
-    var lines = std.mem.splitScalar(u8, all[start + catalog_header.len ..], '\n');
+    const all = try buildWithSkillWindow(a, .auto, tools, .{}, null, &original, 196_000, 143_000);
+    defer a.free(all.text);
+    const opposite = try buildWithSkillWindow(a, .auto, tools, .{}, null, &reversed, 196_000, 143_000);
+    defer a.free(opposite.text);
+    try std.testing.expectEqualStrings(all.text, opposite.text);
+    try std.testing.expectEqual(provider.SkillCatalogStatus{ .shortened = 21 }, all.skill_catalog);
+    const start = std.mem.indexOf(u8, all.text, catalog_header).?;
+    try std.testing.expect(all.text.len - start <= 7840);
+    try std.testing.expect(std.mem.indexOf(u8, all.text[start..], "omitted=0, descriptions_shortened=21") != null);
+    var lines = std.mem.splitScalar(u8, all.text[start + catalog_header.len ..], '\n');
     for (original) |skill| {
         const entry = try std.json.parseFromSlice(std.json.Value, a, lines.next().?, .{});
         defer entry.deinit();
@@ -457,11 +472,26 @@ test "skill catalog budgets twenty-one Chinese records fairly and is independent
         try std.testing.expect(std.mem.startsWith(u8, description, snippet));
         try std.testing.expect(entry.value.object.get("description_truncated").?.bool);
     }
+    for ([_]u32{ 128_000, 960_000 }) |window| {
+        const spacious = try buildWithSkillWindow(a, .auto, tools, .{}, null, &original, window, if (window == 960_000) 95_000 else 0);
+        defer a.free(spacious.text);
+        try std.testing.expect(!spacious.skill_catalog.incomplete());
+        const spacious_start = std.mem.indexOf(u8, spacious.text, catalog_header).?;
+        var full_lines = std.mem.splitScalar(u8, spacious.text[spacious_start + catalog_header.len ..], '\n');
+        for (original) |skill| {
+            const entry = try std.json.parseFromSlice(std.json.Value, a, full_lines.next().?, .{});
+            defer entry.deinit();
+            try std.testing.expectEqualStrings(skill.description, entry.value.object.get("description").?.string);
+            try std.testing.expect(!entry.value.object.get("description_truncated").?.bool);
+        }
+    }
     const constrained = try buildWithSkillWindow(a, .auto, tools, .{}, null, &original, 8192, 0);
-    defer a.free(constrained);
-    try std.testing.expect(std.mem.indexOf(u8, constrained, "omitted=21") != null);
+    defer a.free(constrained.text);
+    try std.testing.expectEqual(provider.SkillCatalogStatus{ .omitted = 21 }, constrained.skill_catalog);
+    try std.testing.expect(std.mem.indexOf(u8, constrained.text, "omitted=21") != null);
     const compressed = try buildWithSkillWindow(a, .auto, tools, .{}, null, &original, 8192, 10_000);
-    defer a.free(compressed);
-    try std.testing.expect(std.mem.indexOf(u8, compressed, catalog_header) == null);
-    try std.testing.expect(std.mem.indexOf(u8, compressed, "catalog is absent or incomplete") != null);
+    defer a.free(compressed.text);
+    try std.testing.expectEqual(provider.SkillCatalogStatus{ .omitted = 21 }, compressed.skill_catalog);
+    try std.testing.expect(std.mem.indexOf(u8, compressed.text, catalog_header) == null);
+    try std.testing.expect(std.mem.indexOf(u8, compressed.text, "catalog is absent or incomplete") != null);
 }
