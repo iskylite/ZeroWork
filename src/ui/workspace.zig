@@ -912,6 +912,13 @@ pub const Workspace = struct {
         const tab = self.sessionTab(id) orelse return error.InvalidTab;
         if (!tab.owned_pending) try self.model.replaceOwner(tab.tab_id, tab.content_owner, .{ .session = handle });
         tab.content_owner = .{ .session = handle };
+        if (!tab.archived) if (tab.terminal) |*terminal| {
+            if (terminal.terminal_menu_handler == null) {
+                terminal.setWorkerMenuHandler(handle, .{ .context = self, .request = onTerminalServiceMenu });
+            } else {
+                terminal.syncMenuOwner(handle);
+            }
+        };
     }
 
     /// Validate identities and reserve every fallible structure before making
@@ -5151,6 +5158,7 @@ pub const Workspace = struct {
         const ticket = self.identities.newTicket();
         tab.* = .{ .id = ticket.session_id, .tab_id = try tab_ids.allocate(), .content_owner = .{ .session = handle }, .generation = handle.generation, .host_id = 0, .host_index = removed_host_index, .host_snapshot = null, .root = pane, .terminal = terminal, .local = true, .local_scope = local_scope };
         tab.setTitle("Local Terminal");
+        tab.terminal.?.setWorkerMenuHandler(handle, .{ .context = self, .request = onTerminalServiceMenu });
         try self.mountLocalBanner(tab);
         try pane.appendChild(self.allocator, terminal.root);
         terminal_attached = true;
@@ -5486,7 +5494,7 @@ pub const Workspace = struct {
         const tab = self.sessionTab(id) orelse return error.InvalidTab;
         if (!tab.local or !tab.content_owner.eql(.{ .session = handle })) return error.StaleSession;
         if (tab.local_bound) return;
-        tab.terminal.?.setTerminalMenuHandler(.{ .context = self, .request = onTerminalServiceMenu });
+        tab.terminal.?.setWorkerMenuHandler(handle, .{ .context = self, .request = onTerminalServiceMenu });
         try tab.terminal.?.bindTerminalService(service);
         tab.local_bound = true;
     }
@@ -5495,8 +5503,7 @@ pub const Workspace = struct {
         const self: *Workspace = @ptrCast(@alignCast(raw orelse return));
         if (self.shutting_down) return;
         for (self.tabs.items, 0..) |tab, index| {
-            if (tab.closing or !tab.content_owner.eql(.{ .session = handle })) continue;
-            if (!tab.local and (tab.archived or tab.failed or tab.runtime == null)) continue;
+            if (tab.closing or tab.archived or !tab.content_owner.eql(.{ .session = handle })) continue;
             self.menu_bridge.fireTab(.terminal_middle_click, index, self.tabs.items.len > 1, .{ .x = x, .y = y, .w = 0, .h = 0 });
             return;
         }
@@ -6078,6 +6085,7 @@ pub const Workspace = struct {
             .terminal = terminal,
         };
         tab.setTitle(host.name);
+        tab.terminal.?.setWorkerMenuHandler(tab.content_owner.session, .{ .context = self, .request = onTerminalServiceMenu });
         try self.installTabModel(tab);
         try tab.terminal.?.attachSearch(self.scope);
         try self.terminal_area.appendChild(self.cx.allocator, pane);
@@ -7731,15 +7739,84 @@ test "SSH middle menu bridge preserves the clicked handle across active changes 
     clicked.closing = true;
     Workspace.onTerminalServiceMenu(&workspace, first, 90, 90);
     clicked.closing = false;
-    clicked.failed = true;
-    Workspace.onTerminalServiceMenu(&workspace, first, 90, 90);
-    clicked.failed = false;
     clicked.archived = true;
     Workspace.onTerminalServiceMenu(&workspace, first, 90, 90);
     clicked.archived = false;
-    clicked.runtime = null;
-    Workspace.onTerminalServiceMenu(&workspace, first, 90, 90);
     try std.testing.expectEqual(@as(usize, 1), sink.calls);
+    // Ended/failed/unconnected SSH tabs still allow the terminal middle-click menu.
+    clicked.failed = true;
+    Workspace.onTerminalServiceMenu(&workspace, first, 120, 60);
+    try std.testing.expectEqual(@as(usize, 2), sink.calls);
+    try std.testing.expectEqual(@as(?usize, 0), sink.index);
+    try std.testing.expectEqual(ui.ComputedRect{ .x = 120, .y = 60, .w = 0, .h = 0 }, sink.anchor);
+    clicked.runtime = null;
+    Workspace.onTerminalServiceMenu(&workspace, first, 130, 70);
+    try std.testing.expectEqual(@as(usize, 3), sink.calls);
+    try std.testing.expectEqual(@as(?usize, 0), sink.index);
+    try std.testing.expectEqual(ui.ComputedRect{ .x = 130, .y = 70, .w = 0, .h = 0 }, sink.anchor);
+}
+
+test "terminal middle menu survives failed reconnect generation advance and local unbind" {
+    const allocator = std.testing.allocator;
+    const cx = try ui.Cx.init(allocator, std.testing.io);
+    defer cx.deinit();
+    const scope = try ui.Scope.init(allocator, null, cx.owner);
+    defer scope.dispose();
+    const root = try ui.box(cx, .{ .width = .fill(), .height = .fill(), .direction = .column }, .{});
+    cx.root = root;
+    const strip = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 46 }, .flex_shrink = 0 }, .{});
+    try root.appendChild(allocator, strip);
+    const area = try ui.box(cx, .{ .width = .fill(), .height = .fill(), .flex = 1, .direction = .column }, .{});
+    try root.appendChild(allocator, area);
+    const empty = try ui.box(cx, .{ .width = .fill(), .height = .fill(), .position = .absolute }, .{});
+    try area.appendChild(allocator, empty);
+    const sidebar = try ui.box(cx, .{ .display = .none }, .{});
+    try root.appendChild(allocator, sidebar);
+    cx.setViewport(1100, 720);
+    const config: config_mod.Config = .{};
+    const workspace = try Workspace.init(allocator, cx, scope, std.testing.io, &config, "", sidebar, strip, area, empty);
+    const first_owner: identity.SessionHandle = .{ .session_id = @fromBackingInt(101), .generation = 1 };
+    const local_id = try workspace.createLocalSessionDirect(first_owner);
+    const local_tab = workspace.sessionTab(local_id).?;
+    const Sink = struct {
+        calls: usize = 0,
+        index: ?usize = null,
+        fn fire(raw: ?*anyopaque, trigger: MenuBridge.Trigger, _: usize, index: ?usize, _: bool, _: ui.ComputedRect) void {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            if (trigger != .terminal_middle_click) return;
+            self.calls += 1;
+            self.index = index;
+        }
+    };
+    var sink: Sink = .{};
+    workspace.menu_bridge = .{ .context = &sink, .fire = Sink.fire };
+    cx.layout();
+    _ = cx.render();
+    const rect = local_tab.terminal.?.root.globalRect();
+    const x = rect.x + 24;
+    const y = rect.y + 24;
+    // Before service binding (e.g., failed start or ended/unbound local terminal), middle-click still opens the menu.
+    cx.handleMouseDownEx(x, y, .middle, .{});
+    cx.handleMouseUpEx(x, y, .middle, .{});
+    try std.testing.expectEqual(@as(usize, 1), sink.calls);
+    try std.testing.expectEqual(@as(?usize, 0), sink.index);
+    // Advancing generation (as on reconnect failure) updates the terminal menu owner and rejects the old generation.
+    const next_owner = try first_owner.nextGeneration();
+    try workspace.bindSessionOwner(local_id, next_owner);
+    try std.testing.expectEqual(next_owner, local_tab.terminal.?.worker_menu_owner.?);
+    Workspace.onTerminalServiceMenu(workspace, first_owner, x, y);
+    try std.testing.expectEqual(@as(usize, 1), sink.calls);
+    cx.handleMouseDownEx(x, y, .middle, .{});
+    cx.handleMouseUpEx(x, y, .middle, .{});
+    try std.testing.expectEqual(@as(usize, 2), sink.calls);
+    workspace.unbindLocalTerminal(local_id, next_owner);
+    workspace.updateLocalState(local_id, .exited, "本地 zsh 已退出 · exit 0");
+    cx.layout();
+    _ = cx.render();
+    const ended_rect = local_tab.terminal.?.root.globalRect();
+    cx.handleMouseDownEx(ended_rect.x + 24, ended_rect.y + 24, .middle, .{});
+    cx.handleMouseUpEx(ended_rect.x + 24, ended_rect.y + 24, .middle, .{});
+    try std.testing.expectEqual(@as(usize, 3), sink.calls);
 }
 
 test "notification output keeps marker colors and keeps bouncing across rebuilds until read" {

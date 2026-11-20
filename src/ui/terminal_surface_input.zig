@@ -141,7 +141,7 @@ pub fn onEvent(self: *Surface, event: ui.events.Event) ui.events.EventResult {
                 },
                 .middle => {
                     if (self.menu_handler) |handler| {
-                        handler.request(handler.context, self.owner, mouse.x, mouse.y);
+                        handler.request(handler.context, self.menu_owner orelse self.owner, mouse.x, mouse.y);
                         return .stop;
                     }
                     return .ignored;

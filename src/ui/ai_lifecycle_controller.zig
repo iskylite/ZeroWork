@@ -220,7 +220,7 @@ pub const Controller = struct {
                 },
                 .open_session => {
                     if (request.group == null or self.child_group == null or self.child_group.? != @backingInt(request.group.?.id) or request.connection_policy != .new_only) return error.TargetNotAuthorized;
-                    if (request.saved_source != null or !self.app.childMayUseSource(context, request.source orelse return error.TargetNotAuthorized)) return error.TargetNotAuthorized;
+                    if (request.saved_source != null or request.local_source or !self.app.childMayUseSource(context, request.source orelse return error.TargetNotAuthorized)) return error.TargetNotAuthorized;
                     return;
                 },
                 .wait_session_ready => {},
@@ -327,7 +327,7 @@ pub const Controller = struct {
             if (request.session) |target| if (!self.inBinding(target) and !(request.kind == .reconnect_session and self.automaticReconnectTarget(target) != null)) return error.TargetNotAuthorized;
             if (request.source) |target| if (!self.inBinding(target)) return error.TargetNotAuthorized;
         }
-        var result: runtime.Authorized = .{ .session = request.session, .source = request.source, .saved_source = request.saved_source, .retention = request.retention orelse self.execution_policy.session_retention, .approval_required = true, .policy_revision = self.config_revision };
+        var result: runtime.Authorized = .{ .session = request.session, .source = request.source, .saved_source = request.saved_source, .local_source = request.local_source, .retention = request.retention orelse self.execution_policy.session_retention, .approval_required = true, .policy_revision = self.config_revision };
         if (request.group) |group| {
             result.group = try self.groupOwner(@backingInt(group.id));
             const entry = self.roster.findById(@intCast(@backingInt(group.id))).?;
@@ -350,7 +350,8 @@ pub const Controller = struct {
                 }
             },
             .open_session => {
-                if (result.group == null or (request.source == null) == (request.saved_source == null)) return error.InvalidArguments;
+                const source_count = @as(u8, @intFromBool(request.source != null)) + @intFromBool(request.saved_source != null) + @intFromBool(request.local_source);
+                if (result.group == null or source_count != 1) return error.InvalidArguments;
                 const policy = request.connection_policy orelse return error.InvalidArguments;
                 if (self.bridge.route_broker) |broker| {
                     if (broker.execution_route.requiresIndependentFollowup(context) and policy != .new_only) return error.IndependentSessionRequired;
@@ -358,9 +359,14 @@ pub const Controller = struct {
                 if (request.source) |source| {
                     const mapping = if (context.child_origin != null) try self.app.childOpenSource(source) else try self.app.ownedOpenSource(source, result.group.?.id, policy);
                     result.opens_local_terminal = mapping.process != null;
-                } else {
-                    try self.authorizeAsset(request.saved_source.?);
+                } else if (request.saved_source) |saved| {
+                    try self.authorizeAsset(saved);
                     if (policy == .reuse_only) return error.ReuseUnavailable;
+                } else if (request.local_source) {
+                    if (context.child_origin != null) return error.TargetNotAuthorized;
+                    if (policy != .new_only) return error.UnsupportedSource;
+                    if (self.app.sessions.registry.find("local") == null) return error.UnsupportedSource;
+                    result.opens_local_terminal = true;
                 }
                 // Shell integration belongs to the terminal's default startup.
                 // A PTY request never authorizes remote helper deployment.
@@ -505,7 +511,7 @@ pub const Controller = struct {
     }
     fn routeCreate(request: @import("../host/lifecycle_supervisor.zig").OpenRequest) @import("../ai/execution_routing.zig").Create {
         const route = @import("../ai/execution_routing.zig");
-        return .{ .operation_id = request.operation_ref, .request_hash = route.digest(&request.operation_ref.bytes), .source = if (request.source) |source| .{ .session = source } else .{ .saved = request.saved_source.? }, .retention = request.retention, .policy = @fromBackingInt(@intCast(@backingInt(request.connection_policy))) };
+        return .{ .operation_id = request.operation_ref, .request_hash = route.digest(&request.operation_ref.bytes), .source = if (request.source) |source| .{ .session = source } else if (request.saved_source) |saved| .{ .saved = saved } else .local, .retention = request.retention, .policy = @fromBackingInt(@intCast(@backingInt(request.connection_policy))) };
     }
     fn withExecutionReadiness(self: *Controller, original: lifecycle.Snapshot) lifecycle.Snapshot {
         var snapshot = original;
@@ -647,7 +653,7 @@ pub const Controller = struct {
                 if (!request.context.eql(call.context)) return error.ScopeChanged;
                 // Validate exact sources again at the actual enqueue boundary.
                 const previous = self.last_authorization orelse return error.ScopeChanged;
-                const proposal: tools.Request = .{ .kind = .open_session, .group = request.group, .source = request.source, .saved_source = request.saved_source, .connection_policy = request.connection_policy, .retention = request.retention, .interactive_execution = previous.value.bootstrap_required };
+                const proposal: tools.Request = .{ .kind = .open_session, .group = request.group, .source = request.source, .saved_source = request.saved_source, .local_source = request.local_source, .connection_policy = request.connection_policy, .retention = request.retention, .interactive_execution = previous.value.bootstrap_required };
                 const authorized = try self.authorize(call.context, proposal);
                 if (request.allow_new_fallback != authorized.allow_new_fallback or request.membership_revision != authorized.membership_revision) return error.ScopeChanged;
                 try self.checkLastAuthorization(.open_session, authorized);
@@ -711,7 +717,7 @@ pub const Controller = struct {
                 const wants_bootstrap = for (self.open_authorizations.items) |frozen| {
                     if (frozen.operation.eql(request.operation)) break frozen.authorized.bootstrap_required;
                 } else return error.ScopeChanged;
-                const checked = try self.authorize(call.context, .{ .kind = .open_session, .group = open_request.group, .source = open_request.source, .saved_source = open_request.saved_source, .connection_policy = open_request.connection_policy, .retention = open_request.retention, .interactive_execution = wants_bootstrap });
+                const checked = try self.authorize(call.context, .{ .kind = .open_session, .group = open_request.group, .source = open_request.source, .saved_source = open_request.saved_source, .local_source = open_request.local_source, .connection_policy = open_request.connection_policy, .retention = open_request.retention, .interactive_execution = wants_bootstrap });
                 var found = false;
                 for (self.open_authorizations.items) |frozen| if (frozen.operation.eql(request.operation)) {
                     if (!std.meta.eql(frozen.authorized, checked)) return error.ScopeChanged;
@@ -850,6 +856,9 @@ fn testScheduler(raw: *anyopaque, context: *anyopaque, run: *const fn (*anyopaqu
     try @as(*Bridge, @ptrCast(@alignCast(raw))).callController(context, run, cancel);
 }
 fn testInvoke(fixture: *TestFixture, controller: *Controller, backend: *runtime.Runtime, broker: *@import("../ai/host_approval.zig").Broker, tool: []const u8, arguments: []const u8) !host.Result {
+    return testInvokeDecision(fixture, controller, backend, broker, tool, arguments, true);
+}
+fn testInvokeDecision(fixture: *TestFixture, controller: *Controller, backend: *runtime.Runtime, broker: *@import("../ai/host_approval.zig").Broker, tool: []const u8, arguments: []const u8, approve: bool) !host.Result {
     const a = std.testing.allocator;
     const json = try std.json.parseFromSlice(std.json.Value, a, arguments, .{});
     defer json.deinit();
@@ -883,7 +892,8 @@ fn testInvoke(fixture: *TestFixture, controller: *Controller, backend: *runtime.
         if (broker.snapshot()) |approval| {
             const deployment = std.mem.eql(u8, approval.target.text(), "SSH BootstrapV1：本次临时 helper 部署");
             if (deployment) fixture.bootstrap_approvals_seen += 1;
-            try broker.decide(approval.sequence, approval.arguments_hash, !deployment or !fixture.reject_bootstrap_deployment);
+            const allow = approve and (!deployment or !fixture.reject_bootstrap_deployment);
+            try broker.decide(approval.sequence, approval.arguments_hash, allow);
         }
         try fixture.tick(controller.bridge);
         if (@import("../platform/realtime.zig").monotonicNs() > deadline) {
@@ -2141,4 +2151,228 @@ test "tab grouping running task refresh keeps target identity and expands real t
     try std.testing.expect(controller.authority.conversation_id.eql(context.conversation_id));
     try std.testing.expect(controller.authority.task_id.eql(context.task_id));
     try std.testing.expect(controller.inBinding(third));
+}
+
+test "lifecycle controller opens Mac local terminal from failed SSH group and activates execution tools" {
+    const a = std.testing.allocator;
+    var fixture: TestFixture = undefined;
+    try fixture.init();
+    try fixture.tmp.dir.writeFile(std.testing.io, .{ .sub_path = ".zshenv", .data = "PROMPT=''\nRPROMPT=''\n" });
+    try fixture.tmp.dir.writeFile(std.testing.io, .{ .sub_path = ".zshrc", .data = "bindkey -e\n" });
+    try fixture.app.local_adapter.configureRecording(.{ .io = std.testing.io, .directory = fixture.directory, .log = .{ .ring_mb = 2, .checkpoint_sec = 1 } });
+    fixture.config_.ssh.auto_reconnect = false;
+    fixture.config_.ssh.reconnect_max = 0;
+    var roster = groups.Roster.init(a);
+    defer roster.deinit();
+    defer fixture.deinit();
+
+    const index = try fixture.workspace.appendHost(.{
+        .connection_id = @fromBackingInt(88099),
+        .revision = 1,
+        .name = "failed-ssh-vm",
+        .host = "127.0.0.1",
+        .port = 1,
+        .user = "tester",
+        .auth_mode = .password,
+        .password = "invalid",
+        .strict_host_key_checking = false,
+    });
+    const accepted = try fixture.app.create(fixture.workspace.registry.hosts[index], fixture.workspace.hostId(index).?, index, "");
+    const ssh_source = accepted.handle;
+    const fail_deadline = @import("../platform/realtime.zig").monotonicNs() + 8 * std.time.ns_per_s;
+    while (true) {
+        const state = fixture.app.sessions.queryState(ssh_source) orelse return error.MissingSessionState;
+        if (state.lifecycle == .failed) break;
+        try fixture.tick(null);
+        if (@import("../platform/realtime.zig").monotonicNs() > fail_deadline) return error.SshFailureNotObserved;
+    }
+
+    var store = assistants.Store.init(a);
+    defer store.deinit();
+    var bridge = Bridge.init(a);
+    defer bridge.deinit();
+    const context = try testContext(&store, ssh_source);
+    var controller = try Controller.init(.{
+        .allocator = a,
+        .app = fixture.app,
+        .roster = &roster,
+        .store = &store,
+        .bridge = &bridge,
+        .authority = context,
+        .execution_policy = .{ .execution_mode = .interactive, .session_retention = .keep },
+    });
+    defer controller.deinitAfterWorker();
+    const journal_owner = try runtime.ProcessJournal.acquire(.{ .data_root = fixture.directory, .path = "local-from-failed-ssh.json" });
+    defer journal_owner.release();
+    var broker: @import("../ai/host_approval.zig").Broker = .{};
+    var backend: runtime.Runtime = .{ .journal_owner = journal_owner, .controller = controller.handle(), .approval = &broker };
+
+    // Before create_group, single-session binding cannot open another session with local source.
+    try std.testing.expectError(error.InvalidArguments, controller.authorize(context, .{ .kind = .open_session, .local_source = true, .connection_policy = .new_only }));
+    try std.testing.expectError(error.TargetNotAuthorized, controller.authorize(context, .{ .kind = .open_session, .group = .{ .id = @fromBackingInt(999) }, .local_source = true, .connection_policy = .new_only }));
+
+    const source_ref = try @import("../ai/host_queries.zig").sessionRef(a, context, ssh_source);
+    defer a.free(source_ref);
+    const group_args = try std.json.Stringify.valueAlloc(a, .{ .initial_session_ref = source_ref, .name = "ssh-to-local-group", .request_key = "group-ssh-1" }, .{});
+    defer a.free(group_args);
+    var grouped = try testInvoke(&fixture, &controller, &backend, &broker, "host.create_group", group_args);
+    defer grouped.deinit(a);
+    try std.testing.expectEqual(@import("../ai/plugin_tools.zig").Status.succeeded, grouped.status);
+
+    const moved = store.findConversation(context.conversation_id).?;
+    var next = context;
+    next.binding = moved.owner;
+    next.binding_revision = moved.binding_revision;
+    try controller.refreshAuthority(next);
+    const group_owner = try controller.groupOwner(next.binding.group);
+    const group_ref = try @import("../ai/host_queries.zig").groupRef(a, next, next.binding.group);
+    defer a.free(group_ref);
+
+    // Negative gates: local_source forbids non-new_only policies and delegated child agents.
+    try std.testing.expectError(error.UnsupportedSource, controller.authorize(next, .{ .kind = .open_session, .group = group_owner, .local_source = true, .connection_policy = .reuse_only }));
+    try std.testing.expectError(error.UnsupportedSource, controller.authorize(next, .{ .kind = .open_session, .group = group_owner, .local_source = true, .connection_policy = .prefer_reuse }));
+    var child_context = next;
+    const child_agent = identity.AgentId.generate();
+    child_context.child_origin = .{
+        .agent = child_agent,
+        .parent = .{ .agent = child_agent, .conversation = next.conversation_id, .binding = next.binding_revision, .environment = 1 },
+        .worker_generation = 1,
+        .scope_revision = 1,
+    };
+    try std.testing.expectError(error.TargetNotAuthorized, fixture.app.queueOwnedSession(.{
+        .operation_ref = identity.HostOperationId.generate(),
+        .context = child_context,
+        .group = group_owner,
+        .local_source = true,
+        .connection_policy = .new_only,
+        .retention = .keep,
+    }));
+
+    const DummyHost = struct {
+        fn invoke(_: *anyopaque, _: host.Invocation, _: std.mem.Allocator) !host.Result {
+            return error.UnexpectedDispatch;
+        }
+    };
+    var dummy_ctx: u8 = 0;
+
+    // On the failed-SSH group, host.run_in_terminal is filtered out and get_current_context explains why.
+    var failed_scope: scope.Scope = .{ .owner = next.binding, .members = .{} };
+    failed_scope.members.ids[0] = @backingInt(ssh_source.session_id);
+    failed_scope.members.len = 1;
+    var inspect_bridge = Bridge.init(a);
+    defer inspect_bridge.deinit();
+    try inspect_bridge.configureHost(.{
+        .context = next,
+        .handler_context = &dummy_ctx,
+        .invoke = DummyHost.invoke,
+        .contributions = &@import("../ai/host_tool_catalog.zig").all,
+    });
+    try inspect_bridge.prepareGroup(fixture.app, &roster, failed_scope);
+    try std.testing.expect(inspect_bridge.requestTable().?.lookup("host__run_uin_uterminal") == null);
+    try std.testing.expect(inspect_bridge.requestTable().?.lookup("host__open_usession") != null);
+    {
+        var meta = try @import("ai_host_queries.zig").execute(
+            fixture.app,
+            &roster,
+            next.binding,
+            .{ .execution_policy = .{ .execution_mode = .interactive, .session_retention = .keep }, .permission_mode = .confirm, .host_contributions = inspect_bridge.host_binding.?.contributions },
+            @splat(17),
+            .{ .context = next, .authority = .conversation_context, .operation_id = 1, .turn_id = 1, .call_id = "ctx-before", .tool_id = "host.get_current_context", .arguments = .{ .object = .empty }, .arguments_json = "{}", .arguments_hash = @splat(0), .canonical_arguments_hash = @splat(0) },
+            a,
+        );
+        defer meta.deinit(a);
+        const parsed = try std.json.parseFromSlice(std.json.Value, a, meta.blocks[0].structured, .{});
+        defer parsed.deinit();
+        const caps = parsed.value.object.get("capabilities").?.object;
+        try std.testing.expect(!caps.get("trusted_pty_execution").?.bool);
+        try std.testing.expectEqual(@as(i64, 0), caps.get("ready_execution_targets").?.integer);
+        try std.testing.expectEqualStrings("no_ready_terminal_in_binding", caps.get("execution_unavailable_reason").?.string);
+        try std.testing.expect(caps.get("can_open_local_terminal").?.bool);
+    }
+
+    // Approval rejection keeps the workspace and group unchanged.
+    const reject_args = try std.json.Stringify.valueAlloc(a, .{ .group_ref = group_ref, .source_ref = "local", .connection_policy = "new_only", .request_key = "reject-local" }, .{});
+    defer a.free(reject_args);
+    var rejected = try testInvokeDecision(&fixture, &controller, &backend, &broker, "host.open_session", reject_args, false);
+    defer rejected.deinit(a);
+    try std.testing.expectEqual(@import("../ai/plugin_tools.zig").Status.rejected, rejected.status);
+    try std.testing.expectEqual(@as(usize, 1), fixture.workspace.tabs.items.len);
+    try std.testing.expectEqual(@as(usize, 1), roster.findById(@intCast(@backingInt(group_owner.id))).?.members.items.len);
+    try std.testing.expectEqual(@as(usize, 0), fixture.app.lifecycle_supervisor.entries.items.len);
+
+    // Approval acceptance creates a new Mac local terminal inside the bound group.
+    const open_args = try std.json.Stringify.valueAlloc(a, .{ .group_ref = group_ref, .source_ref = "local", .connection_policy = "new_only", .request_key = "open-local-1" }, .{});
+    defer a.free(open_args);
+    var opened = try testInvokeDecision(&fixture, &controller, &backend, &broker, "host.open_session", open_args, true);
+    defer opened.deinit(a);
+    try std.testing.expectEqual(@import("../ai/plugin_tools.zig").Status.succeeded, opened.status);
+    {
+        const parsed = try std.json.parseFromSlice(std.json.Value, a, opened.blocks[0].structured, .{});
+        defer parsed.deinit();
+        try std.testing.expectEqualStrings("local", parsed.value.object.get("source_ref").?.string);
+    }
+    try std.testing.expectEqual(@as(usize, 1), fixture.app.lifecycle_supervisor.entries.items.len);
+    const operation = fixture.app.lifecycle_supervisor.entries.items[0].request.operation_ref;
+    const created_local = fixture.app.lifecycle_supervisor.entries.items[0].snapshot.session.?;
+    const ready_deadline = @import("../platform/realtime.zig").monotonicNs() + 8 * std.time.ns_per_s;
+    while (true) {
+        try fixture.tick(&bridge);
+        const snapshot = try fixture.app.queryOwnedSession(operation, next);
+        if (snapshot.state == .failed or snapshot.state == .cleanup_pending) return error.LocalSessionOpenFailed;
+        const live_state = fixture.app.sessions.queryState(created_local);
+        if (snapshot.state == .ready and snapshot.membership_committed and live_state != null and live_state.?.lifecycle == .attached and fixture.app.sessions.queryService(created_local, .terminal) == .available) {
+            const local_id = fixture.app.legacyForHandle(created_local) orelse return error.LocalSessionNotReady;
+            const local_tab = fixture.workspace.sessionTab(local_id) orelse return error.LocalSessionNotReady;
+            if (@import("ai_host_queries.zig").trustedPtyInfo(fixture.app, local_tab, created_local).ready) break;
+        }
+        if (@import("../platform/realtime.zig").monotonicNs() > ready_deadline) return error.LocalSessionNotReady;
+    }
+    try std.testing.expectEqual(@as(usize, 2), roster.findById(@intCast(@backingInt(group_owner.id))).?.members.items.len);
+
+    // Idempotent replay with the same request_key does not create a third session.
+    var replayed = try testInvokeDecision(&fixture, &controller, &backend, &broker, "host.open_session", open_args, true);
+    defer replayed.deinit(a);
+    try std.testing.expectEqual(@import("../ai/plugin_tools.zig").Status.succeeded, replayed.status);
+    {
+        const parsed = try std.json.parseFromSlice(std.json.Value, a, replayed.blocks[0].structured, .{});
+        defer parsed.deinit();
+        try std.testing.expect(parsed.value.object.get("idempotent_reuse").?.bool);
+    }
+    try std.testing.expectEqual(@as(usize, 1), fixture.app.lifecycle_supervisor.entries.items.len);
+    try std.testing.expectEqual(@as(usize, 2), roster.findById(@intCast(@backingInt(group_owner.id))).?.members.items.len);
+
+    // Refreshing the group catalog now exposes host.run_in_terminal and ready execution capability.
+    var updated_scope: scope.Scope = .{ .owner = next.binding, .members = .{} };
+    updated_scope.members.ids[0] = @backingInt(ssh_source.session_id);
+    updated_scope.members.ids[1] = @backingInt(created_local.session_id);
+    updated_scope.members.len = 2;
+    var refreshed_bridge = Bridge.init(a);
+    defer refreshed_bridge.deinit();
+    try refreshed_bridge.configureHost(.{
+        .context = next,
+        .handler_context = &dummy_ctx,
+        .invoke = DummyHost.invoke,
+        .contributions = &@import("../ai/host_tool_catalog.zig").all,
+    });
+    try refreshed_bridge.prepareGroup(fixture.app, &roster, updated_scope);
+    try std.testing.expect(refreshed_bridge.requestTable().?.lookup("host__run_uin_uterminal") != null);
+    {
+        var meta = try @import("ai_host_queries.zig").execute(
+            fixture.app,
+            &roster,
+            next.binding,
+            .{ .execution_policy = .{ .execution_mode = .interactive, .session_retention = .keep }, .permission_mode = .confirm, .host_contributions = refreshed_bridge.host_binding.?.contributions },
+            @splat(17),
+            .{ .context = next, .authority = .conversation_context, .operation_id = 1, .turn_id = 1, .call_id = "ctx-after", .tool_id = "host.get_current_context", .arguments = .{ .object = .empty }, .arguments_json = "{}", .arguments_hash = @splat(0), .canonical_arguments_hash = @splat(0) },
+            a,
+        );
+        defer meta.deinit(a);
+        const parsed = try std.json.parseFromSlice(std.json.Value, a, meta.blocks[0].structured, .{});
+        defer parsed.deinit();
+        const caps = parsed.value.object.get("capabilities").?.object;
+        try std.testing.expect(caps.get("trusted_pty_execution").?.bool);
+        try std.testing.expectEqual(@as(i64, 1), caps.get("ready_execution_targets").?.integer);
+        try std.testing.expectEqual(std.json.Value.null, caps.get("execution_unavailable_reason").?);
+        try std.testing.expect(caps.get("can_open_local_terminal").?.bool);
+    }
 }

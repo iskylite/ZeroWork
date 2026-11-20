@@ -82,7 +82,10 @@ pub fn project(a: std.mem.Allocator, name: []const u8, raw: []const u8) ![]u8 {
     }
     for ([_][]const u8{ "session_ref", "source_ref", "initial_session_ref", "group_ref" }) |key| {
         if (parsed.value.object.get(key)) |value| {
-            if (value == .string) if (try targetReference(a, value.string)) |target| return target;
+            if (value == .string) {
+                if (std.mem.eql(u8, key, "source_ref") and std.mem.eql(u8, value.string, "local")) return a.dupe(u8, "本地终端");
+                if (try targetReference(a, value.string)) |target| return target;
+            }
         }
     }
     if (parsed.value.object.get("session_ids")) |ids| {
@@ -141,6 +144,7 @@ test "tool header projection selects concrete schema parameters and hides call i
         .{ .name = "fixture__read", .raw = "{\"path\":\"/srv/项目/配置.json\"}", .expected = "/srv/项目/配置.json" },
         .{ .name = "host.open_session", .raw = "{\"source_ref\":\"s1:0123456789abcdef0123456789abcdef:101:3\",\"request_key\":\"open-call\"}", .expected = "会话 #101" },
         .{ .name = "host.open_session", .raw = "{\"source_ref\":\"c1:0123456789abcdef0123456789abcdef:99:2\"}", .expected = "连接 #99" },
+        .{ .name = "host.open_session", .raw = "{\"source_ref\":\"local\",\"connection_policy\":\"new_only\"}", .expected = "本地终端" },
         .{ .name = "host.get_group", .raw = "{\"group_ref\":\"g1:0123456789abcdef0123456789abcdef:7\"}", .expected = "会话组 #7" },
         .{ .name = "host.get_execution", .raw = "{\"execution_ref\":\"internal-execution\",\"request_key\":\"call-123\"}", .expected = "" },
         .{ .name = "host.open_session", .raw = "{\"source_ref\":\"s1:invalid:101:3\"}", .expected = "" },

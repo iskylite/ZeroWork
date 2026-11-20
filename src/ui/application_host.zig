@@ -881,8 +881,9 @@ pub const ApplicationHost = struct {
             const group = self.workspace.group_roster.?.findById(@intCast(@backingInt(request.group.id))).?;
             if (group.membership_revision != revision) return error.ScopeChanged;
         }
-        if ((request.source == null) == (request.saved_source == null)) return error.InvalidSource;
-        if (request.context.child_origin != null and request.saved_source != null) return error.TargetNotAuthorized;
+        const source_count = @as(u8, @intFromBool(request.source != null)) + @intFromBool(request.saved_source != null) + @intFromBool(request.local_source);
+        if (source_count != 1) return error.InvalidSource;
+        if (request.context.child_origin != null and (request.saved_source != null or request.local_source)) return error.TargetNotAuthorized;
         try self.owned_sources.ensureUnusedCapacity(self.allocator, 1);
         var source: PendingOwnedSource = .{ .operation_ref = request.operation_ref };
         errdefer source.deinit(self.allocator);
@@ -893,8 +894,8 @@ pub const ApplicationHost = struct {
             } else {
                 source.connection = try self.freezeTabWindowConnection(mapping.legacy_id);
             }
-        } else {
-            const index = try self.validateSavedOwnedSource(request.saved_source.?);
+        } else if (request.saved_source) |saved| {
+            const index = try self.validateSavedOwnedSource(saved);
             if (request.connection_policy == .reuse_only) return error.ReuseUnavailable;
             if (request.connection_policy == .prefer_reuse and !request.allow_new_fallback) return error.FallbackAuthorizationRequired;
             const host_id = self.workspace.hostId(index) orelse return error.StaleReference;
@@ -904,6 +905,17 @@ pub const ApplicationHost = struct {
                 defer arena.deinit();
                 const decoded = try connection_envelope.decodeLegacy(arena.allocator(), source.connection.?.envelope.value);
                 source.connection.?.remote = try freezeDeferredSource(self.allocator, decoded, self.workspace.app_config.*, self.workspace.registry.hosts, host_id, index, "");
+            }
+        } else if (request.local_source) {
+            if (request.connection_policy != .new_only or self.sessions.registry.find("local") == null) return error.UnsupportedSource;
+            if (self.domain.ai) |ai| {
+                if (ai.service.store.find(request.context.conversation_id)) |record| {
+                    if (record.workspace.availability == .ready) {
+                        if (record.workspace.resolved_directory) |dir| {
+                            source.cwd = try self.allocator.dupe(u8, dir);
+                        }
+                    }
+                }
             }
         }
         const snapshot = try self.lifecycle_supervisor.enqueue(request);
@@ -1283,10 +1295,13 @@ pub const ApplicationHost = struct {
         }
         const source: ?*Mapping = if (entry.request.source) |handle|
             try self.authorizedOpenSource(entry.request, handle)
-        else blk: {
-            _ = try self.validateSavedOwnedSource(entry.request.saved_source orelse return error.InvalidSource);
+        else if (entry.request.saved_source) |saved| blk: {
+            _ = try self.validateSavedOwnedSource(saved);
             break :blk null;
-        };
+        } else if (entry.request.local_source) blk: {
+            if (entry.request.connection_policy != .new_only or self.sessions.registry.find("local") == null) return error.UnsupportedSource;
+            break :blk null;
+        } else return error.InvalidSource;
         const ambient_group = self.workspace.creation_group;
         const ambient_pending = self.workspace.owned_creation_pending;
         self.workspace.creation_group = null;
@@ -1325,7 +1340,8 @@ pub const ApplicationHost = struct {
             defer self.pending_source = null;
             return self.sessions.dispatchPrepared(accepted);
         }
-        if (source == null or source.?.process == null or entry.request.connection_policy != .new_only) return error.UnsupportedSource;
+        if (!entry.request.local_source and (source == null or source.?.process == null)) return error.UnsupportedSource;
+        if (entry.request.connection_policy != .new_only) return error.UnsupportedSource;
         return self.sessions.dispatchPrepared(accepted);
     }
 

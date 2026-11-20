@@ -88,6 +88,7 @@ pub const Surface = struct {
     service: terminal.Service,
     composite: @import("terminal_document.zig").Document,
     owner: identity.SessionHandle,
+    menu_owner: ?identity.SessionHandle = null,
     menu_handler: ?MenuHandler = null,
     takeover_handler: ?TakeoverHandler = null,
     control_scope: ?*ui.Scope = null,

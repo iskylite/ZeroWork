@@ -20,6 +20,7 @@ pub const Options = struct {
     execution_policy: config.ExecutionPolicy,
     permission_mode: config.PermissionMode,
     host_contributions: []const host.Contribution,
+    execution_supported: bool = true,
     local_workspace: ?@import("../ai/session_prompt.zig").WorkspaceView = null,
     /// Legacy compatibility only; captureSnapshot ignores inventory grants.
     inventory_grant: ?inventory.Grant = null,
@@ -75,10 +76,14 @@ fn captureSnapshot(app: *Application, roster: ?*@import("group_model.zig").Roste
     const binding = context.binding;
     const group = if (binding == .group) (roster orelse return error.ContextUnavailable).findById(std.math.cast(u32, binding.group) orelse return error.ContextUnavailable) orelse return error.ContextUnavailable else null;
     var lifecycle_management = false;
+    var open_session_available = false;
     const execution_control = executionToolsAvailable(options.host_contributions);
     for (options.host_contributions) |contribution| {
         if (contribution.authority == .lifecycle) lifecycle_management = true;
+        if (std.mem.eql(u8, contribution.definition.id, "host.open_session")) open_session_available = true;
     }
+    const can_open_local_terminal = open_session_available and context.child_origin == null and context.binding == .group and app.sessions.registry.find("local") != null;
+    const execution_tools_registered = options.execution_supported;
     for (app.workspace.tabs.items) |tab| {
         if (tab.content_owner != .session) continue;
         const handle = tab.content_owner.session;
@@ -146,11 +151,11 @@ fn captureSnapshot(app: *Application, roster: ?*@import("group_model.zig").Roste
             try groups.append(a, .{ .id = entry.id, .name = if (app.workspace.app_config.ai.redact_ip) "<redacted>" else entry.name, .membership_revision = entry.membership_revision, .members = members.items });
         }
     }
-    const revision_source = try std.json.Stringify.valueAlloc(a, .{ sessions.items, groups.items, context, options.execution_policy, options.permission_mode, lifecycle_management, execution_control, app.workspace.app_config.agentPolicyRevision() }, .{});
+    const revision_source = try std.json.Stringify.valueAlloc(a, .{ sessions.items, groups.items, context, options.execution_policy, options.permission_mode, lifecycle_management, execution_control, execution_tools_registered, can_open_local_terminal, app.workspace.app_config.agentPolicyRevision() }, .{});
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(revision_source, &digest, .{});
     const revision = std.mem.readInt(u64, digest[0..8], .little);
-    return .{ .context = context, .initial_binding = initial, .execution_policy = options.execution_policy, .permission_mode = options.permission_mode, .lifecycle_management = lifecycle_management, .local_workspace = options.local_workspace, .observed_at = now, .source_revision = if (revision == 0) 1 else revision, .cursor_key = cursor_key, .sessions = sessions.items, .groups = groups.items, .inventory_grant = null };
+    return .{ .context = context, .initial_binding = initial, .execution_policy = options.execution_policy, .permission_mode = options.permission_mode, .lifecycle_management = lifecycle_management, .execution_tools_registered = execution_tools_registered, .can_open_local_terminal = can_open_local_terminal, .local_workspace = options.local_workspace, .observed_at = now, .source_revision = if (revision == 0) 1 else revision, .cursor_key = cursor_key, .sessions = sessions.items, .groups = groups.items, .inventory_grant = null };
 }
 
 fn appendClosed(a: std.mem.Allocator, sessions: *std.ArrayList(queries.Session), app: *Application, context: host.Context, handle: identity.SessionHandle, metadata: *const @import("../host/lifecycle_supervisor.zig").SessionMetadata, ownership: @import("../host/lifecycle_supervisor.zig").Ownership, ownership_revision: u64, retention: ?config.SessionRetention, owned_by_task: bool) !void {

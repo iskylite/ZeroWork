@@ -37,6 +37,7 @@ pub const OpenRequest = struct {
     group: identity.GroupOwner,
     source: ?identity.SessionHandle = null,
     saved_source: ?identity.AssetOwner = null,
+    local_source: bool = false,
     connection_policy: ConnectionPolicy,
     retention: Retention,
     allow_new_fallback: bool = false,
@@ -51,6 +52,7 @@ pub const Snapshot = struct {
     group: identity.GroupOwner,
     source: ?identity.SessionHandle = null,
     saved_source: ?identity.AssetOwner = null,
+    local_source: bool = false,
     session: ?identity.SessionHandle = null,
     state: State = .queued,
     revision: u64 = 1,
@@ -138,7 +140,9 @@ pub const Supervisor = struct {
     }
     pub fn enqueue(self: *Supervisor, request: OpenRequest) !Snapshot {
         try request.context.validate();
-        if (!request.operation_ref.valid() or (request.context.child_origin == null and (request.context.binding != .group or request.context.binding.group != @backingInt(request.group.id))) or request.group.revision == 0 or (request.source == null) == (request.saved_source == null)) return error.InvalidHostAuthority;
+        const source_count = @as(u8, @intFromBool(request.source != null)) + @intFromBool(request.saved_source != null) + @intFromBool(request.local_source);
+        if (!request.operation_ref.valid() or (request.context.child_origin == null and (request.context.binding != .group or request.context.binding.group != @backingInt(request.group.id))) or request.group.revision == 0 or source_count != 1) return error.InvalidHostAuthority;
+        if (request.local_source and (request.context.child_origin != null or request.connection_policy != .new_only)) return error.InvalidHostAuthority;
         if (request.source) |source| if (@backingInt(source.session_id) == 0 or source.generation == 0) return error.InvalidHostAuthority;
         if (request.saved_source) |source| if (@backingInt(source.id) == 0 or source.revision == 0) return error.InvalidHostAuthority;
         if (self.find(request.operation_ref)) |entry| {
@@ -146,7 +150,7 @@ pub const Supervisor = struct {
             return entry.snapshot;
         }
         if (self.entries.items.len >= 512) return error.ResourceLimit;
-        const snapshot: Snapshot = .{ .operation_ref = request.operation_ref, .context = request.context, .group = request.group, .source = request.source, .saved_source = request.saved_source, .retention = request.retention };
+        const snapshot: Snapshot = .{ .operation_ref = request.operation_ref, .context = request.context, .group = request.group, .source = request.source, .saved_source = request.saved_source, .local_source = request.local_source, .retention = request.retention };
         try self.entries.append(self.allocator, .{ .request = request, .snapshot = snapshot });
         return snapshot;
     }

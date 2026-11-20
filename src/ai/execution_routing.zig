@@ -10,12 +10,13 @@ pub const Route = enum { batch, current_terminal, new_terminal };
 pub const Source = union(enum) {
     session: identity.SessionHandle,
     saved: identity.AssetOwner,
+    local,
     group_selection,
     pub fn eql(self: Source, other: Source) bool {
         return std.meta.activeTag(self) == std.meta.activeTag(other) and switch (self) {
             .session => |value| value.eql(other.session),
             .saved => |value| std.meta.eql(value, other.saved),
-            .group_selection => true,
+            .local, .group_selection => true,
         };
     }
 };
@@ -158,7 +159,7 @@ pub const State = struct {
         if (!grant.context.eql(context)) return .{ .route = fallback };
         const expected = grant.created orelse switch (grant.choice.source) {
             .session => |value| value,
-            .saved, .group_selection => return .{ .route = fallback },
+            .saved, .local, .group_selection => return .{ .route = fallback },
         };
         if (!expected.eql(target)) {
             // A rejected proposal cannot consume the user's work-session
@@ -181,7 +182,7 @@ pub const State = struct {
         if (!grant.context.eql(context) or grant.command_hash == null or !std.mem.eql(u8, &grant.command_hash.?, &hash)) return false;
         const expected = grant.created orelse switch (grant.choice.source) {
             .session => |value| value,
-            .saved, .group_selection => return false,
+            .saved, .local, .group_selection => return false,
         };
         return expected.eql(target) and grant.choice.route != .batch and (!(grant.choice.route == .new_terminal or grant.choice.create_new) or grant.created != null);
     }
@@ -199,7 +200,7 @@ pub const State = struct {
         const same_source = create.source != .group_selection and (grant.choice.source.eql(create.source) or (grant.followup and switch (grant.choice.source) {
             .group_selection => context.binding == .group,
             .session => |source| create.source == .saved and equivalent_source != null and source.eql(equivalent_source.?),
-            .saved => false,
+            .saved, .local => false,
         }));
         if (!grant.context.eql(context) or !(grant.choice.route == .new_terminal or grant.choice.create_new) or !same_source or (!grant.followup and grant.choice.retention != create.retention) or !create.operation_id.valid() or grant.created != null) {
             self.grant = null;
@@ -275,7 +276,7 @@ pub const State = struct {
         if (!grant.context.eql(context)) return;
         const expected = grant.created orelse switch (grant.choice.source) {
             .session => |value| value,
-            .saved, .group_selection => return,
+            .saved, .local, .group_selection => return,
         };
         if (expected.eql(target) and (grant.command_hash == null or std.mem.eql(u8, &grant.command_hash.?, &digest(command)))) {
             if (grant.followup) {

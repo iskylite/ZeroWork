@@ -3462,6 +3462,7 @@ pub const TerminalViewNode = struct {
         const surface = try TerminalSurface.create(self.cx, self.root, service, self.surfaceOptions());
         surface.setCommandInfoVisible(self.command_info_visible);
         surface.menu_handler = self.terminal_menu_handler;
+        surface.menu_owner = self.worker_menu_owner;
         surface.takeover_handler = self.terminal_takeover_handler;
         surface.shell_observer = .{ .context = self, .accepted = serviceShellAccepted, .paste_stamp = servicePasteStamp };
         surface.enhancement = .{ .context = self, .key = serviceEditKey, .text = serviceEditText, .event = serviceHistoryEvent };
@@ -3666,7 +3667,20 @@ pub const TerminalViewNode = struct {
     pub fn setWorkerMenuHandler(self: *TerminalViewNode, owner: SessionHandle, handler: ?TerminalSurface.MenuHandler) void {
         self.worker_menu_owner = if (handler != null) owner else null;
         self.terminal_menu_handler = handler;
-        if (self.terminal_surface) |surface| surface.menu_handler = handler;
+        if (self.terminal_surface) |surface| {
+            surface.menu_handler = handler;
+            surface.menu_owner = self.worker_menu_owner;
+        } else if (handler != null and !self.archive_read_only and self.root.behavior.events.on_event == null) {
+            self.root.behavior.events.key_context = @ptrCast(self);
+            self.root.behavior.events.event_context = @ptrCast(self);
+            self.root.behavior.events.on_key_down = onWorkerKeyDown;
+            self.root.behavior.events.on_event = onWorkerEvent;
+            self.root.behavior.events.on_scroll = onWorkerScroll;
+        }
+    }
+    pub fn syncMenuOwner(self: *TerminalViewNode, owner: SessionHandle) void {
+        if (self.terminal_menu_handler != null) self.worker_menu_owner = owner;
+        if (self.terminal_surface) |surface| surface.menu_owner = owner;
     }
     pub fn configureErrorHint(self: *TerminalViewNode, owner: SessionHandle, enabled: bool, handler: ?@import("../ai/command_error_hint.zig").Handler) !void {
         if (self.error_hint == null and handler != null) self.error_hint = try @import("command_error_hint_view.zig").View.create(self.cx, self.root);
@@ -4138,6 +4152,7 @@ pub const TerminalViewNode = struct {
             .mouse_down => |mouse| {
                 view.traceWorkerPointer("down", mouse.button, mouse.x, mouse.y);
                 if (mouse.button == .right) {
+                    if (view.worker == null and view.terminal_surface == null) return .ignored;
                     view.cx.setFocus(view.root);
                     view.pasteClipboard() catch |err| view.clipboardError(err);
                     return .handled;

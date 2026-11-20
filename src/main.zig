@@ -6645,7 +6645,7 @@ const AiHost = struct {
                 @memcpy(self.host_cursor_key[16..32], &@import("host/identity.zig").TaskId.generate().bytes);
             }
             const controller = lookupLifecycleTask(self, authority.conversation_id, authority.task_id).?;
-            const summary = try @import("ui/ai_host_queries.zig").requestSummary(app, self.roster, .{ .execution_policy = controller.execution_policy, .permission_mode = self.request_permission_mode, .host_contributions = self.tool_bridge.host_binding.?.contributions }, self.host_cursor_key, authority, self.allocator);
+            const summary = try @import("ui/ai_host_queries.zig").requestSummary(app, self.roster, .{ .execution_policy = controller.execution_policy, .permission_mode = self.request_permission_mode, .host_contributions = self.tool_bridge.host_binding.?.contributions, .execution_supported = self.execution_driver != null }, self.host_cursor_key, authority, self.allocator);
             defer self.allocator.free(summary);
             const scoped_rules = try self.buildAssistantPrompt(self.allocator, self.request_tools[0..self.request_tools_len], workspace_snapshot, input.wire, summary.len +| 48);
             defer self.allocator.free(scoped_rules);
@@ -7878,7 +7878,7 @@ const AiHost = struct {
         }
         const workspace_record = self.shared_service.?.service.store.find(invocation.context.conversation_id) orelse return error.ScopeChanged;
         const workspace = if (self.workspaceScopeRevision(invocation.context.binding) != null) @import("ai/session_prompt.zig").workspaceView(workspace_record.workspace) else null;
-        return @import("ui/ai_host_queries.zig").execute(app, self.roster, state.initial_owner orelse state.owner, .{ .execution_policy = controller.execution_policy, .permission_mode = self.execution().request_permission_mode, .host_contributions = self.execution().tool_bridge.host_binding.?.contributions, .local_workspace = workspace, .child_work_group = controller.child_group }, self.execution().host_cursor_key, invocation, allocator);
+        return @import("ui/ai_host_queries.zig").execute(app, self.roster, state.initial_owner orelse state.owner, .{ .execution_policy = controller.execution_policy, .permission_mode = self.execution().request_permission_mode, .host_contributions = self.execution().tool_bridge.host_binding.?.contributions, .execution_supported = self.execution().execution_driver != null, .local_workspace = workspace, .child_work_group = controller.child_group }, self.execution().host_cursor_key, invocation, allocator);
     }
 
     fn controllerScheduler(raw: *anyopaque, context: *anyopaque, callback: *const fn (*anyopaque) anyerror!void, cancel: ?*ai_provider.CancelToken) !void {
@@ -11915,6 +11915,10 @@ const MenuHost = struct {
             self.captured_owner = workspace.tabs.items[index].content_owner;
             if (kind == .terminal) self.captured_terminal_intent = self.terminalIntent(index);
         };
+        const session_ended = self.targetSessionEnded(self.context_tab);
+        const retained_terminal_available = if (self.context_tab) |index| if (self.workspace) |workspace|
+            index < workspace.tabs.items.len and workspace.tabs.items[index].terminal != null and !workspace.tabs.items[index].closing
+        else false else false;
         self.state.show(kind, .{
             .capability_snapshot = self.capabilitiesForTab(self.context_tab),
             .has_saved_connection = if (self.workspace) |workspace| if (self.context_tab) |index| workspace.savedConnectionForTab(index) != null else null else null,
@@ -11922,9 +11926,12 @@ const MenuHost = struct {
             .new_window_available = process_windows != null and (self.captured_asset != null or self.captured_tab != null),
             .reuse_connection_available = if (self.context_tab) |index| if (self.workspace) |workspace| workspace.tabs.items[index].runtime != null else false else false,
             .local_session = self.isLocalTarget(),
-            .read_only = self.localTargetReadonly(),
+            .read_only = self.targetReadOnly(self.context_tab),
             .transfer_available = self.transferTargetAvailable(),
-            .has_selection = self.activeHasSelection() and (kind != .terminal or self.captured_terminal_intent != null),
+            .has_selection = self.activeHasSelection(),
+            .ai_selection_available = (kind != .terminal or self.captured_terminal_intent != null),
+            .retained_terminal_available = retained_terminal_available,
+            .session_ended = session_ended,
             .multi_tabs = if (self.workspace) |w| w.model.tabs.items.len > 1 else false,
             .background_socks = self.backgroundAvailable(),
             .background_active = if (self.background_socks) |background| if (self.captured_asset) |asset| background.hasAsset(asset) else false else false,
@@ -12076,11 +12083,44 @@ const MenuHost = struct {
         return manifest.session_factory != null and manifest.supports(@import("host/plugin_registry.zig").legacyServiceDefinition(.forward)) and @backingInt(owner.id) != 0 and !workspace.shutting_down;
     }
 
-    fn localTargetReadonly(self: *MenuHost) bool {
+    fn targetSessionEnded(self: *const MenuHost, index: ?usize) bool {
+        const workspace = self.workspace orelse return false;
+        const selected = index orelse return false;
+        if (selected >= workspace.tabs.items.len) return false;
+        const tab = workspace.tabs.items[selected];
+        if (tab.archived) return false;
+        if (tab.local) return tab.local_state == .exited or tab.local_state == .failed;
+        if (tab.failed) return true;
+        if (tab.terminal) |terminal| if (terminal.tombstone.state == .ended) return true;
+        if (tab.remote_notice) |notice| if (notice.snapshot) |snapshot| switch (snapshot.state) {
+            .cancelled, .failed, .exited, .disconnected, .retry_failed => return true,
+            else => {},
+        };
+        if (tab.content_owner == .session) {
+            const application = if (self.transfer_host) |transfer| transfer.application else if (self.ai) |ai| ai.application_host orelse return false else return false;
+            if (application.sessions.queryState(tab.content_owner.session)) |state| {
+                if (state.lifecycle == .failed or state.lifecycle == .ended) return true;
+            }
+        }
+        return false;
+    }
+
+    fn targetReadOnly(self: *MenuHost, index: ?usize) bool {
+        if (self.isLocalTarget()) return self.localTargetReadonly(index);
+        return self.targetSessionEnded(index);
+    }
+
+    fn localTargetReadonly(self: *MenuHost, index: ?usize) bool {
         if (!self.isLocalTarget()) return false;
-        const terminal = self.activeTerminal() orelse return true;
-        const owner = self.captured_owner orelse return true;
-        return switch (owner) {
+        const workspace = self.workspace orelse return true;
+        const selected = index orelse return true;
+        if (selected >= workspace.tabs.items.len) return true;
+        const tab = workspace.tabs.items[selected];
+        if (self.using_capture or self.state.open != null) {
+            if (self.captured_owner) |owner| if (!tab.content_owner.eql(owner)) return true;
+        }
+        const terminal = if (tab.terminal) |*term| term else return true;
+        return switch (tab.content_owner) {
             .session => |handle| if (terminal.terminalSnapshot(handle)) |snapshot| snapshot.read_only else true,
             else => true,
         };
@@ -12435,14 +12475,27 @@ const MenuHost = struct {
             if (self.command_history) |history| history.toggle();
             return;
         }
-        var action_context = self.state.context;
         const current_capabilities = self.capabilitiesForTab(self.context_tab);
-        if (self.using_capture) if (action_context.capability_snapshot) |captured| {
+        if (self.using_capture) if (self.state.context.capability_snapshot) |captured| {
             const current = current_capabilities orelse return;
             if (!captured.owner.eql(current.owner) or captured.revision != current.revision) {
                 workspace.status("会话能力已变化，请重新打开菜单");
                 return;
             }
+        };
+        const retained_terminal_available = if (self.context_tab) |index|
+            index < workspace.tabs.items.len and workspace.tabs.items[index].terminal != null and !workspace.tabs.items[index].closing
+        else
+            false;
+        var action_context: @import("ui/context_menus.zig").Context = if (self.using_capture) self.state.context else .{
+            .local_session = self.isLocalTarget(),
+            .read_only = self.targetReadOnly(self.context_tab),
+            .has_selection = self.activeHasSelection(),
+            .retained_terminal_available = retained_terminal_available,
+            .session_ended = self.targetSessionEnded(self.context_tab),
+            .transfer_available = self.transferTargetAvailable(),
+            .multi_tabs = workspace.model.tabs.items.len > 1,
+            .single_session = workspace.active_group_view == null,
         };
         action_context.capability_snapshot = current_capabilities;
         if (!@import("ui/context_menus.zig").isVisible(action, action_context) or !@import("ui/context_menus.zig").isEnabled(action, action_context)) return;

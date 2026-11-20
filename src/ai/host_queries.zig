@@ -83,6 +83,8 @@ pub const Snapshot = struct {
     execution_policy: config.ExecutionPolicy,
     permission_mode: config.PermissionMode,
     lifecycle_management: bool = false,
+    execution_tools_registered: bool = false,
+    can_open_local_terminal: bool = false,
     local_workspace: ?@import("session_prompt.zig").WorkspaceView = null,
     observed_at: i64,
     source_revision: u64,
@@ -280,8 +282,20 @@ pub fn execute(raw_snapshot: Snapshot, invocation: host.Invocation, allocator: s
             .group => |id| try groupRef(a, snapshot.context, id),
         };
         var trusted_pty_execution = false;
-        for (snapshot.sessions) |item| trusted_pty_execution = trusted_pty_execution or (visibleSession(snapshot, item) and !item.metadata_only and item.trusted_pty_execution);
-        body = try std.json.Stringify.valueAlloc(a, .{ .conversation_id = snapshot.context.conversation_id, .task_id = snapshot.context.task_id, .initial_kind = @tagName(snapshot.initial_binding), .current_binding = snapshot.context.binding, .binding_ref = binding_ref, .binding_revision = snapshot.context.binding_revision, .mode = @tagName(snapshot.execution_policy.execution_mode), .execution_mode = @tagName(snapshot.execution_policy.execution_mode), .retention = @tagName(snapshot.execution_policy.session_retention), .permission_mode = @tagName(snapshot.permission_mode), .grants = .{ .read_state = true, .inventory = @as([]const u8, if (snapshot.inventory_grant != null) "workspace_open_metadata" else "current_binding"), .metadata_only = snapshot.inventory_grant != null, .duration = if (snapshot.inventory_grant) |grant| @as(?[]const u8, @tagName(grant.duration)) else null, .expires_at = if (snapshot.inventory_grant) |grant| if (grant.duration == .legacy) @as(?i64, grant.expires_at) else null else null, .selection_revision = if (snapshot.inventory_grant) |grant| @as(?u64, grant.selection.revision()) else null, .grant_revision = snapshot.context.grant_revision }, .capabilities = .{ .discovery = true, .trusted_pty_execution = trusted_pty_execution, .lifecycle_management = snapshot.lifecycle_management }, .local_workspace = snapshot.local_workspace, .observed_at = snapshot.observed_at, .source_revision = snapshot.source_revision, .truncated = false, .next_cursor = @as(?[]const u8, null) }, .{});
+        var ready_execution_targets: usize = 0;
+        for (snapshot.sessions) |item| {
+            if (visibleSession(snapshot, item) and !item.metadata_only and item.trusted_pty_execution) {
+                trusted_pty_execution = true;
+                ready_execution_targets += 1;
+            }
+        }
+        const execution_unavailable_reason: ?[]const u8 = if (trusted_pty_execution)
+            null
+        else if (snapshot.execution_tools_registered)
+            "no_ready_terminal_in_binding"
+        else
+            "execution_disabled";
+        body = try std.json.Stringify.valueAlloc(a, .{ .conversation_id = snapshot.context.conversation_id, .task_id = snapshot.context.task_id, .initial_kind = @tagName(snapshot.initial_binding), .current_binding = snapshot.context.binding, .binding_ref = binding_ref, .binding_revision = snapshot.context.binding_revision, .mode = @tagName(snapshot.execution_policy.execution_mode), .execution_mode = @tagName(snapshot.execution_policy.execution_mode), .retention = @tagName(snapshot.execution_policy.session_retention), .permission_mode = @tagName(snapshot.permission_mode), .grants = .{ .read_state = true, .inventory = @as([]const u8, if (snapshot.inventory_grant != null) "workspace_open_metadata" else "current_binding"), .metadata_only = snapshot.inventory_grant != null, .duration = if (snapshot.inventory_grant) |grant| @as(?[]const u8, @tagName(grant.duration)) else null, .expires_at = if (snapshot.inventory_grant) |grant| if (grant.duration == .legacy) @as(?i64, grant.expires_at) else null else null, .selection_revision = if (snapshot.inventory_grant) |grant| @as(?u64, grant.selection.revision()) else null, .grant_revision = snapshot.context.grant_revision }, .capabilities = .{ .discovery = true, .trusted_pty_execution = trusted_pty_execution, .ready_execution_targets = ready_execution_targets, .execution_unavailable_reason = execution_unavailable_reason, .can_open_local_terminal = snapshot.can_open_local_terminal, .lifecycle_management = snapshot.lifecycle_management }, .local_workspace = snapshot.local_workspace, .observed_at = snapshot.observed_at, .source_revision = snapshot.source_revision, .truncated = false, .next_cursor = @as(?[]const u8, null) }, .{});
     } else if (std.mem.eql(u8, invocation.tool_id, "host.get_session")) {
         const item = try resolveSession(snapshot, try stringArg(args, "session_ref"));
         body = try std.json.Stringify.valueAlloc(a, .{ .session = try sessionView(a, snapshot, item), .observed_at = snapshot.observed_at, .source_revision = snapshot.source_revision, .truncated = false, .next_cursor = @as(?[]const u8, null) }, .{});
@@ -450,7 +464,7 @@ test "host discovery reports frozen execution retention and permission independe
     const a = std.testing.allocator;
     const context: host.Context = .{ .conversation_id = identity.ConversationId.generate(), .task_id = identity.TaskId.generate(), .binding = .{ .session = 1 }, .binding_revision = 1, .grant_revision = 3 };
     var sessions = [_]Session{.{ .handle = .{ .session_id = @fromBackingInt(1) }, .title = "Local", .protocol = "local", .state = "attached", .ready = true, .trusted_pty_execution = true }};
-    var snapshot: Snapshot = .{ .context = context, .initial_binding = context.binding, .execution_policy = .{ .execution_mode = .interactive, .session_retention = .auto_idle }, .permission_mode = .confirm, .lifecycle_management = true, .observed_at = 10, .source_revision = 11, .cursor_key = @splat(7), .sessions = &sessions, .groups = &.{} };
+    var snapshot: Snapshot = .{ .context = context, .initial_binding = context.binding, .execution_policy = .{ .execution_mode = .interactive, .session_retention = .auto_idle }, .permission_mode = .confirm, .lifecycle_management = true, .execution_tools_registered = true, .can_open_local_terminal = true, .observed_at = 10, .source_revision = 11, .cursor_key = @splat(7), .sessions = &sessions, .groups = &.{} };
     var current = try testQuery(a, snapshot, "host.get_current_context", "{}");
     defer current.deinit(a);
     const first = try std.json.parseFromSlice(std.json.Value, a, current.blocks[0].structured, .{});
@@ -461,10 +475,14 @@ test "host discovery reports frozen execution retention and permission independe
     try std.testing.expectEqualStrings("confirm", first.value.object.get("permission_mode").?.string);
     try std.testing.expect(first.value.object.get("capabilities").?.object.get("lifecycle_management").?.bool);
     try std.testing.expect(first.value.object.get("capabilities").?.object.get("trusted_pty_execution").?.bool);
+    try std.testing.expectEqual(@as(i64, 1), first.value.object.get("capabilities").?.object.get("ready_execution_targets").?.integer);
+    try std.testing.expect(first.value.object.get("capabilities").?.object.get("execution_unavailable_reason").? == .null);
+    try std.testing.expect(first.value.object.get("capabilities").?.object.get("can_open_local_terminal").?.bool);
 
     snapshot.execution_policy = .{ .execution_mode = .isolated_exec, .session_retention = .ask };
     snapshot.permission_mode = .auto;
     snapshot.lifecycle_management = false;
+    snapshot.can_open_local_terminal = false;
     sessions[0].trusted_pty_execution = false;
     var changed = try testQuery(a, snapshot, "host.get_current_context", "{}");
     defer changed.deinit(a);
@@ -475,6 +493,16 @@ test "host discovery reports frozen execution retention and permission independe
     try std.testing.expectEqualStrings("auto", second.value.object.get("permission_mode").?.string);
     try std.testing.expect(!second.value.object.get("capabilities").?.object.get("lifecycle_management").?.bool);
     try std.testing.expect(!second.value.object.get("capabilities").?.object.get("trusted_pty_execution").?.bool);
+    try std.testing.expectEqual(@as(i64, 0), second.value.object.get("capabilities").?.object.get("ready_execution_targets").?.integer);
+    try std.testing.expectEqualStrings("no_ready_terminal_in_binding", second.value.object.get("capabilities").?.object.get("execution_unavailable_reason").?.string);
+    try std.testing.expect(!second.value.object.get("capabilities").?.object.get("can_open_local_terminal").?.bool);
+
+    snapshot.execution_tools_registered = false;
+    var disabled = try testQuery(a, snapshot, "host.get_current_context", "{}");
+    defer disabled.deinit(a);
+    const third = try std.json.parseFromSlice(std.json.Value, a, disabled.blocks[0].structured, .{});
+    defer third.deinit();
+    try std.testing.expectEqualStrings("execution_disabled", third.value.object.get("capabilities").?.object.get("execution_unavailable_reason").?.string);
 }
 
 test "host discovery exposes only an associated saved source and preserves session references" {

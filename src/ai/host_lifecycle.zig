@@ -12,6 +12,7 @@ pub const Request = struct {
     group: ?identity.GroupOwner = null,
     source: ?identity.SessionHandle = null,
     saved_source: ?identity.AssetOwner = null,
+    local_source: bool = false,
     name: ?[]const u8 = null,
     connection_policy: ?lifecycle.ConnectionPolicy = null,
     retention: ?lifecycle.Retention = null,
@@ -33,7 +34,7 @@ fn contribution(comptime id: []const u8, description: []const u8, comptime field
 pub const create_group_contribution = contribution("create_group", "Create a real group from this conversation's exact initial_session_ref and move this same conversation to it. This is the first step to open another work session from a single-session conversation; the session-creation tool becomes available only after a successful group handoff and catalog refresh, subject to host policy. Requires a precise host grant/approval. Refresh context after success before opening a work session. Same request_key returns the original receipt; never retry unknown effects with another key.", "\"initial_session_ref\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":128}," ++ name ++ "," ++ key, "\"initial_session_ref\",\"request_key\"");
 pub const contributions = [_]host.Contribution{
     create_group_contribution,
-    contribution("open_session", "Create one task-owned work session in the current group without executing a user command. Use an authorized source_ref; single sessions must first create_group and refresh context. reuse_only never opens a new connection; prefer_reuse needs explicit fallback authorization. Returns opening/ready and stable refs; use wait_session_ready. Shell integration is a default session capability and may initialize one in-session text hook in the existing SSH shell; interactive_execution is retained for compatibility and does not request helper deployment. No remote binaries are uploaded. Inspect live PTY capability and completion_source after the session becomes ready; a connected shell may still be initializing or unsupported. Same request_key never creates twice.", group ++ ",\"source_ref\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":128}," ++ policy ++ "," ++ retention ++ ",\"interactive_execution\":{\"type\":\"boolean\"}," ++ key, "\"group_ref\",\"source_ref\",\"connection_policy\",\"request_key\""),
+    contribution("open_session", "Create one task-owned work session in the current group without executing a user command. Use an authorized source_ref: an existing session reference (s1:...), a saved SSH host reference (c1:...), or \"local\" with connection_policy=new_only to open a new Mac local terminal after approval. Single sessions must first create_group and refresh context. reuse_only never opens a new connection; prefer_reuse needs explicit fallback authorization. Returns opening/ready and stable refs; use wait_session_ready. Shell integration is a default session capability and may initialize one in-session text hook in the existing SSH shell; interactive_execution is retained for compatibility and does not request helper deployment. No remote binaries are uploaded. Inspect live PTY capability and completion_source after the session becomes ready; a connected shell may still be initializing or unsupported. Same request_key never creates twice.", group ++ ",\"source_ref\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":128}," ++ policy ++ "," ++ retention ++ ",\"interactive_execution\":{\"type\":\"boolean\"}," ++ key, "\"group_ref\",\"source_ref\",\"connection_policy\",\"request_key\""),
     contribution("rename_group", "Rename this conversation's exact group after host authorization. Identity and membership remain stable. Same request_key returns the original operation receipt.", group ++ "," ++ name ++ "," ++ key, "\"group_ref\",\"name\",\"request_key\""),
     contribution("add_group_member", "Confirm an exact current member in this conversation's group. Existing sessions outside the current binding are inaccessible and cannot be added. Does not connect or send input. Same request_key reuses the original relation receipt.", group ++ "," ++ session ++ "," ++ key, "\"group_ref\",\"session_ref\",\"request_key\""),
     contribution("remove_group_member", "Remove only the exact group membership after host dependency checks. The session stays open. Removing the last member closes the group. Active executions require explicit resolution.", group ++ "," ++ session ++ "," ++ key, "\"group_ref\",\"session_ref\",\"request_key\""),
@@ -147,7 +148,7 @@ pub fn parse(invocation: host.Invocation) !Request {
             request.interactive_execution = value.bool;
         }
         const reference = try text(args, "source_ref");
-        if (std.mem.startsWith(u8, reference, "s1:")) request.source = try sessionHandle(invocation.context, reference) else if (std.mem.startsWith(u8, reference, "c1:")) request.saved_source = try connectionOwner(invocation.context, reference) else return error.UnsupportedSource;
+        if (std.mem.startsWith(u8, reference, "s1:")) request.source = try sessionHandle(invocation.context, reference) else if (std.mem.startsWith(u8, reference, "c1:")) request.saved_source = try connectionOwner(invocation.context, reference) else if (std.mem.eql(u8, reference, "local")) request.local_source = true else return error.UnsupportedSource;
     }
     if (operation == .rename_group or args.object.get("name") != null) {
         request.name = try text(args, "name");
@@ -156,6 +157,7 @@ pub fn parse(invocation: host.Invocation) !Request {
     }
     if (operation != .create_group and operation != .open_session and operation != .rename_group and operation != .wait_session_ready) request.session = try sessionHandle(invocation.context, try text(args, "session_ref"));
     if (operation == .open_session or operation == .reconnect_session) request.connection_policy = std.meta.stringToEnum(lifecycle.ConnectionPolicy, try text(args, "connection_policy")) orelse return error.InvalidArguments;
+    if (operation == .open_session and request.local_source and request.connection_policy != .new_only) return error.UnsupportedSource;
     if (operation == .set_session_retention or args.object.get("retention") != null) request.retention = std.meta.stringToEnum(lifecycle.Retention, try text(args, "retention")) orelse return error.InvalidArguments;
     if (operation == .wait_session_ready) {
         if (args.object.get("wait_for")) |value| {
@@ -212,4 +214,24 @@ test "lifecycle catalog validates through the host table and marks effects expli
     defer table.deinit();
     try std.testing.expectEqual(@as(usize, 10), table.entries.len);
     for (contributions) |item| try std.testing.expectEqual(if (std.mem.eql(u8, item.definition.id, "host.wait_session_ready")) @import("plugin_tools.zig").Effect.read_state else .resource_write, item.definition.effect);
+}
+
+test "open_session accepts local source only with new_only policy" {
+    const a = std.testing.allocator;
+    const context: host.Context = .{ .conversation_id = identity.ConversationId.generate(), .task_id = identity.TaskId.generate(), .binding = .{ .group = 7 }, .binding_revision = 1, .grant_revision = 1 };
+    const hex = std.fmt.bytesToHex(context.conversation_id.bytes, .lower);
+    const valid_json = try std.fmt.allocPrint(a, "{{\"group_ref\":\"g1:{s}:7\",\"source_ref\":\"local\",\"connection_policy\":\"new_only\",\"request_key\":\"open-local\"}}", .{hex});
+    defer a.free(valid_json);
+    const valid_args = try std.json.parseFromSlice(std.json.Value, a, valid_json, .{});
+    defer valid_args.deinit();
+    const parsed = try parse(.{ .context = context, .authority = .lifecycle, .operation_id = 1, .turn_id = 1, .call_id = "c1", .tool_id = "host.open_session", .arguments = valid_args.value, .arguments_json = valid_json, .arguments_hash = @splat(0), .canonical_arguments_hash = @splat(0) });
+    try std.testing.expect(parsed.local_source);
+    try std.testing.expect(parsed.source == null and parsed.saved_source == null);
+    try std.testing.expectEqual(lifecycle.ConnectionPolicy.new_only, parsed.connection_policy.?);
+
+    const invalid_json = try std.fmt.allocPrint(a, "{{\"group_ref\":\"g1:{s}:7\",\"source_ref\":\"local\",\"connection_policy\":\"reuse_only\",\"request_key\":\"open-local-bad\"}}", .{hex});
+    defer a.free(invalid_json);
+    const invalid_args = try std.json.parseFromSlice(std.json.Value, a, invalid_json, .{});
+    defer invalid_args.deinit();
+    try std.testing.expectError(error.UnsupportedSource, parse(.{ .context = context, .authority = .lifecycle, .operation_id = 2, .turn_id = 1, .call_id = "c2", .tool_id = "host.open_session", .arguments = invalid_args.value, .arguments_json = invalid_json, .arguments_hash = @splat(0), .canonical_arguments_hash = @splat(0) }));
 }

@@ -46,7 +46,7 @@ const Fixture = struct {
             .authorize => |request| {
                 if (!self.close_authorized and request.kind == .close_session) return error.CloseApprovalRequired;
                 self.authorization_count += 1;
-                call.result = .{ .authorized = .{ .source = request.source, .saved_source = request.saved_source, .session = request.session, .group = request.group, .retention = request.retention orelse .auto_idle, .approval_required = self.approval_required, .explicit_user_close = self.close_authorized, .bootstrap_required = self.bootstrap_required, .impact_revision = if (self.revise_approval_once) @as(u64, if (self.authorization_count == 1) 1 else 2) else null } };
+                call.result = .{ .authorized = .{ .source = request.source, .saved_source = request.saved_source, .local_source = request.local_source, .opens_local_terminal = request.local_source, .session = request.session, .group = request.group, .retention = request.retention orelse .auto_idle, .approval_required = self.approval_required, .explicit_user_close = self.close_authorized, .bootstrap_required = self.bootstrap_required, .impact_revision = if (self.revise_approval_once) @as(u64, if (self.authorization_count == 1) 1 else 2) else null } };
             },
             .prepare_group => |request| {
                 self.prepare_count += 1;
@@ -68,7 +68,7 @@ const Fixture = struct {
             .cancel_group_prepare => self.cancelled_preparations += 1,
             .queue_open => |request| {
                 self.open_count += 1;
-                self.snapshot = .{ .operation_ref = request.operation_ref, .context = request.context, .group = request.group, .source = request.source, .saved_source = request.saved_source, .session = .{ .session_id = @fromBackingInt(102), .generation = 3 }, .state = .prepared, .retention = request.retention, .revision = 2 };
+                self.snapshot = .{ .operation_ref = request.operation_ref, .context = request.context, .group = request.group, .source = request.source, .saved_source = request.saved_source, .local_source = request.local_source, .session = .{ .session_id = @fromBackingInt(102), .generation = 3 }, .state = .prepared, .retention = request.retention, .revision = 2 };
                 call.result = .{ .session = self.snapshot.? };
             },
             .probe_bootstrap => call.result = .{ .bootstrap_probe = try backend.bootstrap_product.Probed.init(.{ .platform = .darwin_aarch64, .shell_path = .bin }, "fixture", "controlled.test", 2222) },
@@ -579,4 +579,28 @@ test "v0.4 handoff model create waits outside controller and publishes once afte
     var repeated = try execute(&fixture, "host.create_group", args);
     defer repeated.deinit(a);
     try std.testing.expectEqual(@as(usize, 1), fixture.publish_count);
+}
+
+test "lifecycle runtime accepts local source_ref and projects literal local source" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const owner = try backend.ProcessJournal.acquire(.{ .data_root = "/test/local-source-lifecycle", .dir = tmp.dir, .io = io });
+    defer owner.release();
+    var ctx = context();
+    ctx.binding = .{ .group = 77 };
+    var fixture: Fixture = .{ .owner = owner, .ctx = ctx };
+    const args = try std.fmt.allocPrint(a, "{{\"group_ref\":\"g1:{s}:77\",\"source_ref\":\"local\",\"connection_policy\":\"new_only\",\"request_key\":\"local-1\"}}", .{std.fmt.bytesToHex(ctx.conversation_id.bytes, .lower)});
+    defer a.free(args);
+    var opened = try execute(&fixture, "host.open_session", args);
+    defer opened.deinit(a);
+    try std.testing.expectEqual(@import("plugin_tools.zig").Status.succeeded, opened.status);
+    try std.testing.expect(fixture.snapshot.?.local_source);
+    try std.testing.expect(fixture.snapshot.?.source == null and fixture.snapshot.?.saved_source == null);
+    const parsed = try std.json.parseFromSlice(std.json.Value, a, opened.blocks[0].structured, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("local", parsed.value.object.get("source_ref").?.string);
+    var repeated = try execute(&fixture, "host.open_session", args);
+    defer repeated.deinit(a);
+    try std.testing.expectEqual(@as(usize, 1), fixture.open_count);
+    try std.testing.expectEqual(@as(usize, 1), fixture.dispatch_count);
 }

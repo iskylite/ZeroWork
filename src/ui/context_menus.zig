@@ -90,18 +90,28 @@ fn catalogAction(action: Action) ?actions.ActionId {
         else => null,
     };
 }
+fn retainedReadOnlyAction(action: Action) bool {
+    return switch (action) {
+        .copy, .toggle_block_selection, .toggle_timestamp, .history, .command_history, .search, .export_selection, .export_session, .open_theme => true,
+        else => false,
+    };
+}
 pub fn isEnabled(action: Action, context: Context) bool {
     if (!isVisible(action, context)) return false;
-    if (projection(action, context)) |value| if (!value.enabled) return false;
+    if (projection(action, context)) |value| if (!value.enabled) {
+        const allow_retained = context.session_ended and context.retained_terminal_available and retainedReadOnlyAction(action) and !context.capability_snapshot.?.closed;
+        if (!allow_retained) return false;
+    };
     return switch (action) {
         .open_in_current_group => context.group_target_available,
         .duplicate_into_group => context.single_session and !context.read_only and !context.session_ended and
             (if (context.capability_snapshot) |snapshot| actions.project(.join_group, snapshot).enabled else true),
         .new_window => context.new_window_available,
         .reuse_connection => context.reuse_connection_available and !context.session_ended,
-        .ask_ai, .copy, .export_selection => context.has_selection,
+        .ask_ai => context.has_selection and context.ai_selection_available,
+        .copy, .export_selection => context.has_selection,
         .reconnect => context.session_ended,
-        .paste => !context.read_only,
+        .paste => !context.read_only and !context.session_ended,
         .upload_file, .download_file => (context.capability_snapshot != null or context.transfer_available) and !context.read_only and !context.session_ended,
         .join_session_group => !context.read_only and !context.session_ended,
         .close_others => context.multi_tabs,
@@ -120,6 +130,8 @@ pub const Context = struct {
     local_session: bool = false,
     read_only: bool = false,
     has_selection: bool = false,
+    ai_selection_available: bool = true,
+    retained_terminal_available: bool = false,
     session_ended: bool = false,
     /// Tab menu: "关闭其他页签" needs more than one open tab.
     multi_tabs: bool = false,
@@ -132,7 +144,11 @@ pub const Context = struct {
 
 pub fn items(kind: Kind, context: Context) []const Item {
     return switch (kind) {
-        .terminal => if (context.local_session) &local_terminal else if (context.has_selection) &terminal_selection else &terminal_empty,
+        .terminal => if (context.local_session)
+            (if (context.session_ended) &local_terminal_ended else &local_terminal)
+        else if (context.session_ended)
+            &terminal_ended
+        else if (context.has_selection) &terminal_selection else &terminal_empty,
         .host_asset => if (context.background_socks) (if (context.background_active) &host_background_active else &host_background_available) else &host_asset,
         .session_ended => if (context.local_session) &local_tab else &session_ended,
         .tab => if (context.local_session) &local_tab else &tab_menu,
@@ -183,6 +199,9 @@ const local_terminal = [_]Item{
     .{ .action = .search, .label = "在终端中搜索", .icon = "search", .shortcut = "⌘F", .separator_before = true },
     .{ .action = .export_selection, .label = "导出选中内容…", .icon = "download" },
     .{ .action = .duplicate_into_group, .label = "复制并创建会话组", .icon = "panels-top-left", .separator_before = true },
+};
+const local_terminal_ended = local_terminal ++ [_]Item{
+    .{ .action = .close_session, .label = "关闭本地会话", .icon = "x", .separator_before = true, .danger = true },
 };
 
 test "local menus expose current local capabilities without remote or future operations" {
@@ -247,6 +266,18 @@ const terminal_empty = [_]Item{
     .{ .action = .history, .label = "历史回溯", .icon = "📜", .shortcut = "@log" },
     .{ .action = .search, .label = "在终端中搜索", .icon = "🔍", .shortcut = "⌘F", .separator_before = true },
     .{ .action = .export_selection, .label = "导出选中内容…", .icon = "⇪" },
+};
+
+const terminal_ended = [_]Item{
+    .{ .action = .reconnect, .label = "重新连接", .icon = "refresh-cw" },
+    .{ .action = .close_session, .label = "关闭会话", .icon = "power", .danger = true },
+    .{ .action = .copy, .label = "复制", .icon = "copy", .shortcut = "⌘C", .separator_before = true },
+    .{ .action = .toggle_timestamp, .label = "时间戳侧栏", .icon = "clock", .shortcut = "@ts" },
+    .{ .action = .command_history, .label = "命令历史", .icon = "list-restart" },
+    .{ .action = .history, .label = "历史回溯", .icon = "history", .shortcut = "@log" },
+    .{ .action = .search, .label = "在终端中搜索", .icon = "search", .shortcut = "⌘F" },
+    .{ .action = .export_selection, .label = "导出选中内容…", .icon = "download" },
+    .{ .action = .open_theme, .label = "全局主题", .icon = "palette" },
 };
 
 const host_asset = [_]Item{
@@ -355,4 +386,67 @@ test "mixed session group menu does not require terminal services" {
     try std.testing.expect(!isEnabled(.join_session_group, .{ .read_only = true }));
     try std.testing.expect(!isEnabled(.join_session_group, .{ .session_ended = true }));
     try std.testing.expectEqual(@as(usize, 0), actions.requirements(.join_group).len);
+}
+
+test "ended terminal middle-click menus expose reconnect, close, and retained read-only actions" {
+    const owner: @import("../host/identity.zig").SessionHandle = .{ .session_id = @fromBackingInt(12) };
+    const offline_services = [_]capabilities.ServiceState{
+        .{ .key = .{ .name = "terminal" }, .declared = true, .available = false, .authorized = false, .revision = 3 },
+        .{ .key = .{ .name = "transfer" }, .declared = true, .available = false, .authorized = false, .revision = 3 },
+        .{ .key = .{ .name = "recording" }, .declared = true, .available = false, .authorized = false, .revision = 3 },
+        .{ .key = .{ .name = "lifecycle" }, .declared = true, .available = false, .authorized = false, .revision = 3 },
+    };
+    const ended_ssh: Context = .{
+        .capability_snapshot = .{ .owner = owner, .revision = 3, .services = &offline_services, .closed = false },
+        .read_only = true,
+        .has_selection = true,
+        .ai_selection_available = false,
+        .retained_terminal_available = true,
+        .session_ended = true,
+        .single_session = true,
+        .transfer_available = true,
+    };
+    const ssh_items = items(.terminal, ended_ssh);
+    try std.testing.expectEqual(Action.reconnect, ssh_items[0].action);
+    try std.testing.expectEqual(Action.close_session, ssh_items[1].action);
+    try std.testing.expect(ssh_items[2].separator_before);
+    try std.testing.expectEqual(Action.open_theme, ssh_items[ssh_items.len - 1].action);
+    for (ssh_items) |item| switch (item.action) {
+        .paste, .upload_file, .download_file, .duplicate_into_group => return error.UnexpectedOfflineMenuAction,
+        else => {},
+    };
+    try std.testing.expect(isEnabled(.open_theme, ended_ssh));
+    try std.testing.expect(isEnabled(.reconnect, ended_ssh));
+    try std.testing.expect(isEnabled(.close_session, ended_ssh));
+    try std.testing.expect(isEnabled(.copy, ended_ssh));
+    try std.testing.expect(isEnabled(.search, ended_ssh));
+    try std.testing.expect(isEnabled(.history, ended_ssh));
+    try std.testing.expect(isEnabled(.command_history, ended_ssh));
+    try std.testing.expect(isEnabled(.toggle_timestamp, ended_ssh));
+    try std.testing.expect(isEnabled(.export_selection, ended_ssh));
+    try std.testing.expect(!isEnabled(.paste, ended_ssh));
+    try std.testing.expect(!isEnabled(.upload_file, ended_ssh));
+    try std.testing.expect(!isEnabled(.download_file, ended_ssh));
+    try std.testing.expect(!isEnabled(.duplicate_into_group, ended_ssh));
+    try std.testing.expect(!isEnabled(.ask_ai, ended_ssh));
+
+    var group_ssh = ended_ssh;
+    group_ssh.single_session = false;
+    try std.testing.expectEqualDeep(ssh_items, items(.terminal, group_ssh));
+
+    var closing_ssh = ended_ssh;
+    closing_ssh.capability_snapshot.?.closed = true;
+    try std.testing.expect(!isEnabled(.search, closing_ssh));
+    try std.testing.expect(!isEnabled(.export_selection, closing_ssh));
+
+    var ended_local = ended_ssh;
+    ended_local.local_session = true;
+    const local_items = items(.terminal, ended_local);
+    try std.testing.expectEqual(Action.close_session, local_items[local_items.len - 1].action);
+    try std.testing.expect(local_items[local_items.len - 1].separator_before);
+    try std.testing.expect(isEnabled(.close_session, ended_local));
+    try std.testing.expect(isEnabled(.copy, ended_local));
+    try std.testing.expect(isEnabled(.search, ended_local));
+    try std.testing.expect(!isEnabled(.paste, ended_local));
+    try std.testing.expect(!isEnabled(.duplicate_into_group, ended_local));
 }
