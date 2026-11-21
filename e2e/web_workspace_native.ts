@@ -123,6 +123,10 @@ try {
     await click('web.editor.mode.preset');
     await fill('web.editor.url', ready.direct);
     await capture('wizard-web');
+    await click('web.editor.next');
+    await find('wizard.access.direct');
+    await click('web.editor.next');
+    await find('web.editor.review');
     stage = 'save and load the direct preset';
     await click('web.editor.open');
     await find('web.document');
@@ -158,6 +162,10 @@ try {
     stage = 'website dialogs retain user choices and distinguish empty input from cancel';
     await openWebWizard('Web interaction fixture');
     await click('web.editor.mode.manual');
+    await click('web.editor.next');
+    await find('wizard.access.direct');
+    await click('web.editor.next');
+    await find('web.editor.review');
     await click('web.editor.temporary');
     stage = 'same-document address changes during loading reach the address bar';
     await fill('web.address', new URL('/history-loading', ready.direct).href);
@@ -223,6 +231,7 @@ try {
     await h.resizeWindow(1280, 800);
     await click(routedPreset ? 'web.editor.mode.preset' : 'web.editor.mode.manual');
     if (routedPreset) await fill('web.editor.url', ready.routed);
+    await click('web.editor.next');
     await click('wizard.access.jump');
     for (const hop of [1, 2]) {
         await click(hop === 1 ? 'wizard.route.hop.0' : 'wizard.route.insert.1');
@@ -242,6 +251,8 @@ try {
     await h.scrollAt(compact.rect.x + compact.rect.w / 2, compact.rect.y + compact.rect.h / 2, 0, -240);
     await capture('wizard-ssh-route-compact');
     await h.resizeWindow(1280, 800);
+    await click('web.editor.next');
+    await find('web.editor.review');
     await click('web.editor.open');
     await h.waitFor(async () => !(await h.query('web.editor')).some(visible) || null, 12000);
     stage = routedPreset ? 'open the preset URL automatically over SSH' : 'submit a target to the saved SSH route';
@@ -326,9 +337,12 @@ try {
         await openWebWizard(name);
         await click('web.editor.mode.preset');
         await fill('web.editor.url', ready.tls + path);
+        await click('web.editor.next');
         await click('wizard.access.jump');
         await click('wizard.route.hop.0');
         await click('wizard.route.option', node => content(node).includes('Owned hop 2'));
+        await click('web.editor.next');
+        await find('web.editor.review');
         await click('web.editor.temporary');
     }
 

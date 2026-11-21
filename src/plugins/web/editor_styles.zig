@@ -27,6 +27,13 @@ pub fn field(_: *const ui.ThemeTokens) ui.BoxStyle {
     return result;
 }
 
+pub fn panelField(_: *const ui.ThemeTokens) ui.BoxStyle {
+    var result = wizard.stack(undefined);
+    result.gap = 4;
+    result.min_width = 0;
+    return result;
+}
+
 pub fn input() ui.BoxStyle {
     var result = wizard.input();
     result.font_size = 13;
@@ -36,6 +43,39 @@ pub fn input() ui.BoxStyle {
 pub fn footer(_: *const ui.ThemeTokens) ui.BoxStyle {
     var result = wizard.footer();
     result.gap = 8;
+    return result;
+}
+
+pub fn stepBody() ui.BoxStyle {
+    return .{
+        .width = .fill(),
+        .height = .{ .fit = .{} },
+        .direction = .column,
+        .padding = .{ .bottom = 12 },
+        .gap = 12,
+        .flex_shrink = 0,
+    };
+}
+
+pub fn stepFooter(is_route: bool, compact: bool, is_review: bool) ui.BoxStyle {
+    var result = wizard.footer();
+    const pad = wizard.stepFooterPadding(is_route, compact, is_review);
+    result.height = .{ .px = wizard.stepFooterHeight(is_route, compact, is_review) };
+    result.padding = .{ .left = 24, .right = 24, .top = pad, .bottom = pad };
+    result.gap = 8;
+    result.background = wizard.stepFooterBackground(is_route);
+    return result;
+}
+
+pub fn ghostAction() ui.BoxStyle {
+    var result = wizard.button(0, control_height, false);
+    result.width = .{ .fit = .{} };
+    result.padding = .{ .left = 12, .right = 12 };
+    result.background = ui.Color.TRANSPARENT;
+    result.border = .{ .radius = 8 };
+    result.font_size = 12;
+    result.font_weight = 500;
+    result.text_color = theme.current().fg_2;
     return result;
 }
 

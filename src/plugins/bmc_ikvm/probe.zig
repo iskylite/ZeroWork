@@ -14,6 +14,7 @@ const profile = @import("protocol/profile.zig");
 const auth = @import("protocol/auth.zig");
 const svc = @import("services.zig");
 const progress = @import("connection_progress.zig");
+const feedback = @import("probe_feedback.zig");
 
 pub const Callbacks = struct {
     context: *anyopaque,
@@ -244,6 +245,9 @@ pub const Provider = struct {
         const connection = entry.connection_progress.snapshot();
         const logout = if (entry.web_logout.load(.acquire) == .unknown) "；WEB 会话注销未确认" else "";
         if (!entry.cancelled()) if (connection.failure_code) |code| return std.fmt.bufPrint(&self.message_buffer, "{s}失败 · {s} · 总计 {d} 秒{s}{s}", .{ progress.stageLabel(connection.failure_stage orelse .failed), @import("view_model.zig").failureReason(code, connection.failure_stage), connection.elapsed_ms / 1000, logout, if (finished) "" else " · 正在释放连接资源" });
+        if (!entry.cancelled() and entry.outcome == .succeeded) if (feedback.warningForSnapshot(&connection)) |warning| {
+            return std.fmt.bufPrint(&self.message_buffer, "{s} · 总计 {d} 秒{s}{s}", .{ feedback.warningText(warning), connection.elapsed_ms / 1000, logout, if (finished) "" else " · 正在释放连接资源" });
+        };
         return std.fmt.bufPrint(&self.message_buffer, "{s} · 总计 {d} 秒{s}", .{ finalMessage(entry), connection.elapsed_ms / 1000, if (finished) "" else " · 正在释放连接资源" });
     }
     fn cancel(raw: *anyopaque, key: operation.OperationKey) contract.CloseReceipt {

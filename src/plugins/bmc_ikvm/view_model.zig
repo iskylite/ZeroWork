@@ -261,6 +261,7 @@ pub const ProgressProjection = struct {
 
     pub fn observe(self: *ProgressProjection, snapshot: console.progress.Snapshot) void {
         if (snapshot.discovery_issue != null) self.warnings |= groupBit(.management);
+        if (hasPublicIdentityWarning(snapshot)) self.warnings |= groupBit(.identity);
         inline for (@typeInfo(console.progress.Stage).@"enum".field_names) |field| {
             const stage = @field(console.progress.Stage, field);
             if (snapshot.completed_stage_ms[@intCast(@backingInt(stage))] != null) {
@@ -294,6 +295,22 @@ pub const ProgressProjection = struct {
         return if (self.seen & groupBit(group) != 0) .done else .waiting;
     }
 };
+
+pub fn hasPublicIdentityWarning(snapshot: console.progress.Snapshot) bool {
+    if (snapshot.identity_warning != null) return true;
+    for (snapshot.events[0..@min(snapshot.event_count, snapshot.events.len)]) |event| {
+        if (event.code == .public_identity_unrecognized) return true;
+    }
+    return false;
+}
+
+pub fn hasDiscoveryWarning(snapshot: console.progress.Snapshot) bool {
+    if (snapshot.discovery_issue != null) return true;
+    for (snapshot.events[0..@min(snapshot.event_count, snapshot.events.len)]) |event| {
+        if (event.isDiscoveryIssue()) return true;
+    }
+    return false;
+}
 
 fn groupBit(group: ProgressGroup) u8 {
     return @as(u8, 1) << @intCast(@backingInt(group));
@@ -424,11 +441,20 @@ pub fn writeConnectionLogForTarget(writer: *std.Io.Writer, snapshot: console.pro
         try writer.writeAll("\n保留的管理资源异常 · ");
         try writeProgressEvent(writer, event, target);
     }
+    if (retainedIdentityWarning(snapshot)) |event| {
+        try writer.writeAll("\n保留的设备身份提示 · ");
+        try writeProgressEvent(writer, event, target);
+    }
 }
 fn retainedDiscoveryIssue(snapshot: console.progress.Snapshot) ?console.progress.Event {
     const issue = snapshot.discovery_issue orelse return null;
     for (snapshot.events[0..@min(snapshot.event_count, snapshot.events.len)]) |event| if (event.sequence == issue.sequence) return null;
     return issue;
+}
+fn retainedIdentityWarning(snapshot: console.progress.Snapshot) ?console.progress.Event {
+    const warning = snapshot.identity_warning orelse return null;
+    for (snapshot.events[0..@min(snapshot.event_count, snapshot.events.len)]) |event| if (event.sequence == warning.sequence) return null;
+    return warning;
 }
 
 pub fn writeStepDiagnostics(writer: *std.Io.Writer, snapshot: console.progress.Snapshot, group: ProgressGroup) !void {
@@ -438,6 +464,12 @@ pub fn writeStepDiagnosticsForTarget(writer: *std.Io.Writer, snapshot: console.p
     var count: usize = 0;
     if (retainedDiscoveryIssue(snapshot)) |event| if (progressGroup(event.stage) == group) {
         try writer.writeAll("保留的管理资源异常 · ");
+        try writeProgressEvent(writer, event, target);
+        count += 1;
+    };
+    if (retainedIdentityWarning(snapshot)) |event| if (progressGroup(event.stage) == group) {
+        if (count != 0) try writer.writeByte('\n');
+        try writer.writeAll("保留的设备身份提示 · ");
         try writeProgressEvent(writer, event, target);
         count += 1;
     };
@@ -477,7 +509,7 @@ fn retainedFailure(snapshot: console.progress.Snapshot) ?console.progress.Event 
     return failure;
 }
 
-pub const log_capacity = console.progress.capacity + 2;
+pub const log_capacity = console.progress.capacity + 3;
 pub const LogEvents = struct {
     events: [log_capacity]console.progress.Event = @splat(.{}),
     count: usize = 0,
@@ -491,6 +523,10 @@ pub fn connectionLogEvents(snapshot: console.progress.Snapshot) LogEvents {
         result.count += 1;
     }
     if (retainedDiscoveryIssue(snapshot)) |event| {
+        result.events[result.count] = event;
+        result.count += 1;
+    }
+    if (retainedIdentityWarning(snapshot)) |event| {
         result.events[result.count] = event;
         result.count += 1;
     }

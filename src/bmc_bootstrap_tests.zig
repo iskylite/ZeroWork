@@ -23,7 +23,7 @@ const parent: svc.OperationKey = .{ .owner = .app, .operation_id = 180 };
 const old_reference = "zw1_0000000000000000000000000000000000000000000000000000000000000000";
 
 const fixture =
-    \\import base64,gzip,json,os,pathlib,socket,ssl,subprocess,sys,tempfile,time
+    \\import base64,json,os,pathlib,socket,ssl,subprocess,sys,tempfile
     \\with tempfile.TemporaryDirectory(prefix='zerowork-bmc-bootstrap-') as directory:
     \\ d=pathlib.Path(directory);mode=sys.argv[2]
     \\ (d/'cert.cnf').write_text('[req]\ndistinguished_name=dn\nx509_extensions=ext\nprompt=no\n[dn]\nCN=127.0.0.1\n[ext]\nsubjectAltName=IP:127.0.0.1\n')
@@ -31,8 +31,11 @@ const fixture =
     \\ listener=socket.socket();listener.bind(('127.0.0.1',0));listener.listen(2);listener.settimeout(10)
     \\ port=listener.getsockname()[1];control=socket.create_connection(('127.0.0.1',int(sys.argv[1])),timeout=10);control.sendall(str(port).encode()+b'\n')
     \\ context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);context.load_cert_chain(d/'cert.pem',d/'key.pem')
-    \\ paths=[];posts=0;logged_out=False;token=os.urandom(16).hex()
-    \\ zero=mode in ('unknown','unknown-firmware','missing','no-firmware','untrusted') or mode.startswith('asset-')
+    \\ paths=[];posts=0;kvm_posts=0;logged_out=False;token=os.urandom(16).hex()
+    \\ console_discovery=mode.startswith('console-discovery-')
+    \\ discovery_problem=mode.removeprefix('console-')
+    \\ kvm_path='/redfish/v1/SessionService/Sessions/Oem/Public/KvmSessions'
+    \\ zero=mode in ('unknown-console','untrusted')
     \\ try:
     \\  raw,_=listener.accept()
     \\  with context.wrap_socket(raw,server_side=True) as s:
@@ -54,41 +57,32 @@ const fixture =
     \\    length=int(headers.get('content-length','0'))
     \\    while len(buffer)<length: buffer+=s.recv(16384)
     \\    body,buffer=buffer[:length],buffer[length:];paths.append((method,path))
-    \\    assert '/Oem/' not in path and path!='/kvm/0'
+    \\    assert ('/Oem/' not in path or (console_discovery and path==kvm_path)) and path!='/kvm/0'
     \\    if method=='GET': assert not body
-    \\    elif method=='POST': assert path=='/redfish/v1/SessionService/Sessions';posts+=1
+    \\    elif method=='POST':
+    \\     if path==kvm_path: kvm_posts+=1
+    \\     else: assert path=='/redfish/v1/SessionService/Sessions';posts+=1
     \\    elif method=='DELETE': assert path=='/redfish/v1/SessionService/Sessions/own-web' and not body
     \\    else: raise AssertionError('write or input request')
     \\    if path=='/redfish/v1/' and method=='GET':
     \\     public={'Copyright':{'EN':'Zhongke Sugon Information Industry Co., Ltd., Limited Copyright 2003-2025, All rights reserved'},'ProductName':'SuperPod','Platform':'Hygon','BMCChipModel':'AST2600-A3'}
     \\     root={'Manufacturer':'N/A','RedfishVersion':'1.17.0','Oem':{'Public':public},'Systems':{'@odata.id':'/redfish/v1/Systems'},'Managers':{'@odata.id':'/redfish/v1/Managers'},'SessionService':{'@odata.id':'/redfish/v1/SessionService'}}
-    \\     if mode not in ('no-firmware',) and not mode.startswith(('asset-','pending-')): root['FirmwareVersion']='1.81' if mode=='unknown-firmware' else '1.80'
-    \\     if mode=='unknown': public['Copyright']['EN']='Other manufacturer'
-    \\     if mode=='missing': del public['ProductName']
-    \\     if mode.startswith('asset-'): public['RedfishVersion']='1.17.2.0.3.8.0.21'
+    \\     if mode not in ('no-firmware','scale') and not mode.startswith('pending-'): root['FirmwareVersion']='1.81' if mode=='unknown-firmware' else '1.80'
+    \\     if mode in ('unknown','unknown-console','scale'): public['Copyright']['EN']='Other manufacturer'
+    \\     if mode in ('unknown','unknown-console','sugon-only'): public['ProductName']='Other model'
+    \\     if mode=='scale': public['ProductName']='scaleX40-3G'
+    \\     if mode=='missing': del root['Oem']
+    \\     if discovery_problem=='discovery-missing':
+    \\      del root['Systems']
+    \\      del root['Managers']
     \\     response(200,root)
-    \\    elif path=='/js/app.0bc71eb0.js' and method=='GET':
-    \\     assert mode.startswith('asset-') and headers.get('accept-encoding')=='gzip' and 'x-auth-token' not in headers
-    \\     asset=b'/* ephemeral loopback asset */'*3000
-    \\     if mode=='asset-large-gzip': asset=b''.join(os.urandom(1024)+b'/* ephemeral loopback only */'*144 for _ in range(2300))
-    \\     if mode=='asset-bomb': asset=b'x'*(16*1024*1024+1)
-    \\     encoded=gzip.compress(asset,mtime=0)
-    \\     if mode=='asset-truncated': encoded=encoded[:-3]
-    \\     if mode=='asset-trailing': encoded+=b'extra'
-    \\     if mode in ('asset-slow-plain','asset-slow-gzip'):
-    \\      b=asset if mode=='asset-slow-plain' else encoded
-    \\      h=('HTTP/1.1 200 OK\r\nContent-Length: '+str(len(b))+'\r\n').encode()
-    \\      if mode=='asset-slow-gzip': h+=b'Content-Encoding: gzip\r\n'
-    \\      s.sendall(h+b'\r\n')
-    \\      parts=[b[:len(b)//3],b[len(b)//3:2*len(b)//3],b[2*len(b)//3:]]
-    \\      for i,part in enumerate(parts):
-    \\       if i: time.sleep(8)
-    \\       s.sendall(part)
-    \\     elif mode=='asset-plain': response(200,asset,{},True)
-    \\     else: response(200,encoded,{'Content-Encoding':'gzip'},True)
     \\    elif path=='/redfish/v1/SessionService' and method=='GET':
+    \\     if mode=='unknown-console': response(404);break
     \\     assert not zero
     \\     response(401) if mode=='prelogin401' and not posts else response(200,{'Sessions':{'@odata.id':'/redfish/v1/SessionService/Sessions'}})
+    \\    elif path==kvm_path and method=='POST':
+    \\     assert headers.get('x-auth-token')==token
+    \\     response(403,{}, {'X-Auth-Token':token})
     \\    elif method=='POST':
     \\     assert not zero and posts==1 and 'x-auth-token' not in headers
     \\     value=json.loads(body);assert sorted(value)==['Password','UserName'] and value['UserName']=='fixture'
@@ -97,8 +91,13 @@ const fixture =
     \\    else:
     \\     assert headers.get('x-auth-token')==token
     \\     if method=='DELETE': logged_out=True;response(204);break
-    \\     elif path=='/redfish/v1/Systems': response(200,{'Members':[{'@odata.id':'/redfish/v1/Systems/one'}]})
-    \\     elif path=='/redfish/v1/Managers': response(200,{'Members':[{'@odata.id':'/redfish/v1/Managers/one'}]})
+    \\     elif path=='/redfish/v1/Systems':
+    \\      if discovery_problem=='discovery-http': response(403)
+    \\      elif discovery_problem=='discovery-malformed': response(200,b'invalid',binary=True)
+    \\      else: response(200,{'Members':[{'@odata.id':'/redfish/v1/Systems/one'}]})
+    \\     elif path=='/redfish/v1/Managers':
+    \\      if discovery_problem=='discovery-http': response(404)
+    \\      else: response(200,{'Members':[{'@odata.id':'/redfish/v1/Managers/one'}]})
     \\     elif path=='/redfish/v1/Systems/one': response(200,{'Id':'one','UUID':'bootstrap-fixture','PowerState':'On','Links':{'ManagedBy':[{'@odata.id':'/redfish/v1/Managers/one'}]}})
     \\     elif path=='/redfish/v1/Managers/one':
     \\      manager={'Id':'one','FirmwareVersion':'1.81' if mode=='pending-mismatch' else '1.80','Links':{'ManagerForServers':[{'@odata.id':'/redfish/v1/Systems/one'}]}}
@@ -110,9 +109,11 @@ const fixture =
     \\ if zero:
     \\  assert posts==0 and not logged_out
     \\  if mode=='untrusted': assert paths==[]
-    \\  elif mode.startswith('asset-'): assert paths==[('GET','/redfish/v1/'),('GET','/js/app.0bc71eb0.js')]
-    \\  else: assert paths==[('GET','/redfish/v1/')]
+    \\  else: assert paths==[('GET','/redfish/v1/'),('GET','/redfish/v1/SessionService')]
     \\ else: assert posts==1 and logged_out
+    \\ assert kvm_posts==(1 if console_discovery else 0)
+    \\ if discovery_problem=='discovery-missing':
+    \\  assert ('GET','/redfish/v1/Systems') not in paths and ('GET','/redfish/v1/Managers') not in paths
     \\ listener.settimeout(.05)
     \\ try: listener.accept();raise AssertionError('probe opened a second/video TCP stream')
     \\ except socket.timeout: pass
@@ -206,17 +207,10 @@ fn expectReadableFailure(mode: []const u8, err: anyerror, message: []const u8, o
     // These expectations describe the fixture's real failing operation. Keep
     // them independent of the production label helper so a wrong phase/reason
     // does not pass just because the final message remains nonempty.
-    const phase = if (std.mem.eql(u8, mode, "untrusted")) "TLS 握手" else if (std.mem.startsWith(u8, mode, "asset-")) "验证公开脚本摘要" else "读取公开设备身份";
-    const reason = switch (err) {
-        error.UnsupportedProfile => "当前版本不支持此设备或固件，请确认设备型号和固件版本。",
-        error.UnsupportedProfileIdentityUnavailable => "目标未返回可验证的设备身份，请确认地址指向 BMC 管理界面。",
-        error.UnsupportedProfileFirmwareUnavailable => "目标未返回可验证的固件信息。",
-        error.TrustReplyUnavailable => "本次测试无法确认目标证书。请检查证书信任设置后重试。",
-        error.UnsupportedProfilePublicEvidence => "无法取得可验证的公开设备信息，设备兼容性尚未确认。",
-        error.InvalidPublicMaterialGzip => "设备返回的脚本压缩数据无效，请检查设备服务后重试。",
-        error.BodyTooLarge => "设备返回的脚本超过大小上限，无法验证。",
-        else => return error.UnexpectedProbeFailure,
-    };
+    try std.testing.expectEqualStrings("untrusted", mode);
+    try std.testing.expectEqual(error.TrustReplyUnavailable, err);
+    const phase = "TLS 握手";
+    const reason = "本次测试无法确认目标证书。请检查证书信任设置后重试。";
     var prefix_buffer: [256]u8 = undefined;
     const prefix = try std.fmt.bufPrint(&prefix_buffer, "{s}失败 · {s} · 总计 ", .{ phase, reason });
     try std.testing.expectEqualStrings(prefix, message[0..@min(prefix.len, message.len)]);
@@ -256,9 +250,12 @@ fn autoProbe(mode: []const u8, expected_error: ?anyerror, default_override: bool
     try factory.begin(factory.context, request(context, bytes));
     const result = (try drain(factory)).result;
     const elapsed_ms = console.progress.nowMs() -| started_ms;
-    if (std.mem.startsWith(u8, mode, "asset-slow-")) try std.testing.expect(elapsed_ms >= 16000);
     try std.testing.expectEqual(if (expected_error == null) probes.Outcome.succeeded else probes.Outcome.failed, result.outcome);
     if (expected_error) |err| try expectReadableFailure(mode, err, result.safe_message, elapsed_ms);
+    if (std.mem.startsWith(u8, mode, "discovery-")) {
+        const feedback = @import("plugins/bmc_ikvm/probe_feedback.zig");
+        try std.testing.expectEqual(@as(?feedback.Warning, .discovery), feedback.warningFromMessage(result.safe_message));
+    }
     try std.testing.expectEqual(@as(usize, if (untrusted) 0 else 1), replies.prompts);
     try std.testing.expectEqual(@as(usize, if (expected_error != null or default_override) 0 else 1), replies.password_prompts);
     if (default_override) {
@@ -281,30 +278,32 @@ test "BMC bootstrap auto probe uses trusted actual identity with Manufacturer N/
     try autoProbe("success", null, false);
     try autoProbe("prelogin401", null, false);
 }
-test "BMC bootstrap unknown vendor and different firmware never try either login schema or consume credentials" {
-    try autoProbe("unknown", error.UnsupportedProfile, true);
-    try autoProbe("unknown-firmware", error.UnsupportedProfile, true);
+test "BMC bootstrap device names and firmware metadata do not gate authentication" {
+    try autoProbe("scale", null, false);
+    try autoProbe("sugon-only", null, false);
+    try autoProbe("unknown", null, true);
+    try autoProbe("missing", null, true);
+    try autoProbe("unknown-firmware", null, true);
+    try autoProbe("no-firmware", null, true);
 }
-test "BMC bootstrap missing public identity or firmware evidence fails before requesting a password" {
-    try autoProbe("missing", error.UnsupportedProfileIdentityUnavailable, true);
-    try autoProbe("no-firmware", error.UnsupportedProfileFirmwareUnavailable, true);
+test "BMC bootstrap recognizes SuperPod, scale prefixes and Sugon as independent hints" {
+    const fixtures = [_]struct { json: []const u8, known: bool }{
+        .{ .json = "{\"Oem\":{\"Public\":{\"ProductName\":\"SuperPod\"}}}", .known = true },
+        .{ .json = "{\"Oem\":{\"Public\":{\"ProductName\":\"scaleX40-3G\"}}}", .known = true },
+        .{ .json = "{\"ProductName\":\"ScaleServer\",\"Manufacturer\":\"Other\"}", .known = true },
+        .{ .json = "{\"Manufacturer\":\"Sugon\",\"Product\":\"Other\"}", .known = true },
+        .{ .json = "{\"Oem\":{\"Public\":{\"Copyright\":{\"EN\":\"Zhongke Sugon Information Industry Co., Ltd.\"}}}}", .known = true },
+        .{ .json = "{\"Product\":\"Upscale\",\"Manufacturer\":\"Other\"}", .known = false },
+        .{ .json = "{}", .known = false },
+    };
+    for (fixtures) |fixture_identity| {
+        const parsed = try std.json.parseFromSlice(std.json.Value, a, fixture_identity.json, .{});
+        defer parsed.deinit();
+        try std.testing.expectEqual(fixture_identity.known, profile.recognizesPublicDevice(parsed.value));
+    }
+}
+test "BMC bootstrap untrusted TLS fails before requesting a password" {
     try autoProbe("untrusted", error.TrustReplyUnavailable, true);
-}
-test "BMC bootstrap gzip and plain public assets require exact reviewed digest before credentials" {
-    try autoProbe("asset-gzip", error.UnsupportedProfilePublicEvidence, true);
-    try autoProbe("asset-plain", error.UnsupportedProfilePublicEvidence, true);
-    try autoProbe("asset-truncated", error.InvalidPublicMaterialGzip, true);
-    try autoProbe("asset-trailing", error.InvalidPublicMaterialGzip, true);
-    try autoProbe("asset-bomb", error.BodyTooLarge, true);
-}
-test "BMC bootstrap large streamed gzip public asset completes framing and digest before rejecting unreviewed material" {
-    // Match the live-shaped multi-megabyte encoded / eleven-megabyte decoded
-    // body without retaining device JavaScript or weakening the digest gate.
-    try autoProbe("asset-large-gzip", error.UnsupportedProfilePublicEvidence, true);
-}
-test "BMC bootstrap slow public assets keep downloading beyond fifteen seconds without consuming credentials" {
-    try autoProbe("asset-slow-plain", error.UnsupportedProfilePublicEvidence, true);
-    try autoProbe("asset-slow-gzip", error.UnsupportedProfilePublicEvidence, true);
 }
 test "BMC bootstrap operation default secret overrides an existing saved reference without prompting" {
     try autoProbe("success", null, true);
@@ -384,8 +383,8 @@ test "BMC bootstrap public asset evidence is distinct from an observed firmware 
     try std.testing.expectEqualStrings(material.get("source_sha256").?.string, &digest_hex);
 }
 
-test "BMC bootstrap startPrepared defers actual unknown-device failure to worker and releases native resources" {
-    var server = try Fixture.start("unknown");
+fn expectConsoleAttempt(mode: []const u8, failure: anyerror, discovery_warning: ?console.progress.Code) !void {
+    var server = try Fixture.start(mode);
     defer server.deinit();
     var library: ssh.Library = .{ .active = false };
     var trust_store = trust.Store.init(a, .{ .verify = Replies.verify }, null);
@@ -401,7 +400,7 @@ test "BMC bootstrap startPrepared defers actual unknown-device failure to worker
     const controller = try console.Controller.create(a, owner, operation, value, null, &budget, &journal, null);
     defer controller.deinit() catch unreachable;
     const context: contexts.HostContext = .{ .owner = owner, .operation = operation, .target = .{ .window_id = @fromBackingInt(1), .workspace_id = @fromBackingInt(1) }, .transports = .{ .allocator = a, .library = &library }, .trust = .{ .tls = trust_store.facade(owner) } };
-    const backend = try native.NativeDriver.prepare(a, context, value, &controller.plan, &controller.cancel_requested, .{ .callbacks = .{ .context = &replies, .trust_reply = Replies.reply, .password_reply = Replies.passwordReply } });
+    const backend = try native.NativeDriver.prepare(a, context, value, &controller.plan, &controller.cancel_requested, .{ .callbacks = .{ .context = &replies, .trust_reply = Replies.reply, .password_reply = Replies.passwordReply }, .progress = &controller.connection_progress });
     defer backend.deinit() catch unreachable;
     try std.testing.expect(!backend.pair.transport.started and !backend.selection_ready);
     try std.testing.expectError(error.NativeIoOnConfigurationThread, backend.driver().begin(backend, &value, &controller.plan, operation, &controller.cancel_requested));
@@ -412,10 +411,32 @@ test "BMC bootstrap startPrepared defers actual unknown-device failure to worker
     }
     const snapshot = controller.poll();
     try std.testing.expect(snapshot.worker_exited);
-    try std.testing.expectEqual(error.UnsupportedProfile, snapshot.failure.?);
+    try std.testing.expectEqual(failure, snapshot.failure.?);
+    if (discovery_warning) |code| {
+        try std.testing.expectEqual(code, snapshot.progress.discovery_issue.?.code);
+        try std.testing.expectEqual(.oem_session, snapshot.progress.failure_stage.?);
+    } else {
+        try std.testing.expectEqual(.public_identity_unrecognized, snapshot.progress.identity_warning.?.code);
+    }
     try std.testing.expectEqual(console.Cleanup.released, snapshot.cleanup);
-    try std.testing.expectEqual(@as(usize, 0), replies.password_prompts);
-    try std.testing.expect(!backend.selection_ready and !backend.diagnostics.video_upgraded);
+    try std.testing.expectEqual(@as(usize, if (discovery_warning != null) 1 else 0), replies.password_prompts);
+    try std.testing.expect(backend.selection_ready and !backend.diagnostics.video_upgraded);
     const term = try server.child.wait(std.testing.io);
     try std.testing.expect(term.success());
+}
+
+test "BMC bootstrap warns for an unknown product and continues to the session service" {
+    try expectConsoleAttempt("unknown-console", error.SessionServiceUnavailable, null);
+}
+
+test "BMC bootstrap optional management resources do not stop the native KVM attempt" {
+    try expectConsoleAttempt("console-discovery-missing", error.KvmAuthenticationFailed, .management_root_link_unavailable);
+    try expectConsoleAttempt("console-discovery-http", error.KvmAuthenticationFailed, .resource_response_rejected);
+    try expectConsoleAttempt("console-discovery-malformed", error.KvmAuthenticationFailed, .management_discovery_incomplete);
+}
+
+test "BMC bootstrap probe warns when optional management resources are missing or unreadable" {
+    try autoProbe("discovery-missing", null, false);
+    try autoProbe("discovery-http", null, false);
+    try autoProbe("discovery-malformed", null, false);
 }

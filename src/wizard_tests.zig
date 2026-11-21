@@ -1035,12 +1035,12 @@ test "SFTP wizard stepper uses current badges and completed checks after navigat
     try std.testing.expectEqual(theme.current().action_accent, f.wizard.step_numbers[1].?.getBackground());
     try std.testing.expectEqual(ui.Color.TRANSPARENT, f.wizard.step_buttons[2].?.getBackground());
     try std.testing.expectEqual(@as(@TypeOf(findId(f.wizard.root.?, "wizard.step.route.check").?.style.display), .none), findId(f.wizard.root.?, "wizard.step.route.check").?.style.display);
+    try std.testing.expectApproxEqAbs(@as(f32, 36), f.wizard.stepper.?.globalRect().h, 0.5);
     for (0..2) |i| {
         const left = f.wizard.step_buttons[i].?.globalRect();
         const right = f.wizard.step_buttons[i + 1].?.globalRect();
         try std.testing.expectApproxEqAbs(left.x + left.w, right.x, 0.1);
         try std.testing.expectApproxEqAbs(left.w, right.w, 0.1);
-        try std.testing.expectEqual(.none, f.wizard.step_connectors[i + 1].?.style.display);
     }
     try std.testing.expectEqual(@as(usize, 1), f.wizard.currentDraft().route.len);
     try std.testing.expectEqual(@as(usize, 0), f.calls);
@@ -1087,9 +1087,14 @@ test "SFTP wizard unavailable test text fits its prototype action and direct ret
     SaveFixture.activate(f.wizard.next1_btn.?);
     SaveFixture.activate(f.wizard.next2_btn.?);
     for (0..3) |_| _ = f.cx.render();
-    try std.testing.expectApproxEqAbs(@as(f32, 76), button.globalRect().w, 0.5);
+    try std.testing.expectApproxEqAbs(@as(f32, 104), button.globalRect().w, 0.5);
     try std.testing.expectApproxEqAbs(@as(f32, 34), button.globalRect().h, 0.5);
     try std.testing.expect(findText(button, "检测 SFTP") != null);
+    var visible_children: usize = 0;
+    for (button.children.items) |child| {
+        if (child.isDisplayedInTree() and child.globalRect().w > 0 and child.globalRect().h > 0) visible_children += 1;
+    }
+    try std.testing.expect(visible_children >= 2);
     f.wizard.setTestResult(.{ .fail = "只读目录验证失败" });
     try std.testing.expect(findText(button, "重新测试") != null);
     try std.testing.expectEqual(@as(usize, 0), f.calls);

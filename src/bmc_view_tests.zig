@@ -1014,6 +1014,80 @@ test "BMC view progress follows active stage changes but preserves manual scroll
     try std.testing.expect(row.y >= rect.y - 0.6 and row.y + row.h <= rect.y + rect.h + 0.6);
 }
 
+test "BMC view unrecognized identity is a yellow nonblocking notice" {
+    var fixture: Fixture = .{ .route = .connecting, .video = .authenticating, .progress = .{ .revision = 2, .stage = .public_script, .event_count = 2 } };
+    fixture.progress.events[0] = .{ .sequence = 1, .stage = .public_identity };
+    fixture.progress.events[1] = .{ .sequence = 2, .stage = .public_identity, .kind = .diagnostic, .code = .public_identity_unrecognized };
+    fixture.progress.identity_warning = fixture.progress.events[1];
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(860, 480);
+    const scope = try ui.Scope.init(a, null, cx.owner);
+    defer scope.dispose();
+    cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
+    const renderer = try views.mount(null, .{ .cx = cx, .scope = scope, .slot = cx.root.?, .owner = owner, .connection = .{ .protocol_id = "bmc_ikvm", .name = "Synthetic", .payload = "{}" }, .service_access = access.SessionServiceAccess{ .context = &fixture, .owner = owner, .lookup_fn = Fixture.lookup } });
+    defer renderer.vtable.unmount(renderer.context);
+    const view: *views.View = @ptrCast(@alignCast(renderer.context));
+    renderFrames(cx, 3);
+    try std.testing.expectEqualStrings("连接中", view.progress_status.?.getText().?.content);
+    try std.testing.expectEqualStrings("未识别公开设备型号，继续连接", view.progress_names[2].?.getText().?.content);
+    try std.testing.expectEqualStrings("进行中", view.progress_states[2].?.getText().?.content);
+    try std.testing.expect(ui.Color.eql(@import("plugins/bmc_ikvm/styles.zig").theme.current().warn_ink, view.progress_names[2].?.getText().?.color));
+    try std.testing.expectEqual(.flex, view.cancel_node.?.style.display);
+    try std.testing.expectEqual(.none, view.retry_node.?.style.display);
+    fixture.progress.stage = .web_login;
+    fixture.progress.revision += 1;
+    try renderer.vtable.update(renderer.context, .{ .owner = owner, .revision = 3, .title = "Synthetic", .status = "" });
+    renderFrames(cx, 3);
+    try std.testing.expectEqualStrings("提示", view.progress_states[2].?.getText().?.content);
+    try std.testing.expect(ui.Color.eql(@import("plugins/bmc_ikvm/styles.zig").theme.current().warn_ink, view.progress_icons[2].?.getText().?.color));
+    view.progress_buttons[2].?.behavior.events.on_click.?.invoke();
+    renderFrames(cx, 3);
+    try std.testing.expect(std.mem.indexOf(u8, view.progress_details[2].?.getText().?.content, "未识别公开设备型号，继续连接") != null);
+    fixture.progress.stage = .waiting_credentials;
+    fixture.progress.waiting_for_user = true;
+    fixture.progress.revision += 1;
+    try renderer.vtable.update(renderer.context, .{ .owner = owner, .revision = 4, .title = "Synthetic", .status = "" });
+    try std.testing.expect(std.mem.startsWith(u8, view.progress_notice.?.getText().?.content, "等待你的操作"));
+    try std.testing.expectEqualStrings("提示", view.progress_states[2].?.getText().?.content);
+    try std.testing.expectEqual(@as(usize, 0), fixture.cancel_requests);
+}
+
+test "BMC view incomplete management discovery is yellow and a later KVM failure stays red" {
+    var fixture: Fixture = .{ .route = .connecting, .video = .authenticating, .progress = .{ .revision = 2, .stage = .redfish_discovery, .event_count = 2 } };
+    fixture.progress.events[0] = .{ .sequence = 1, .stage = .redfish_discovery };
+    fixture.progress.events[1] = .{ .sequence = 2, .stage = .redfish_discovery, .kind = .diagnostic, .code = .management_discovery_incomplete, .resource = .systems_collection, .error_code = "SyntaxError" };
+    fixture.progress.discovery_issue = fixture.progress.events[1];
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(860, 480);
+    const scope = try ui.Scope.init(a, null, cx.owner);
+    defer scope.dispose();
+    cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
+    const renderer = try views.mount(null, .{ .cx = cx, .scope = scope, .slot = cx.root.?, .owner = owner, .connection = .{ .protocol_id = "bmc_ikvm", .name = "Synthetic", .payload = "{}" }, .service_access = access.SessionServiceAccess{ .context = &fixture, .owner = owner, .lookup_fn = Fixture.lookup } });
+    defer renderer.vtable.unmount(renderer.context);
+    const view: *views.View = @ptrCast(@alignCast(renderer.context));
+    const colors = @import("plugins/bmc_ikvm/styles.zig").theme.current();
+    renderFrames(cx, 3);
+    try std.testing.expectEqualStrings("连接中", view.progress_status.?.getText().?.content);
+    try std.testing.expectEqualStrings("管理资源发现未完成", view.progress_names[4].?.getText().?.content);
+    try std.testing.expect(ui.Color.eql(colors.warn_ink, view.progress_names[4].?.getText().?.color));
+
+    fixture.route = .failed;
+    fixture.video = .failed;
+    fixture.cleanup = .released;
+    fixture.progress.revision = 3;
+    fixture.progress.stage = .failed;
+    fixture.progress.failure_stage = .websocket_upgrade;
+    fixture.progress.failure_code = "UpgradeRejected";
+    try renderer.vtable.update(renderer.context, .{ .owner = owner, .revision = 3, .title = "Synthetic", .status = "" });
+    renderFrames(cx, 3);
+    try std.testing.expectEqualStrings("部分结果", view.progress_states[4].?.getText().?.content);
+    try std.testing.expectEqualStrings("失败", view.progress_states[5].?.getText().?.content);
+    try std.testing.expect(ui.Color.eql(colors.warn_ink, view.progress_names[4].?.getText().?.color));
+    try std.testing.expect(ui.Color.eql(colors.danger_ink, view.progress_names[5].?.getText().?.color));
+}
+
 test "BMC view failure retains Chinese reason and static code after cleanup and success keeps log entry" {
     var fixture: Fixture = .{ .route = .failed, .video = .failed, .cleanup = .released, .progress = .{ .revision = 2, .stage = .failed, .failure_stage = .public_script, .failure_code = "UnsupportedProfilePublicEvidenceUnavailable", .event_count = 2 } };
     fixture.progress.events[0] = .{ .sequence = 1, .stage = .public_script };

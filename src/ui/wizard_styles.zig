@@ -84,6 +84,21 @@ pub fn footer() ui.BoxStyle {
     style.background = theme.popupAction();
     return style;
 }
+pub fn stepBodyPadding() ui.Padding {
+    return .{ .left = 24, .right = 24 };
+}
+pub fn stepBodyGap(is_route: bool) f32 {
+    return if (is_route) 16 else 12;
+}
+pub fn stepFooterPadding(is_route: bool, compact: bool, is_review: bool) f32 {
+    return if (is_route) 11 else if (compact and !is_review) 10 else 13;
+}
+pub fn stepFooterHeight(is_route: bool, compact: bool, is_review: bool) f32 {
+    return 34 + 2 * stepFooterPadding(is_route, compact, is_review);
+}
+pub fn stepFooterBackground(is_route: bool) ui.Color {
+    return if (is_route) ui.Color.TRANSPARENT else footer().background.?;
+}
 pub fn saveError() ui.BoxStyle {
     return .{
         .width = .fill(),
@@ -179,7 +194,7 @@ pub fn iconBox(size: f32) ui.BoxStyle {
     return .{ .width = .{ .px = size }, .height = .{ .px = size }, .flex_shrink = 0 };
 }
 // 358:1508903 (direct) / 358:1507656 (routed, unavailable).
-pub const test_action_width: f32 = 76;
+pub const test_action_width: f32 = 104;
 pub const test_action_height: f32 = 34;
 pub const unavailable_test_width: f32 = 196;
 pub const unavailable_test_height: f32 = 32;

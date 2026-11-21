@@ -4,6 +4,34 @@ const progress = @import("plugins/bmc_ikvm/connection_progress.zig");
 const probe = @import("plugins/bmc_ikvm/probe.zig");
 const contract = @import("host/probe_contract.zig");
 
+test "BMC connection progress retains an unrecognized identity warning without failing" {
+    const vm = @import("plugins/bmc_ikvm/view_model.zig");
+    var tracker = progress.Tracker.initAt(0, 0);
+    tracker.setStageAt(.public_identity, 1);
+    tracker.noteAt(.{ .code = .public_identity_unrecognized }, 2);
+    tracker.setStageAt(.public_script, 3);
+    tracker.setStageAt(.web_login, 4);
+    for (0..progress.capacity) |index| tracker.noteAt(.{ .code = .request_completed, .context = .{} }, 5 + index);
+    const snapshot = tracker.snapshotAt(50);
+    try std.testing.expect(snapshot.failure_code == null);
+    try std.testing.expectEqual(progress.Stage.web_login, snapshot.stage);
+    try std.testing.expect(snapshot.identity_warning != null);
+    var projection: vm.ProgressProjection = .{};
+    projection.observe(snapshot);
+    try std.testing.expectEqual(vm.StepState.warning, projection.state(snapshot, .identity));
+    try std.testing.expectEqual(vm.StepState.current, projection.state(snapshot, .authentication));
+    const entries = vm.connectionLogEvents(snapshot);
+    try std.testing.expectEqual(@as(usize, progress.capacity + 1), entries.count);
+    try std.testing.expectEqual(progress.Code.public_identity_unrecognized, entries.events[entries.count - 1].code);
+    var writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer writer.deinit();
+    try vm.writeStepDiagnostics(&writer.writer, snapshot, .identity);
+    try std.testing.expect(std.mem.indexOf(u8, writer.written(), "未识别公开设备型号，继续连接") != null);
+    writer.clearRetainingCapacity();
+    try vm.writeConnectionLog(&writer.writer, snapshot);
+    try std.testing.expect(std.mem.indexOf(u8, writer.written(), "未识别公开设备型号，继续连接") != null);
+}
+
 test "BMC connection progress usable HTTP 200 fields with device diagnostics do not mark reads as warnings" {
     const vm = @import("plugins/bmc_ikvm/view_model.zig");
     var tracker = progress.Tracker.initAt(0, 0);

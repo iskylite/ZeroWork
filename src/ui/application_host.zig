@@ -364,8 +364,10 @@ pub const Domain = struct {
                 }
             };
             const mapping = source.findHandle(event.value.key.owner.session) orelse {
-                if (event.value.kind == .failed) if (event.value.failure) |failure|
+                if (event.value.kind == .failed) if (event.value.failure) |failure| {
                     source.publishFileCreateFailure(event.value.key, failure);
+                    source.publishPluginCreateFailure(event.value.key, failure);
+                };
                 continue;
             };
             if (!mapping.create_operation.eql(event.value.key)) continue;
@@ -507,6 +509,9 @@ pub const ApplicationHost = struct {
         publish: *const fn (*anyopaque, identity.SessionHandle, []const u8) void,
     } = null,
     plugin_attempts: std.ArrayList(session.Accepted) = .empty,
+    reported_plugin_failures: [64]OperationKey = undefined,
+    reported_plugin_failure_count: usize = 0,
+    reported_plugin_failure_cursor: usize = 0,
     detached_quick_content: ?session.Accepted = null,
     pending_editor_handoff: ?@import("../host/editor_credentials.zig").Handoff = null,
     window_auxiliary: ?struct {
@@ -2659,6 +2664,32 @@ pub const ApplicationHost = struct {
         }
     }
 
+    fn publishPluginCreateFailure(self: *ApplicationHost, key: OperationKey, failure: @import("../host/operation.zig").Failure) void {
+        if (key.owner != .session) return;
+        if (std.mem.eql(u8, failure.code, "ManualRetry")) return;
+        const state = self.sessions.queryState(key.owner.session) orelse return;
+        if (!state.create_operation.eql(key) or state.lifecycle != .failed) return;
+        if (!std.meta.eql(state.target, self.target())) return;
+        if (state.plugin_id != .external or state.presentation_policy != .interactive) return;
+        const manifest = self.sessions.manifestFor(key.owner.session) orelse return;
+        const renderer = self.sessions.registry.renderer(manifest.content_renderer) orelse return;
+        if (renderer.mount == null) return;
+        if (self.detached_quick_content) |detached| if (detached.handle.eql(key.owner.session) and detached.operation.eql(key)) return;
+        for (self.reported_plugin_failures[0..self.reported_plugin_failure_count]) |reported| {
+            if (reported.eql(key)) return;
+        }
+        self.reported_plugin_failures[self.reported_plugin_failure_cursor] = key;
+        self.reported_plugin_failure_cursor = (self.reported_plugin_failure_cursor + 1) % self.reported_plugin_failures.len;
+        if (self.reported_plugin_failure_count < self.reported_plugin_failures.len) self.reported_plugin_failure_count += 1;
+        for (self.mappings.items) |*mapping| {
+            if (mapping.handle.session_id == key.owner.session.session_id and mapping.handle.generation < key.owner.session.generation) {
+                mapping.recordFailure(failure.safe_message);
+                break;
+            }
+        }
+        self.workspace.windowStatusFailure(if (failure.code.len != 0) failure.code else failure.safe_message);
+    }
+
     fn fileCreatesReleased(self: *ApplicationHost) bool {
         for (self.file_sources.items) |source| {
             const state = self.sessions.queryState(source.handle) orelse continue;
@@ -3043,7 +3074,10 @@ pub const ApplicationHost = struct {
         if (manifest.quick_create) |quick| {
             const payload = if (quick.new_session_payload) |prepare| try prepare(self.allocator, value.payload) else try self.allocator.dupe(u8, value.payload);
             defer self.allocator.free(payload);
-            _ = try self.sessions.openQuick(manifest.id, payload, .{ .request_key = request_key, .target = self.target() });
+            const renderer = self.sessions.registry.renderer(manifest.content_renderer);
+            if (renderer != null and renderer.?.mount != null) try self.plugin_attempts.ensureUnusedCapacity(self.allocator, 1);
+            const accepted = try self.sessions.openQuick(manifest.id, payload, .{ .request_key = request_key, .target = self.target() });
+            if (renderer != null and renderer.?.mount != null) self.plugin_attempts.appendAssumeCapacity(accepted);
             return;
         }
         _ = try self.openEnvelope(value, request_key);
@@ -4924,4 +4958,139 @@ fn resolveCredentialReferences(raw: *const anyopaque, protocol_id: []const u8, p
     const connection = (registry.find(protocol_id) orelse return null).connection orelse return null;
     if (connection.payload_version != payload_version) return null;
     return connection.credential_references;
+}
+
+test "unmounted plugin create failure and retry create failure report once only to initiating window" {
+    const contract = @import("../host/plugin_ui_contract.zig");
+    const a = std.testing.allocator;
+    const FeedbackSpy = struct {
+        calls: usize = 0,
+        last_owner: ?identity.ContentOwner = @as(identity.ContentOwner, .{ .history = @fromBackingInt(999) }),
+        last_kind: ?workspace_mod.Workspace.StatusKind = null,
+        last_message: [512]u8 = @splat(0),
+        last_len: usize = 0,
+        fn publish(raw: *anyopaque, owner: ?identity.ContentOwner, message_text: []const u8, kind: workspace_mod.Workspace.StatusKind) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            var buffer: [512]u8 = undefined;
+            const localized = @import("feedback_message.zig").message(message_text, &buffer);
+            self.calls += 1;
+            self.last_owner = owner;
+            self.last_kind = kind;
+            self.last_len = @min(localized.len, self.last_message.len);
+            @memcpy(self.last_message[0..self.last_len], localized[0..self.last_len]);
+        }
+        fn text(self: *const @This()) []const u8 {
+            return self.last_message[0..self.last_len];
+        }
+    };
+    const FailingPlugin = struct {
+        fail_with: ?anyerror = error.MissingRouteReference,
+        fn create(raw: *anyopaque, _: session.CreateRequest) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (self.fail_with) |err| return err;
+        }
+        fn cancel(_: *anyopaque, _: OperationKey) CloseReceipt {
+            return .released;
+        }
+        fn close(_: *anyopaque, _: identity.SessionHandle, _: OperationKey) !CloseReceipt {
+            return .released;
+        }
+        fn stale(_: *anyopaque, _: identity.SessionHandle, _: OperationKey) void {}
+        fn validate(_: []const u8) !void {}
+        fn codec(allocator: std.mem.Allocator, value: connection_envelope.Envelope) !connection_envelope.Envelope {
+            return value.clone(allocator);
+        }
+        fn migrate(allocator: std.mem.Allocator, value: connection_envelope.Envelope, _: u32) !connection_envelope.Envelope {
+            return value.clone(allocator);
+        }
+        fn editor(_: ?*anyopaque, _: contract.EditorMount) !contract.EditorInstance {
+            return error.UnusedEditor;
+        }
+        fn mount(_: ?*anyopaque, _: contract.ContentMount) !contract.RendererInstance {
+            return error.UnusedRenderer;
+        }
+        fn manifest(self: *@This()) plugins.PluginManifest {
+            return .{
+                .id = "fixture.web_or_kvm",
+                .display_name = "Fixture",
+                .workspace_kind = "fixture.web_or_kvm",
+                .content_renderer = "fixture.web_or_kvm",
+                .integration = .{ .transport_loss = true },
+                .connection = .{ .editor_factory = .{ .mount = editor }, .create_kind = .saved_or_temporary, .validate_payload = validate, .encode = codec, .decode = codec, .migrate = migrate },
+                .session_factory = .{ .context = self, .vtable = &.{ .create = create, .cancel = cancel, .close = close, .release_stale = stale } },
+            };
+        }
+        fn renderer(self: *@This()) contract.RendererDefinition {
+            return .{ .kind = "fixture.web_or_kvm", .context = self, .mount = mount };
+        }
+    };
+
+    var provider: FailingPlugin = .{};
+    const domain = try Domain.initWithContributions(a, false, &.{provider.manifest()}, &.{provider.renderer()});
+    defer domain.deinit();
+
+    var spy_a: FeedbackSpy = .{};
+    var workspace_a: workspace_mod.Workspace = undefined;
+    workspace_a.model = .{ .allocator = a, .window = @fromBackingInt(0), .workspace = @fromBackingInt(0) };
+    defer workspace_a.model.deinit();
+    workspace_a.registry = try hosts.Registry.parse(a, "");
+    defer workspace_a.registry.deinit();
+    workspace_a.app_config = &.{};
+    workspace_a.shutting_down = false;
+    workspace_a.external_auth = null;
+    workspace_a.command_output = null;
+    workspace_a.status_node = null;
+    workspace_a.status_feedback = .{ .context = &spy_a, .publish = FeedbackSpy.publish };
+    workspace_a.tabs = .empty;
+    workspace_a.connect_jobs = .empty;
+
+    var spy_b: FeedbackSpy = .{};
+    var workspace_b: workspace_mod.Workspace = undefined;
+    workspace_b.model = .{ .allocator = a, .window = @fromBackingInt(0), .workspace = @fromBackingInt(0) };
+    defer workspace_b.model.deinit();
+    workspace_b.registry = try hosts.Registry.parse(a, "");
+    defer workspace_b.registry.deinit();
+    workspace_b.app_config = &.{};
+    workspace_b.shutting_down = false;
+    workspace_b.external_auth = null;
+    workspace_b.command_output = null;
+    workspace_b.status_node = null;
+    workspace_b.status_feedback = .{ .context = &spy_b, .publish = FeedbackSpy.publish };
+    workspace_b.tabs = .empty;
+    workspace_b.connect_jobs = .empty;
+
+    const app_a = try ApplicationHost.initInDomain(domain, &workspace_a, null);
+    defer app_a.deinit();
+    const app_b = try ApplicationHost.initInDomain(domain, &workspace_b, null);
+    defer app_b.deinit();
+
+    // 1. Pre-mount create failure on window B (e.g. Web with deleted jump host).
+    _ = try app_b.openEnvelope(.{ .protocol_id = "fixture.web_or_kvm", .name = "Web via deleted jump", .payload = "{}" }, try app_b.dispatcher.issue());
+    domain.drainJournal();
+    domain.drainJournal();
+    try std.testing.expectEqual(@as(usize, 0), spy_a.calls);
+    try std.testing.expectEqual(@as(usize, 1), spy_b.calls);
+    try std.testing.expect(spy_b.last_owner == null);
+    try std.testing.expectEqual(workspace_mod.Workspace.StatusKind.failure, spy_b.last_kind.?);
+    try std.testing.expect(std.mem.indexOf(u8, spy_b.text(), "找不到连接路径里的跳板主机") != null);
+
+    // 2. Existing tab retries (generation 1 -> 2), generation 2 fails synchronously before ready.
+    provider.fail_with = null;
+    const mounted = try app_b.openEnvelope(.{ .protocol_id = "fixture.web_or_kvm", .name = "KVM retry", .payload = "{}" }, try app_b.dispatcher.issue());
+    try app_b.mappings.append(a, .{ .handle = mounted.handle, .create_operation = mounted.operation, .legacy_id = 77, .legacy_generation = 1, .tab_id = @fromBackingInt(9), .owner = .{ .session = mounted.handle }, .source = null });
+    _ = try domain.sessions.readyPlugin(mounted.handle, mounted.operation, &.{});
+    _ = try domain.sessions.attached(mounted.handle, .{ .target = app_b.target(), .tab_id = @fromBackingInt(9) });
+    domain.drainJournal();
+
+    try std.testing.expect(try domain.sessions.transportLost(mounted.handle, mounted.operation, .{ .domain = .plugin, .code = "ManualRetry", .retryable = true, .cleanup = .released, .safe_message = "用户请求重新连接 BMC" }));
+    provider.fail_with = error.AccessDenied;
+    const retry = try domain.sessions.retry(mounted.handle);
+    domain.drainJournal();
+    domain.drainJournal();
+    try std.testing.expectEqual(@as(usize, 0), spy_a.calls);
+    try std.testing.expectEqual(@as(usize, 2), spy_b.calls);
+    try std.testing.expect(spy_b.last_owner == null);
+    try std.testing.expect(std.mem.indexOf(u8, spy_b.text(), "没有操作权限") != null);
+    try std.testing.expect(app_b.mappings.items[0].failed_received);
+    try std.testing.expect(retry.handle.session_id == mounted.handle.session_id and retry.handle.generation > mounted.handle.generation);
 }

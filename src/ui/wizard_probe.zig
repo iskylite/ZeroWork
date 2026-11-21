@@ -348,6 +348,27 @@ pub const Job = struct {
         self.ready.store(true, .release);
     }
 
+    const ResolvedCredentials = struct {
+        host: hosts.HostConfig,
+        hops: [8]hosts.HostConfig = undefined,
+        hop_count: usize = 0,
+    };
+
+    fn resolveCredentials(self: *const Job, reader: *@import("../plugins/ssh/connection_source.zig").CredentialReader) !ResolvedCredentials {
+        const use_totp = self.source.value.settings.ssh.totp_autofill;
+        var resolved: ResolvedCredentials = .{
+            .host = try reader.resolveForConnection(self.source.value.host, use_totp, &self.cancelled),
+            .hop_count = self.source.value.route_hosts.len,
+        };
+        if (resolved.hop_count > resolved.hops.len) return error.TooManyJumps;
+        for (self.source.value.route_hosts, 0..) |hop, index| {
+            if (self.cancelled.load(.acquire)) return error.Cancelled;
+            resolved.hops[index] = try reader.resolveForConnection(hop, use_totp, &self.cancelled);
+        }
+        if (self.cancelled.load(.acquire)) return error.Cancelled;
+        return resolved;
+    }
+
     fn probe(self: *Job) !void {
         if (self.cancelled.load(.acquire)) return error.Cancelled;
         if (!self.library.active) return error.LibraryNotInitialized;
@@ -355,9 +376,12 @@ pub const Job = struct {
         var store = try policy.HostKeyStore.load(io, std.Io.Dir.cwd(), allocator, self.known_hosts_path);
         defer store.deinit();
         try store.setPersistence(io, std.Io.Dir.cwd(), self.known_hosts_path);
+        var reader: @import("../plugins/ssh/connection_source.zig").CredentialReader = .{ .allocator = allocator };
+        defer reader.deinit();
+        const resolved = try self.resolveCredentials(&reader);
         var arena = std.heap.ArenaAllocator.init(allocator);
         defer arena.deinit();
-        var target = runtime.targetFromHost(self.source.value.host, self.source.value.route_hosts);
+        var target = runtime.targetFromHost(resolved.host, resolved.hops[0..resolved.hop_count]);
         target.operation_key = self.key;
         target.resource_ledger = &self.resource_ledger;
         target.connection_details = &self.connection_details;
@@ -724,4 +748,51 @@ test "probe controller scopes cancellation progress and terminal receipt to orig
     try controller.retire(second);
     try std.testing.expect(controller.connectionProgress(second_key) == null);
     try std.testing.expectEqual(@as(usize, 1), projection.journal.count);
+}
+
+test "probe resolves saved password_ref and key_passphrase_ref for jump hops and target like formal SSH" {
+    const credential_store = @import("../config/credential_store.zig");
+    var memory: credential_store.MemoryBackend = .{};
+    defer memory.deinit();
+    const previous_backend = credential_store.useBackendForTesting(memory.backend());
+    defer credential_store.restoreBackendForTesting(previous_backend);
+
+    const pw_ref = "zw1_5555555555555555555555555555555555555555555555555555555555555555";
+    const key_ref = "zw1_6666666666666666666666666666666666666666666666666666666666666666";
+    const scope_name = try credential_store.scopeService();
+    try memory.backend().add(memory.backend().context, scope_name, pw_ref, "target-saved-pw");
+    try memory.backend().add(memory.backend().context, scope_name, key_ref, "hop-saved-passphrase");
+
+    var library = try ssh.Library.init();
+    defer library.deinit();
+    const key: operations.OperationKey = .{ .owner = .app, .operation_id = 83, .attempt_id = 1 };
+    const hop: hosts.HostConfig = .{
+        .connection_id = @fromBackingInt(41),
+        .revision = 8,
+        .name = "jump",
+        .host = "bridge.invalid",
+        .user = "bridge-user",
+        .auth_mode = .private_key,
+        .identity_file = "/tmp/id_ed25519",
+        .key_passphrase = null,
+        .key_passphrase_ref = key_ref,
+    };
+    const draft: wizard.Draft = .{ .draft_id = 17, .revision = 2, .name = "target", .host = "target.invalid", .user = "target-user", .auth = .password, .route = &.{@fromBackingInt(41)} };
+    const job = try prepareTestJob(&library, key, draft, &.{hop});
+    defer job.deinit();
+    job.source.value.host.password = null;
+    job.source.value.host.password_ref = pw_ref;
+
+    var reader: @import("../plugins/ssh/connection_source.zig").CredentialReader = .{ .allocator = std.testing.allocator };
+    defer reader.deinit();
+    const resolved = try job.resolveCredentials(&reader);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var target = runtime.targetFromHost(resolved.host, resolved.hops[0..resolved.hop_count]);
+    target.operation_key = job.key;
+    target.cancel_token = &job.cancelled;
+    const options = try runtime.prepareConnectionOptions(arena.allocator(), job.source.value.settings, target, .@"test");
+    try std.testing.expectEqual(@as(usize, 2), options.len);
+    try std.testing.expectEqualStrings("hop-saved-passphrase", options[0].auth.private_key.passphrase.?);
+    try std.testing.expectEqualStrings("target-saved-pw", options[1].auth.password);
 }

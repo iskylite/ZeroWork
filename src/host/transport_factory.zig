@@ -16,6 +16,8 @@ pub const Credentials = struct {
     /// Read controlled references for this owner; never query a live Session.
     /// Callback runs on the AssetStore owning caller thread before worker start.
     resolve: *const fn (*anyopaque, identity.ResourceOwner, identity.AssetOwner, std.mem.Allocator) anyerror!ssh.Auth,
+    /// Optional credential reference resolved later on the worker thread via credential_store.getForWorker.
+    resolve_reference: ?*const fn (*anyopaque, identity.ResourceOwner, identity.AssetOwner, std.mem.Allocator) anyerror!?[]const u8 = null,
 };
 pub const FailedOpenOwner = struct {
     context: *anyopaque,
@@ -83,7 +85,8 @@ pub const Factory = struct {
         const a = transport.arena.allocator();
         if (route.hops.len != 0) transport.ledger = try ssh.ResourceLedger.init(self.operation_key, route.hops.len);
         transport.options = try a.alloc(ssh.Options, route.hops.len);
-        for (route.hops, transport.options) |hop, *option| {
+        transport.credential_references = try a.alloc(?[]const u8, route.hops.len);
+        for (route.hops, transport.options, transport.credential_references) |hop, *option, *credential_ref| {
             const host = hop.nonsecret_config;
             if (!std.mem.eql(u8, host.protocolId(), "ssh") or host.payload_version != 1) return error.UnsupportedProtocol;
             const auth: ssh.Auth = if (self.credentials) |provider| try provider.resolve(provider.context, owner, hop.credential_reference, a) else switch (host.auth_mode) {
@@ -91,6 +94,16 @@ pub const Factory = struct {
                 .password => .password_prompt,
                 .private_key => .{ .private_key = .{ .path = try a.dupeSentinel(u8, host.identity_file orelse return error.MissingIdentityFile, 0) } },
             };
+            credential_ref.* = if (self.credentials) |provider|
+                if (provider.resolve_reference) |resolve_ref|
+                    if (try resolve_ref(provider.context, owner, hop.credential_reference, a)) |ref|
+                        try a.dupe(u8, ref)
+                    else
+                        null
+                else
+                    null
+            else
+                null;
             option.* = .{ .host = try a.dupeSentinel(u8, host.host, 0), .port = host.port, .user = try a.dupeSentinel(u8, host.user, 0), .auth = try cloneAuth(a, auth), .source_owner = hop.credential_reference, .operation_key = self.operation_key, .attempt_id = if (self.operation_key) |key| key.attempt_id orelse 0 else 0, .resource_ledger = if (transport.ledger) |*ledger| ledger else null, .open_shell = false, .strict_host_key_checking = host.strict_host_key_checking, .compression = host.compression, .host_key_store = self.host_key_store, .host_key_decision = self.host_key_decision, .host_key_observer = self.host_key_observer, .auth_interaction = self.auth_interaction, .cancel_token = cancel orelse &transport.closing, .connect_timeout_ms = self.timeout_ms };
         }
         return transport;
@@ -148,6 +161,7 @@ pub const OwnedTransport = struct {
     external_cancel: ?*const std.atomic.Value(bool),
     arena: std.heap.ArenaAllocator,
     options: []ssh.Options = &.{},
+    credential_references: []?[]const u8 = &.{},
     thread: ?std.Thread = null,
     started: bool = false,
     reserved_cleanup: bool = false,
@@ -374,8 +388,37 @@ pub const OwnedTransport = struct {
         return std.c.recv(session.socket_fd, @ptrCast(&byte), 1, std.c.MSG.PEEK | std.c.MSG.DONTWAIT) == 0;
     }
 
-    fn connect(self: *OwnedTransport) !void {
+    fn credentialWaitCancelled(self: *const OwnedTransport) bool {
+        return self.cancelled();
+    }
+
+    /// Resolve deferred keychain references on the worker thread before opening SSH sockets.
+    pub fn resolveCredentials(self: *OwnedTransport) !void {
         if (self.cancelled()) return error.Cancelled;
+        const credentials = @import("../config/credential_store.zig");
+        const a = self.arena.allocator();
+        for (self.options, 0..) |*option, index| {
+            if (self.cancelled()) return error.Cancelled;
+            const reference = if (index < self.credential_references.len) self.credential_references[index] else null;
+            if (reference) |ref| {
+                const secret = try credentials.getForWorker(a, ref, self, credentialWaitCancelled) orelse return error.CredentialMissing;
+                defer std.crypto.secureZero(u8, secret);
+                if (self.cancelled()) return error.Cancelled;
+                option.auth = switch (option.auth) {
+                    .password_prompt => .{ .password = try a.dupeSentinel(u8, secret, 0) },
+                    .private_key => |key| .{ .private_key = .{
+                        .path = key.path,
+                        .passphrase = try a.dupeSentinel(u8, secret, 0),
+                    } },
+                    else => option.auth,
+                };
+                self.credential_references[index] = null;
+            }
+        }
+    }
+
+    fn connect(self: *OwnedTransport) !void {
+        try self.resolveCredentials();
         if (self.options.len == 0) return;
         if (self.options.len == 1) self.session = try ssh.Session.connect(self.factory.library, self.options[0]) else {
             self.route = try ssh.JumpTransport.Route.connect(self.factory.allocator, self.factory.library, self.options);

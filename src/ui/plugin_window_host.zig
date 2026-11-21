@@ -15,6 +15,7 @@ const presenter = @import("notification_presenter.zig");
 const challenge_presenter = @import("plugin_challenge_presenter.zig");
 const resolver = @import("../host/connection_config_resolver.zig");
 const transports = @import("../host/transport_factory.zig");
+const hosts = @import("../config/hosts.zig");
 const ssh = @import("../proto/ssh/session.zig");
 const trust = @import("../proto/ssh/host_key_store.zig");
 const operation = @import("../host/operation.zig");
@@ -320,7 +321,7 @@ pub const Host = struct {
             self.retainer.?.tokens[self.retainer.?.token_count] = entry;
             self.retainer.?.token_count += 1;
         }
-        const credentials: transports.Credentials = .{ .context = self, .resolve = credential };
+        const credentials: transports.Credentials = .{ .context = self, .resolve = credential, .resolve_reference = credentialReference };
         var factory: transports.Factory = .{ .allocator = std.heap.c_allocator, .library = &self.retainer.?.library, .credentials = credentials, .operation_key = token.operation, .failed_open_owner = self.retainer.?.facade() };
         if (self.retainer.?.host_keys) |*keys| factory.host_key_store = keys;
         return .{ .owner = token.handle, .operation = token.operation, .connection_configs = resolver.Resolver.init(&self.application.workspace.registry), .transports = factory, .credentials = credentials, .secrets = security.secret_store.facade(token.handle), .trust = .{ .ssh_host_keys = if (self.retainer.?.host_keys) |*keys| keys else null, .tls = security.tls_store.facade(token.handle) }, .challenges = self.challenge_host, .cancel = cancel };
@@ -369,7 +370,7 @@ pub const Host = struct {
             break;
         };
         const services = try self.content_host.factory().create(self.content_host, owner);
-        const credentials: transports.Credentials = .{ .context = self, .resolve = credential };
+        const credentials: transports.Credentials = .{ .context = self, .resolve = credential, .resolve_reference = credentialReference };
         var factory: transports.Factory = .{ .allocator = std.heap.c_allocator, .library = &self.retainer.?.library, .credentials = credentials, .operation_key = key, .failed_open_owner = self.retainer.?.facade() };
         if (self.retainer.?.host_keys) |*keys| factory.host_key_store = keys;
         var notification_facade: ?notify.Facade = null;
@@ -539,8 +540,7 @@ pub const Host = struct {
         if (self.closed) return null;
         return self.application.workspace.app_config.pluginPreference(plugin_id, key);
     }
-    fn credential(raw: *anyopaque, resource_owner: identity.ResourceOwner, asset_owner: identity.AssetOwner, allocator: std.mem.Allocator) !ssh.Auth {
-        const self: *Host = @ptrCast(@alignCast(raw));
+    fn validateCredentialAccess(self: *Host, resource_owner: identity.ResourceOwner, asset_owner: identity.AssetOwner) !hosts.HostConfig {
         if (self.closed) return error.PluginWindowClosed;
         const owner = switch (resource_owner) {
             .session => |owner| owner,
@@ -554,11 +554,29 @@ pub const Host = struct {
         if (!allowed) return error.CredentialOwnerDenied;
         // get() checks the asset revision. No active Session or password/token
         // from any other owner is queried, and no secret enters a snapshot.
-        const saved = try self.application.workspace.registry.get(asset_owner);
+        return try self.application.workspace.registry.get(asset_owner);
+    }
+    fn credential(raw: *anyopaque, resource_owner: identity.ResourceOwner, asset_owner: identity.AssetOwner, allocator: std.mem.Allocator) !ssh.Auth {
+        const self: *Host = @ptrCast(@alignCast(raw));
+        const saved = try self.validateCredentialAccess(resource_owner, asset_owner);
         return switch (saved.auth_mode) {
             .agent => .agent,
-            .password => if (saved.password) |password| .{ .password = try allocator.dupeSentinel(u8, password, 0) } else error.AuthenticationInteractionRequired,
+            .password => if (saved.password) |password|
+                .{ .password = try allocator.dupeSentinel(u8, password, 0) }
+            else if (saved.password_ref != null)
+                .password_prompt
+            else
+                error.AuthenticationInteractionRequired,
             .private_key => .{ .private_key = .{ .path = try allocator.dupeSentinel(u8, saved.identity_file orelse return error.MissingIdentityFile, 0), .passphrase = if (saved.key_passphrase) |passphrase| try allocator.dupeSentinel(u8, passphrase, 0) else null } },
+        };
+    }
+    fn credentialReference(raw: *anyopaque, resource_owner: identity.ResourceOwner, asset_owner: identity.AssetOwner, allocator: std.mem.Allocator) !?[]const u8 {
+        const self: *Host = @ptrCast(@alignCast(raw));
+        const saved = try self.validateCredentialAccess(resource_owner, asset_owner);
+        return switch (saved.auth_mode) {
+            .agent => null,
+            .password => if (saved.password == null) if (saved.password_ref) |ref| try allocator.dupe(u8, ref) else null else null,
+            .private_key => if (saved.key_passphrase == null) if (saved.key_passphrase_ref) |ref| try allocator.dupe(u8, ref) else null else null,
         };
     }
     fn webContent(raw: *anyopaque, owner: identity.SessionHandle) !contract.ContentServices {
@@ -1347,4 +1365,141 @@ test "BMC window probe scopes recycle only released presentation-free owner toke
         try std.testing.expect(window.host.entries.items[0].owner.eql(token.handle));
         try std.testing.expect(window.host.entries.items[0].released);
     }
+}
+
+test "plugin window host resolves deferred password_ref and key_passphrase_ref on worker thread for connection and probe" {
+    const credential_store = @import("../config/credential_store.zig");
+    const fixture = @import("../plugins/fixture_probe/plugin.zig");
+    const probes = @import("../host/probe_contract.zig");
+    const a = std.testing.allocator;
+
+    var memory: credential_store.MemoryBackend = .{};
+    defer memory.deinit();
+    const CanceledBackend = struct {
+        inner: *credential_store.MemoryBackend,
+        fail_error: ?anyerror = null,
+        fn get(raw: *anyopaque, alloc: std.mem.Allocator, scope_name: []const u8, reference: []const u8) anyerror![]u8 {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (self.fail_error) |err| return err;
+            return credential_store.MemoryBackend.backend(self.inner).get(self.inner, alloc, scope_name, reference);
+        }
+        fn add(raw: *anyopaque, scope_name: []const u8, reference: []const u8, value: []const u8) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            return credential_store.MemoryBackend.backend(self.inner).add(self.inner, scope_name, reference, value);
+        }
+        fn remove(raw: *anyopaque, scope_name: []const u8, reference: []const u8) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            return credential_store.MemoryBackend.backend(self.inner).remove(self.inner, scope_name, reference);
+        }
+        fn collect(raw: *anyopaque, scope_name: []const u8, keep: []const []const u8) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            return credential_store.MemoryBackend.backend(self.inner).collect(self.inner, scope_name, keep);
+        }
+    };
+    var mock: CanceledBackend = .{ .inner = &memory };
+    const previous_backend = credential_store.useBackendForTesting(.{ .context = &mock, .get = CanceledBackend.get, .add = CanceledBackend.add, .remove = CanceledBackend.remove, .collect = CanceledBackend.collect });
+    defer credential_store.restoreBackendForTesting(previous_backend);
+
+    const pw_ref = "zw1_1111111111111111111111111111111111111111111111111111111111111111";
+    const key_ref = "zw1_2222222222222222222222222222222222222222222222222222222222222222";
+    const missing_ref = "zw1_3333333333333333333333333333333333333333333333333333333333333333";
+    const scope_name = try credential_store.scopeService();
+    try memory.backend().add(memory.backend().context, scope_name, pw_ref, "jump-pw-secret");
+    try memory.backend().add(memory.backend().context, scope_name, key_ref, "jump-key-passphrase");
+
+    const plugin = try fixture.Plugin.init(a);
+    defer plugin.deinit();
+    var probe_state: struct {
+        route_ids: [2]identity.ConnectionId = undefined,
+        factory: ?transports.Factory = null,
+        configs: ?resolver.Resolver = null,
+        owner: ?identity.SessionHandle = null,
+    } = .{};
+    const ProbeCallbacks = struct {
+        fn begin(raw: *anyopaque, request: probes.ProbeRequest) !void {
+            const state: *@TypeOf(probe_state) = @ptrCast(@alignCast(raw));
+            state.factory = request.restricted_context.transports;
+            state.configs = request.restricted_context.connection_configs;
+            state.owner = request.handle;
+        }
+        fn poll(_: *anyopaque, _: operation.OperationKey) !?probes.ProbeUpdate {
+            return .{ .result = .{ .outcome = .succeeded, .cleanup = .released } };
+        }
+        fn cancel(_: *anyopaque, _: operation.OperationKey) probes.CloseReceipt {
+            return .released;
+        }
+    };
+    var manifest = plugin.manifest();
+    manifest.connection.?.probe_factory = .{ .context = &probe_state, .begin = ProbeCallbacks.begin, .poll = ProbeCallbacks.poll, .cancel = ProbeCallbacks.cancel };
+    const domain = try application.Domain.initWithContributions(a, false, &.{manifest}, &.{plugin.renderer()});
+    defer domain.deinit();
+    var store: TransferTestStore = .{};
+    var window: TransferTestWindow = undefined;
+    try window.init(domain, &store);
+    defer window.deinit();
+
+    const pw_hop = try window.workspace.registry.add(.{ .name = "jump-pw", .host = "jump-pw.invalid", .user = "op", .auth_mode = .password, .password = null, .password_ref = pw_ref });
+    const key_hop = try window.workspace.registry.add(.{ .name = "jump-key", .host = "jump-key.invalid", .user = "op", .auth_mode = .private_key, .identity_file = "/tmp/id_ed25519", .key_passphrase = null, .key_passphrase_ref = key_ref });
+    const unsaved_hop = try window.workspace.registry.add(.{ .name = "jump-unsaved", .host = "jump-unsaved.invalid", .user = "op", .auth_mode = .password, .password = null, .password_ref = null });
+    const missing_hop = try window.workspace.registry.add(.{ .name = "jump-missing", .host = "jump-missing.invalid", .user = "op", .auth_mode = .password, .password = null, .password_ref = missing_ref });
+
+    // 1. Formal connection context (createContext)
+    const accepted = try window.open(plugin, 2001);
+    const ctx = plugin.runtimeFor(accepted.handle).?.context.?;
+    var route = try ctx.connection_configs.?.freezeRoute(&.{ pw_hop.id, key_hop.id }, a);
+    defer route.deinit();
+
+    const cancel_flag: std.atomic.Value(bool) = .init(false);
+    const owned = try ctx.transports.?.prepareOwned(.{ .session = accepted.handle }, &route, .connection, &cancel_flag);
+    defer owned.deinit() catch unreachable;
+    try std.testing.expect(owned.options[0].auth == .password_prompt);
+    try std.testing.expect(owned.options[1].auth.private_key.passphrase == null);
+    try std.testing.expectEqualStrings(pw_ref, owned.credential_references[0].?);
+    try std.testing.expectEqualStrings(key_ref, owned.credential_references[1].?);
+    try owned.resolveCredentials();
+    try std.testing.expectEqualStrings("jump-pw-secret", owned.options[0].auth.password);
+    try std.testing.expectEqualStrings("jump-key-passphrase", owned.options[1].auth.private_key.passphrase.?);
+
+    // Unsaved password jump hop (neither password nor password_ref) still requires interactive auth.
+    var unsaved_route = try ctx.connection_configs.?.freezeRoute(&.{unsaved_hop.id}, a);
+    defer unsaved_route.deinit();
+    try std.testing.expectError(error.AuthenticationInteractionRequired, ctx.transports.?.prepareOwned(.{ .session = accepted.handle }, &unsaved_route, .connection, &cancel_flag));
+
+    // Missing saved credential reference fails with CredentialMissing during worker resolution.
+    var missing_route = try ctx.connection_configs.?.freezeRoute(&.{missing_hop.id}, a);
+    defer missing_route.deinit();
+    const missing_owned = try ctx.transports.?.prepareOwned(.{ .session = accepted.handle }, &missing_route, .connection, &cancel_flag);
+    defer missing_owned.deinit() catch unreachable;
+    try std.testing.expectError(error.CredentialMissing, missing_owned.resolveCredentials());
+
+    // System authentication canceled propagates CredentialAuthenticationCanceled.
+    const canceled_owned = try ctx.transports.?.prepareOwned(.{ .session = accepted.handle }, &route, .connection, &cancel_flag);
+    defer canceled_owned.deinit() catch unreachable;
+    mock.fail_error = error.CredentialAuthenticationCanceled;
+    try std.testing.expectError(error.CredentialAuthenticationCanceled, canceled_owned.resolveCredentials());
+    mock.fail_error = null;
+
+    // Task cancellation fails with Cancelled before completing resolution.
+    var aborted: std.atomic.Value(bool) = .init(false);
+    const aborted_owned = try ctx.transports.?.prepareOwned(.{ .session = accepted.handle }, &route, .connection, &aborted);
+    defer aborted_owned.deinit() catch unreachable;
+    aborted.store(true, .release);
+    try std.testing.expectError(error.Cancelled, aborted_owned.resolveCredentials());
+
+    // 2. Wizard probe context (probeContext)
+    const probe_host = window.host.probes.?;
+    const editor = try probe_host.bindParent(9091, 1);
+    const token = try editor.begin(.{ .protocol_id = "fixture_probe", .name = "Probe route", .payload_version = 1, .payload = "{}" }, 1);
+    var probe_route = try probe_state.configs.?.freezeRoute(&.{ pw_hop.id, key_hop.id }, a);
+    defer probe_route.deinit();
+    const probe_owned = try probe_state.factory.?.prepareOwned(.{ .session = probe_state.owner.? }, &probe_route, .probe, &cancel_flag);
+    defer probe_owned.deinit() catch unreachable;
+    try probe_owned.resolveCredentials();
+    try std.testing.expectEqualStrings("jump-pw-secret", probe_owned.options[0].auth.password);
+    try std.testing.expectEqualStrings("jump-key-passphrase", probe_owned.options[1].auth.private_key.passphrase.?);
+    _ = try probe_host.poll();
+    try window.host.tick(1);
+    var result = try editor.snapshot(token, a);
+    defer result.deinit();
+    try std.testing.expect(result.value.complete);
 }

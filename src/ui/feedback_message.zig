@@ -31,6 +31,8 @@ pub fn knownMessage(code: []const u8) ?[]const u8 {
         .{ "InvalidRouteProtocol", "连接路径只能使用 SSH 主机作为跳板，请重新选择。" },
         .{ "RouteCycle", "连接路径包含循环或重复的主机，请检查跳板顺序。" },
         .{ "DuplicateRoute", "连接路径包含重复的跳板，请移除重复项。" },
+        .{ "AuthenticationInteractionRequired", "找不到 SSH 跳板已保存的密码，请在跳板配置中重新填写。" },
+        .{ "MissingIdentityFile", "SSH 跳板缺少私钥文件路径，请在跳板配置中补齐后重试。" },
         .{ "InteractionUnavailable", "这次测试无法询问凭据。请补填凭据，或直接发起连接后按提示输入。" },
         .{ "MissingEndpoint", "缺少 API 地址，请在 AI 设置中填写服务地址。" },
         .{ "MissingModel", "尚未选择可用模型，请在 AI 设置中添加并选择模型。" },

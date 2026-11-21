@@ -777,13 +777,17 @@ pub const View = struct {
         for (self.progress_icons, self.progress_names, self.progress_states, 0..) |icon, name, status, index| {
             const group: vm.ProgressGroup = @fromBackingInt(@intCast(index));
             const state = self.progress_projection.state(progress, group);
+            const identity_warning = group == .identity and vm.hasPublicIdentityWarning(progress) and state != .failed and state != .stopped;
+            const management_warning = group == .management and vm.hasDiscoveryWarning(progress) and state != .failed and state != .stopped;
             try setText(self, icon, vm.stepPrefix(state));
-            try setText(self, status, vm.stepLabel(state));
+            try setText(self, status, if (identity_warning and state == .warning) "提示" else vm.stepLabel(state));
+            if (group == .identity) try setText(self, name, if (!identity_warning) vm.progressGroupLabel(group) else if (overall_failed or progress.stage == .cancelled or self.cancel_pending) "未识别公开设备型号" else console.progress.codeLabel(.public_identity_unrecognized));
+            if (group == .management) try setText(self, name, if (management_warning) "管理资源发现未完成" else vm.progressGroupLabel(group));
             writer.clearRetainingCapacity();
             if (vm.progressGroupDuration(progress, group)) |ms| try vm.writeDuration(&writer.writer, ms) else try writer.writer.writeAll("—");
             try setText(self, self.progress_durations[index], writer.written());
             writer.clearRetainingCapacity();
-            const color = switch (state) {
+            const color = if ((identity_warning or management_warning) and state == .current) S.theme.current().warn_ink else switch (state) {
                 .current, .waiting_for_user => S.theme.current().accent_ink,
                 .done => S.theme.current().fg_1,
                 .warning, .stopped => S.theme.current().warn_ink,
@@ -846,7 +850,7 @@ pub const View = struct {
                 writer.clearRetainingCapacity();
                 try vm.writeLogMessage(&writer.writer, event, value.target);
                 try setText(self, self.log_messages[index], writer.written());
-                if (self.log_messages[index]) |message| setTextColorIfChanged(message, if (event.kind == .failure or event.error_code != null) S.theme.current().danger_ink else S.theme.current().fg_1);
+                if (self.log_messages[index]) |message| setTextColorIfChanged(message, if (event.isDiscoveryIssue() or event.code == .public_identity_unrecognized) S.theme.current().warn_ink else if (event.kind == .failure or event.error_code != null) S.theme.current().danger_ink else S.theme.current().fg_1);
                 writer.clearRetainingCapacity();
                 try vm.writeLogDuration(&writer.writer, event);
                 try setText(self, self.log_durations[index], writer.written());

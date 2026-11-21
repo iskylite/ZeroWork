@@ -4,6 +4,7 @@ const std = @import("std");
 const ui = @import("ui");
 const drafts = @import("plugins/bmc_ikvm/editor_model.zig");
 const editor = @import("plugins/bmc_ikvm/editor.zig");
+const probe_feedback = @import("plugins/bmc_ikvm/probe_feedback.zig");
 const model = @import("plugins/bmc_ikvm/model.zig");
 const codec = @import("plugins/bmc_ikvm/codec.zig");
 const hosts = @import("config/hosts.zig");
@@ -146,6 +147,27 @@ test "BMC editor probe publishes only matching current drafts after cleanup and 
     update.token = token(13, 204);
     try std.testing.expect(state.apply(update, 13));
     try std.testing.expectEqual(probes.Outcome.succeeded, state.outcome.?);
+}
+
+test "BMC editor probe recognizes only the retained discovery and identity warnings" {
+    const progress = @import("plugins/bmc_ikvm/connection_progress.zig");
+    var snapshot: progress.Snapshot = .{};
+    try std.testing.expect(probe_feedback.warningForSnapshot(&snapshot) == null);
+    snapshot.discovery_issue = .{ .stage = .redfish_discovery, .validity = .unavailable };
+    try std.testing.expectEqual(probe_feedback.Warning.discovery, probe_feedback.warningForSnapshot(&snapshot).?);
+    snapshot.identity_warning = .{ .code = .public_identity_unrecognized };
+    try std.testing.expectEqual(probe_feedback.Warning.discovery_and_identity, probe_feedback.warningForSnapshot(&snapshot).?);
+    snapshot.discovery_issue = null;
+    try std.testing.expectEqual(probe_feedback.Warning.identity, probe_feedback.warningForSnapshot(&snapshot).?);
+    inline for (std.enums.values(probe_feedback.Warning)) |warning| {
+        const text = probe_feedback.warningText(warning);
+        try std.testing.expectEqual(warning, probe_feedback.warningFromMessage(text).?);
+        var buffer: [512]u8 = undefined;
+        const message = try std.fmt.bufPrint(&buffer, "{s} · 总计 5 秒 · 正在释放连接资源", .{text});
+        try std.testing.expectEqual(warning, probe_feedback.warningFromMessage(message).?);
+        const invalid = try std.fmt.bufPrint(&buffer, "{s}额外内容", .{text});
+        try std.testing.expect(probe_feedback.warningFromMessage(invalid) == null);
+    }
 }
 
 test "BMC editor probe log keeps only bounded static phases and does not turn old or cancelled results into success" {
@@ -324,10 +346,15 @@ test "BMC editor retained backgrounds follow theme publication without replacing
         publication.publish(cx, theme.widgetTheme(theme.currentName()));
         frames(cx);
         try std.testing.expectEqual(ui.Color.TRANSPARENT, view.root.?.getBackground());
+        try std.testing.expectEqual(S.host.theme.popupInset(), view.stepper.?.getBackground());
         try std.testing.expectEqual(theme.current().action_accent, view.steps[0].?.badge.getBackground());
-        try std.testing.expectEqual(S.host.accessChoice(true).background.?, view.access_styles[0].?.peek().background.?);
-        try std.testing.expectEqual(S.host.accessChoice(false).background.?, view.access_styles[1].?.peek().background.?);
-        try std.testing.expectEqual(S.action(false).background.?, view.cancel_button.?.getBackground());
+        try std.testing.expectEqual(S.host.reviewStep(true).background.?, view.steps[0].?.style.peek().background.?);
+        try std.testing.expect(view.route_path != null);
+        const route = view.route_path.?;
+        try std.testing.expectEqual(ui.Color.TRANSPARENT, route.card.getBackground());
+        try std.testing.expectEqual(theme.current().accent_ink, route.choices[0].?.title.getText().?.color);
+        try std.testing.expectEqual(theme.current().fg_1, route.choices[1].?.title.getText().?.color);
+        try std.testing.expectEqual(ui.Color.TRANSPARENT, view.cancel_button.?.getBackground());
         try std.testing.expectEqual(S.footer(cx.tokens).background.?, view.footer.?.getBackground());
         try std.testing.expectEqual(root_id, view.root.?.id);
         try std.testing.expectEqual(revision, view.draft.?.revision);
@@ -362,16 +389,19 @@ test "BMC editor native actions defer submission and rollback failed saves while
     try view.draft.?.setPassword("editor-sensitive");
     try facade.setDraftRevision(view.draft.?.revision);
     frames(cx);
+    try std.testing.expectApproxEqAbs(@as(f32, 36), find(cx.root.?, "wizard.steps").?.globalRect().h, 0.5);
     click(cx, find(cx.root.?, "bmc.editor.next").?);
     frames(cx);
-    click(cx, find(cx.root.?, "bmc.editor.access.ssh").?);
+    click(cx, find(cx.root.?, "wizard.access.jump").?);
     frames(cx);
-    try std.testing.expect(find(cx.root.?, "bmc.editor.access.ssh.selected").?.isDisplayedInTree());
-    click(cx, find(cx.root.?, "bmc.editor.access.direct").?);
+    try std.testing.expect(find(cx.root.?, "wizard.route.chain").?.isDisplayedInTree());
+    click(cx, find(cx.root.?, "wizard.access.direct").?);
     frames(cx);
-    try std.testing.expect(!find(cx.root.?, "bmc.editor.access.ssh.selected").?.isDisplayedInTree());
+    try std.testing.expect(!find(cx.root.?, "wizard.route.chain").?.isDisplayedInTree());
     click(cx, find(cx.root.?, "bmc.editor.next").?);
     frames(cx);
+    try std.testing.expect(find(cx.root.?, "wizard.review.summary").?.isDisplayedInTree());
+    try std.testing.expect(find(cx.root.?, "wizard.review.route").?.isDisplayedInTree());
     const save = find(cx.root.?, "bmc.editor.save").?;
     try std.testing.expect(save.isDisplayedInTree());
     driver.fail_save = true;
@@ -508,9 +538,7 @@ test "BMC editor native probe feedback stays visible and log updates preserve ca
     frames(cx);
     click(cx, find(cx.root.?, "bmc.editor.next").?);
     frames(cx);
-    try std.testing.expectEqual(@as(usize, 7), footer.children.items.len); // retained per-step actions and spacer
-    ui.widgets.scrollIntoView(view.scroll.?.state, view.scroll.?.content, find(cx.root.?, "bmc.editor.probe").?, .nearest);
-    frames(cx);
+    try std.testing.expectEqual(@as(usize, 8), footer.children.items.len); // retained per-step actions and spacer
     click(cx, find(cx.root.?, "bmc.editor.probe").?);
     try std.testing.expectEqual(@as(u64, 0), fixture.begins);
     frames(cx);
@@ -578,8 +606,6 @@ test "BMC editor native probe feedback stays visible and log updates preserve ca
     frames(cx);
     click(cx, find(cx.root.?, "bmc.editor.next").?);
     frames(cx);
-    ui.widgets.scrollIntoView(view.scroll.?.state, view.scroll.?.content, find(cx.root.?, "bmc.editor.probe").?, .nearest);
-    frames(cx);
     click(cx, find(cx.root.?, "bmc.editor.probe").?);
     frames(cx);
     try std.testing.expectEqual(@as(u64, 3), view.probe_log.attempt);
@@ -592,6 +618,51 @@ test "BMC editor native probe feedback stays visible and log updates preserve ca
     try std.testing.expectEqual(probes.Outcome.failed, view.probe.outcome.?);
     try std.testing.expectEqualStrings("FixtureAuthenticationFailed", view.message.?.getText().?.content);
     try std.testing.expect(std.mem.indexOf(u8, view.log_entries.?.getText().?.content, "测试失败") != null);
+
+    click(cx, find(cx.root.?, "bmc.editor.probe").?);
+    frames(cx);
+    fixture.complete = true;
+    fixture.cleanup = .released;
+    fixture.outcome = .succeeded;
+    fixture.message = probe_feedback.warningText(.discovery);
+    frames(cx);
+    try std.testing.expectEqualStrings(probe_feedback.warningText(.discovery), view.message.?.getText().?.content);
+    try std.testing.expectEqual(@import("plugins/bmc_ikvm/editor_styles.zig").theme.current().warn, view.message.?.getText().?.color);
+    try std.testing.expect(std.mem.indexOf(u8, view.log_entries.?.getText().?.content, "资源发现不完整") != null);
+    try std.testing.expect(std.mem.indexOf(u8, view.log_entries.?.getText().?.content, "测试成功") == null);
+
+    click(cx, find(cx.root.?, "bmc.editor.probe").?);
+    frames(cx);
+    fixture.complete = true;
+    fixture.cleanup = .released;
+    fixture.outcome = .succeeded;
+    fixture.message = probe_feedback.warningText(.discovery_and_identity);
+    frames(cx);
+    try std.testing.expectEqualStrings(probe_feedback.warningText(.discovery_and_identity), view.message.?.getText().?.content);
+    try std.testing.expectEqual(@import("plugins/bmc_ikvm/editor_styles.zig").theme.current().warn, view.message.?.getText().?.color);
+    try std.testing.expect(std.mem.indexOf(u8, view.log_entries.?.getText().?.content, "资源发现不完整") != null);
+    try std.testing.expect(std.mem.indexOf(u8, view.log_entries.?.getText().?.content, "未识别公开设备型号") != null);
+    try std.testing.expect(std.mem.indexOf(u8, view.log_entries.?.getText().?.content, "测试成功") == null);
+
+    click(cx, find(cx.root.?, "bmc.editor.probe").?);
+    frames(cx);
+    fixture.complete = true;
+    fixture.cleanup = .released;
+    fixture.outcome = .succeeded;
+    fixture.message = probe_feedback.warningText(.identity);
+    frames(cx);
+    try std.testing.expectEqualStrings(probe_feedback.warningText(.identity), view.message.?.getText().?.content);
+    try std.testing.expectEqual(@import("plugins/bmc_ikvm/editor_styles.zig").theme.current().warn, view.message.?.getText().?.color);
+
+    click(cx, find(cx.root.?, "bmc.editor.probe").?);
+    frames(cx);
+    fixture.complete = true;
+    fixture.cleanup = .released;
+    fixture.outcome = .succeeded;
+    fixture.message = "BMC 只读连接测试成功";
+    frames(cx);
+    try std.testing.expect(std.mem.indexOf(u8, view.message.?.getText().?.content, "资源发现") != null);
+    try std.testing.expectEqual(@import("plugins/bmc_ikvm/editor_styles.zig").theme.current().ok, view.message.?.getText().?.color);
     instance.vtable.unmount(instance.context);
 }
 
@@ -625,4 +696,26 @@ test "BMC editor reopening a temporary session preserves configuration without p
     try existing.load(saved_asset);
     try std.testing.expectEqualStrings(reference, existing.credential_ref.?);
     try std.testing.expect(existing.save_password);
+}
+
+test "BMC draft insertHop inserts at start, middle and end while rejecting duplicates and the 9th hop" {
+    var draft = try validDraft();
+    defer draft.deinit();
+    for (1..7) |i| {
+        try draft.insertHop(draft.route_count, @fromBackingInt(i * 10));
+    }
+    try std.testing.expectEqual(@as(usize, 6), draft.route_count);
+    try draft.insertHop(0, @fromBackingInt(100));
+    try draft.insertHop(3, @fromBackingInt(200));
+    try std.testing.expectEqual(@as(usize, 8), draft.route_count);
+    try std.testing.expectEqual(@as(u64, 100), draft.route[0].asset_id);
+    try std.testing.expectEqual(@as(u64, 10), draft.route[1].asset_id);
+    try std.testing.expectEqual(@as(u64, 200), draft.route[3].asset_id);
+    try std.testing.expectEqual(@as(u64, 60), draft.route[7].asset_id);
+    try std.testing.expectError(error.TooManyJumps, draft.insertHop(0, @fromBackingInt(300)));
+
+    var dup = try validDraft();
+    defer dup.deinit();
+    try dup.insertHop(0, @fromBackingInt(11));
+    try std.testing.expectError(error.DuplicateRoute, dup.insertHop(1, @fromBackingInt(11)));
 }

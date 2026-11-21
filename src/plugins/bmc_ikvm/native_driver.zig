@@ -23,10 +23,6 @@ const monotonic = @import("../../platform/realtime.zig");
 const progress = @import("connection_progress.zig");
 const ssh_progress = @import("../../proto/ssh/connection_progress.zig");
 
-extern fn zw_bmc_gzip_create() ?*anyopaque;
-extern fn zw_bmc_gzip_destroy(?*anyopaque) void;
-extern fn zw_bmc_gzip_step(?*anyopaque, [*]const u8, usize, *usize, [*]u8, usize, *usize) c_int;
-
 pub const Callbacks = struct {
     context: *anyopaque,
     /// The host presents the complete challenge. No callback means failure.
@@ -440,12 +436,12 @@ pub const NativeDriver = struct {
         try self.discovery.?.ingest(root_request, root_response.response.status, root_response.response.body(), root_response.response.header("ETag"), timestamp() / std.time.ns_per_ms);
         const root_doc = self.discovery.?.find(root_request.uri) orelse return error.MissingServiceRoot;
         self.progressResponse(.service_root, root_doc.status, root_doc.validity);
-        if (!self.selection_ready) try self.selectTrustedProfile(root_doc.*);
-        const reviewed_public_management = self.selected.value.id == .sugon_1_80_oem_rfb and std.mem.eql(u8, self.selected.value.evidence.firmware, "1.80");
-        self.discovery.?.oem_public_security_service = reviewed_public_management;
-        self.discovery.?.oem_public_resource_association = reviewed_public_management;
-        const service_link = redfish.link(root_doc.value, "SessionService") orelse return error.MissingSessionService;
-        const service_uri = try self.origin().validateReference(service_link);
+        const enable_sugon_management = self.selection_ready or profile.recognizesPublicDevice(root_doc.value);
+        if (!self.selection_ready) try self.selectConnectionProfile(root_doc.*, enable_sugon_management);
+        self.discovery.?.oem_public_security_service = enable_sugon_management;
+        self.discovery.?.oem_public_resource_association = enable_sugon_management;
+        const root = self.discovery.?.root orelse return error.MissingServiceRoot;
+        const service_uri = root.sessions;
         var service_response = try self.request("GET", service_uri, &.{}, "");
         defer service_response.deinit();
         self.progressResponse(.session_service, service_response.response.status, null);
@@ -487,21 +483,32 @@ pub const NativeDriver = struct {
         // the profile. Resolve it before optional Systems/management metadata.
         if (self.firmware_pending_verification) try self.readFirmwareEvidence();
         self.progressStage(.redfish_discovery);
+        if (root.systems == null) self.noteMissingRootLink(root_request.uri, .systems_collection, .systems);
+        if (root.managers == null) self.noteMissingRootLink(root_request.uri, .managers_collection, .managers);
         while (self.discovery.?.next()) |pending| {
             self.readDiscoveryResource(pending) catch |err| {
                 if (err != error.Cancelled) self.progressNote(.{ .code = .management_discovery_incomplete, .resource = resourceKind(pending.kind), .err = err });
-                // Probes report their discovery result. A console can keep
-                // its authenticated video path without management metadata;
-                // cancellation and allocation failures remain terminal.
-                if (self.probe_only or err == error.Cancelled or err == error.OutOfMemory) return err;
+                if (err == error.Cancelled or err == error.OutOfMemory) return err;
+                if (self.probe_only) switch (pending.kind) {
+                    .systems, .managers, .system, .manager => {},
+                    else => return err,
+                };
                 self.management_discovery_error = err;
                 // A partially consumed HTTP response cannot share a stream
                 // with OEM authentication. Reconnect only to the same endpoint
                 // and authorize only this attempt's already accepted peer.
-                if (self.management_failed) try self.reopenManagementChannel();
+                if (!self.probe_only and self.management_failed) try self.reopenManagementChannel();
                 break;
             };
         }
+    }
+    fn noteMissingRootLink(self: *NativeDriver, root_uri: []const u8, resource: progress.Resource, source: redfish.LinkSource) void {
+        self.progressNote(.{
+            .code = .management_root_link_unavailable,
+            .resource = resource,
+            .validity = .unavailable,
+            .context = .{ .source_path = progress.resourcePath(root_uri), .source_property = progress.LogText(128).init(source.property()) },
+        });
     }
     fn readDiscoveryResource(self: *NativeDriver, pending: redfish.ReadRequest) !void {
         const source_path = if (pending.source_uri) |uri| progress.resourcePath(uri) else null;
@@ -538,103 +545,18 @@ pub const NativeDriver = struct {
         try self.confirmFirmware();
     }
 
-    fn selectTrustedProfile(self: *NativeDriver, root_doc: redfish.Document) !void {
+    fn selectConnectionProfile(self: *NativeDriver, root_doc: redfish.Document, recognized: bool) !void {
         self.progressStage(.public_identity);
-        // No password facade, session POST or OEM/WS route is touched until
-        // the complete observed public identity matches reviewed evidence.
-        const observed = try profile.publicIdentityFromRoot(true, root_doc.value);
-        _ = try profile.detectPublicFamily(observed);
-        if (observed.firmware.len == 0) {
-            // OEM RedfishVersion is only a public compatibility observation,
-            // never the actual FirmwareVersion. Avoid even the public asset
-            // request if this independent identity component is unavailable.
-            _ = try profile.detectPublicEvidenceFamily(observed);
-            const digest = try self.hashPublicMaterial();
-            self.selected = try svc.Owned(profile.Profile).init(self.allocator, try profile.selectPublicEvidence(observed, .{ .uri = profile.sugon_public_material_path, .sha256 = digest }));
-            self.progressNote(.{ .code = .public_material_verified, .resource = .public_script });
-            self.firmware_pending_verification = true;
-        } else {
-            self.selected = try svc.Owned(profile.Profile).init(self.allocator, try profile.selectPublic(observed));
-            self.diagnostics.firmware_observed = true;
+        if (!root_doc.resourceAvailable()) return error.MissingServiceRoot;
+        if (!recognized) {
+            self.progressNote(.{ .code = .public_identity_unrecognized });
         }
+        const selected = try profile.selectForConnection();
+        self.selected = try svc.Owned(profile.Profile).init(self.allocator, selected);
         self.selection_ready = true;
-        self.progressStage(.public_identity);
-    }
-
-    fn hashPublicMaterial(self: *NativeDriver) ![32]u8 {
-        self.progressStage(.public_script);
-        // Hash the exact reviewed path on this already-trusted origin. The
-        // HTTP decoder owns at most one TLS read of script body at a time;
-        // parsed bytes are wiped immediately, never executed or persisted.
-        const limit = 16 * 1024 * 1024;
-        var transaction = self.newTransaction(try self.build("GET", profile.sugon_public_material_path, &.{.{ .name = "Accept-Encoding", .value = "gzip" }}, ""), 0);
-        transaction.usePublicMaterialTimeout();
-        defer transaction.deinit();
-        errdefer if (transaction.offset != 0 and !transaction.response.isDone()) {
-            self.management_failed = true;
-        };
-        transaction.response.limits.body_bytes = limit;
-        var hash: std.crypto.hash.sha2.Sha256 = .init(.{});
-        var total: usize = 0;
-        var decoded: usize = 0;
-        var headers_ready = false;
-        var gzip: ?*anyopaque = null;
-        defer zw_bmc_gzip_destroy(gzip);
-        var gzip_ended = false;
-        var output: [16 * 1024]u8 = undefined;
-        defer std.crypto.secureZero(u8, &output);
-        while (true) {
-            const done = try self.stepTransaction(&self.management_channel.?, &transaction, false);
-            if (!headers_ready and transaction.response.state != .headers) {
-                self.progressResponse(.public_script, transaction.response.status, null);
-                if (transaction.response.status != 200) return error.UnsupportedProfilePublicEvidenceUnavailable;
-                if (transaction.response.headerCount("Content-Encoding") > 1) return error.UnsupportedProfilePublicEvidenceEncoding;
-                if (transaction.response.header("Content-Encoding")) |encoding| {
-                    if (std.ascii.eqlIgnoreCase(encoding, "gzip")) {
-                        gzip = zw_bmc_gzip_create() orelse return error.OutOfMemory;
-                    } else if (!std.ascii.eqlIgnoreCase(encoding, "identity")) return error.UnsupportedProfilePublicEvidenceEncoding;
-                }
-                headers_ready = true;
-            }
-            const body = transaction.response.body();
-            total = std.math.add(usize, total, body.len) catch return error.BodyTooLarge;
-            if (total > limit) return error.BodyTooLarge;
-            if (gzip) |stream| {
-                if (gzip_ended and body.len != 0) return error.InvalidPublicMaterialGzip;
-                var offset: usize = 0;
-                var drain = false;
-                while (!gzip_ended and (offset != body.len or drain)) {
-                    var consumed: usize = 0;
-                    var produced: usize = 0;
-                    const status = zw_bmc_gzip_step(stream, body[offset..].ptr, body.len - offset, &consumed, &output, output.len, &produced);
-                    if (status < 0 or consumed > body.len - offset or produced > output.len) return error.InvalidPublicMaterialGzip;
-                    offset += consumed;
-                    decoded = std.math.add(usize, decoded, produced) catch return error.BodyTooLarge;
-                    if (decoded > limit) return error.BodyTooLarge;
-                    hash.update(output[0..produced]);
-                    std.crypto.secureZero(u8, output[0..produced]);
-                    if (status == 1) {
-                        gzip_ended = true;
-                        if (offset != body.len) return error.InvalidPublicMaterialGzip;
-                    } else if (consumed == 0 and produced == 0) {
-                        if (offset != body.len) return error.InvalidPublicMaterialGzip;
-                        break;
-                    }
-                    drain = produced == output.len;
-                }
-            } else {
-                decoded = std.math.add(usize, decoded, body.len) catch return error.BodyTooLarge;
-                if (decoded > limit) return error.BodyTooLarge;
-                hash.update(body);
-            }
-            std.crypto.secureZero(u8, transaction.response.body_buffer.items);
-            transaction.response.body_buffer.clearRetainingCapacity();
-            transaction.response.limits.body_bytes = limit - total;
-            if (done) break;
-            self.pause(2);
-        }
-        if (gzip != null and !gzip_ended) return error.InvalidPublicMaterialGzip;
-        return hash.finalResult();
+        if (profile.publicIdentityFromRoot(true, root_doc.value)) |observed| {
+            self.diagnostics.firmware_observed = observed.firmware.len != 0;
+        } else |_| {}
     }
 
     fn confirmFirmware(self: *NativeDriver) !void {
@@ -1683,8 +1605,8 @@ fn readLogValidity(allocator: std.mem.Allocator, origin: redfish.Origin, kind: r
     const a = arena.allocator();
     switch (kind) {
         .root => {
-            _ = redfish.parseRoot(a, origin, doc) catch return .partial_with_error;
-            return .valid;
+            const root = redfish.parseRoot(a, origin, doc) catch return .partial_with_error;
+            return if (root.systems != null and root.managers != null) .valid else .partial_with_error;
         },
         .systems, .managers, .boot_options => {
             _ = redfish.parseCollection(a, origin, doc) catch return .partial_with_error;

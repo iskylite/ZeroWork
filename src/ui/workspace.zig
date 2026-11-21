@@ -1106,13 +1106,20 @@ pub const Workspace = struct {
     pub const StatusKind = enum { info, failure };
 
     pub fn status(self: *Workspace, text: []const u8) void {
-        self.statusWithKind(text, .info);
+        self.statusWithKind(self.activeStatusOwner(), text, .info);
     }
     pub fn statusFailure(self: *Workspace, text: []const u8) void {
-        self.statusWithKind(text, .failure);
+        self.statusWithKind(self.activeStatusOwner(), text, .failure);
+    }
+    pub fn windowStatusFailure(self: *Workspace, text: []const u8) void {
+        self.statusWithKind(null, text, .failure);
     }
     pub fn reportFailure(self: *Workspace, owner: identity.ContentOwner, text: []const u8) void {
         if (self.status_feedback) |feedback| feedback.publish(feedback.context, owner, text, .failure);
+    }
+    fn activeStatusOwner(self: *const Workspace) ?identity.ContentOwner {
+        const index = self.active_tab orelse return null;
+        return if (index < self.tabs.items.len) self.tabs.items[index].content_owner else null;
     }
 
     const ContentSaveFeedback = struct {
@@ -1130,12 +1137,12 @@ pub const Workspace = struct {
         const report = try scope.createState(ContentSaveFeedback, .{ .workspace = self, .owner = owner });
         return self.cx.on(ContentSaveFeedback, report, ContentSaveFeedback.report);
     }
-    fn statusWithKind(self: *Workspace, text: []const u8, kind: StatusKind) void {
+    fn statusWithKind(self: *Workspace, owner: ?identity.ContentOwner, text: []const u8, kind: StatusKind) void {
         if (self.command_output) |terminal| {
             terminal.showCommandMessage(text);
             return;
         }
-        if (self.status_feedback) |feedback| feedback.publish(feedback.context, if (self.active_tab) |index| (if (index < self.tabs.items.len) self.tabs.items[index].content_owner else null) else null, text, kind);
+        if (self.status_feedback) |feedback| feedback.publish(feedback.context, owner, text, kind);
         const target = self.status_node orelse return;
         var buffer: [768]u8 = undefined;
         target.setTextContent(self.allocator, @import("feedback_message.zig").message(text, &buffer)) catch return;

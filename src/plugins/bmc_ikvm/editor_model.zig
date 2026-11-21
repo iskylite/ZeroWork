@@ -6,6 +6,7 @@ const envelopes = @import("../../config/connection_envelope.zig");
 const configs_mod = @import("../../host/connection_config_resolver.zig");
 const probes = @import("../../host/probe_contract.zig");
 const model = @import("model.zig");
+const probe_feedback = @import("probe_feedback.zig");
 
 pub const TextField = enum { name, host, username };
 
@@ -163,12 +164,17 @@ pub const Editor = struct {
         return false;
     }
     pub fn addHop(self: *Editor, id: identity.ConnectionId) !void {
+        return self.insertHop(self.route_count, id);
+    }
+    pub fn insertHop(self: *Editor, index: usize, id: identity.ConnectionId) !void {
         if (self.route_count == self.route.len) return error.TooManyJumps;
+        if (index > self.route_count) return error.InvalidRouteIndex;
         const value = @backingInt(id);
         if (value == 0) return error.InvalidSshReference;
         if (self.containsHop(value, null)) return error.DuplicateRoute;
         const revision = try self.nextRevision();
-        self.route[self.route_count] = .{ .asset_id = value };
+        std.mem.copyBackwards(model.Hop, self.route[index + 1 .. self.route_count + 1], self.route[index..self.route_count]);
+        self.route[index] = .{ .asset_id = value };
         self.route_count += 1;
         self.routed = true;
         self.revision = revision;
@@ -321,6 +327,7 @@ pub const ProbeLog = struct {
         status_unavailable,
         cleanup_unknown,
         result: probes.Outcome,
+        warning: probe_feedback.Warning,
         old_draft_released,
     };
     pub const Entry = struct { elapsed_seconds: u64 = 0, detail: Detail = .{ .host_stage = .accepted } };
@@ -368,7 +375,11 @@ pub const ProbeLog = struct {
         if (snapshot.complete and snapshot.cleanup == .released) {
             self.complete = true;
             self.outcome = if (self.stale) null else if (self.cancelled) .cancelled else snapshot.outcome orelse .failed;
-            if (self.stale) self.append(.old_draft_released) else self.append(.{ .result = self.outcome.? });
+            if (self.stale) {
+                self.append(.old_draft_released);
+            } else if (self.outcome.? == .succeeded) {
+                if (probe_feedback.warningFromMessage(snapshot.safe_message)) |warning| self.append(.{ .warning = warning }) else self.append(.{ .result = .succeeded });
+            } else self.append(.{ .result = self.outcome.? });
             return;
         }
         const current_detail = detail(snapshot);
@@ -424,6 +435,7 @@ pub const ProbeLog = struct {
             .status_unavailable => "正在等待管理测试状态",
             .cleanup_unknown => "管理测试资源仍待确认释放",
             .old_draft_released => "上次草稿的测试已结束，资源已释放",
+            .warning => |warning| probe_feedback.warningText(warning),
             .result => |outcome| switch (outcome) {
                 .succeeded => "管理连接测试成功；未打开视频",
                 .failed => "管理连接测试失败，配置草稿已保留",

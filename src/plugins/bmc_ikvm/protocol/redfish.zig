@@ -373,12 +373,12 @@ fn stringList(a: std.mem.Allocator, value: ?std.json.Value) !?[]const []const u8
     }
     return result;
 }
-pub const Root = struct { systems: []const u8, managers: []const u8, sessions: []const u8 };
+pub const Root = struct { systems: ?[]const u8, managers: ?[]const u8, sessions: []const u8 };
 pub fn parseRoot(a: std.mem.Allocator, origin: Origin, doc: Document) !Root {
-    if (!doc.resourceAvailable() or !doc.fieldAccepted("/Systems") or !doc.fieldAccepted("/Managers") or !doc.fieldAccepted("/SessionService")) return error.InvalidServiceRoot;
-    const systems = try resourceUri(a, origin, link(doc.value, "Systems") orelse return error.MissingSystems);
-    const managers = try resourceUri(a, origin, link(doc.value, "Managers") orelse return error.MissingManagers);
+    if (!doc.resourceAvailable() or !doc.fieldAccepted("/SessionService")) return error.InvalidServiceRoot;
     const sessions = try resourceUri(a, origin, link(doc.value, "SessionService") orelse return error.MissingSessionService);
+    const systems = if (doc.fieldAccepted("/Systems")) try optionalResourceUri(a, origin, link(doc.value, "Systems") orelse "") else null;
+    const managers = if (doc.fieldAccepted("/Managers")) try optionalResourceUri(a, origin, link(doc.value, "Managers") orelse "") else null;
     return .{ .systems = systems, .managers = managers, .sessions = sessions };
 }
 pub const Collection = struct { members: []const []const u8, next: ?[]const u8 };
@@ -598,6 +598,7 @@ pub const Discovery = struct {
     arena: std.heap.ArenaAllocator,
     backing: std.mem.Allocator,
     origin: Origin,
+    root: ?Root = null,
     queue: std.ArrayList(ReadRequest) = .empty,
     resources: std.ArrayList(Resource) = .empty,
     outstanding: std.ArrayList(ReadRequest) = .empty,
@@ -677,9 +678,10 @@ pub const Discovery = struct {
         if (doc.resourceAvailable()) switch (request.kind) {
             .root => {
                 const root = try parseRoot(a, self.origin, doc);
-                try self.scheduleFrom(root.systems, .systems, null, doc.uri, .systems);
-                try self.scheduleFrom(root.managers, .managers, null, doc.uri, .managers);
+                if (root.systems) |uri| try self.scheduleFrom(uri, .systems, null, doc.uri, .systems);
+                if (root.managers) |uri| try self.scheduleFrom(uri, .managers, null, doc.uri, .managers);
                 try self.scheduleFrom(root.sessions, .session_service, null, doc.uri, .sessions);
+                self.root = root;
             },
             .systems, .managers, .boot_options => collection: {
                 if (!doc.fieldAccepted("/Members")) break :collection;

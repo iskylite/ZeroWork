@@ -32,7 +32,11 @@ pub const Bridge = struct {
     pub fn configure(self: *Bridge, factory: *transport.Factory) void {
         if (factory.credentials != null) {
             self.credentials = factory.credentials;
-            factory.credentials = .{ .context = self, .resolve = resolveCredentials };
+            factory.credentials = .{
+                .context = self,
+                .resolve = resolveCredentials,
+                .resolve_reference = if (self.credentials.?.resolve_reference != null) resolveCredentialReference else null,
+            };
         }
         factory.auth_interaction = .{ .bridge = &self.authentication };
         factory.host_key_observer = .{ .ctx = &self.trust, .callback = host_key.Bridge.observer };
@@ -159,6 +163,14 @@ pub const Bridge = struct {
             else => return err,
         };
     }
+
+    fn resolveCredentialReference(raw: *anyopaque, owner: identity.ResourceOwner, source: identity.AssetOwner, a: std.mem.Allocator) !?[]const u8 {
+        const self: *Bridge = @ptrCast(@alignCast(raw));
+        if (owner != .session or !owner.session.eql(self.owner)) return error.CredentialOwnerDenied;
+        const credentials = self.credentials orelse return error.CredentialOwnerDenied;
+        const resolve_reference = credentials.resolve_reference orelse return null;
+        return resolve_reference(credentials.context, owner, source, a);
+    }
 };
 
 const Pending = union(enum) {
@@ -206,4 +218,81 @@ test "web SSH challenge submits one reply to the exact worker request" {
     try testing.expectEqualStrings("fixture-password", reply.answerAt(0));
     try testing.expectError(error.ResponseConsumed, bridge.authentication.waitResponse(request, 0));
     try testing.expect(!try bridge.poll());
+}
+
+test "web SSH challenge bridge preserves prompt fallback when unsaved and forwards saved password_ref" {
+    const testing = std.testing;
+    const resolution = @import("../../host/connection_config_resolver.zig");
+    const hosts_mod = @import("../../config/hosts.zig");
+    const credential_store = @import("../../config/credential_store.zig");
+
+    var memory: credential_store.MemoryBackend = .{};
+    defer memory.deinit();
+    const previous_backend = credential_store.useBackendForTesting(memory.backend());
+    defer credential_store.restoreBackendForTesting(previous_backend);
+    const saved_ref = "zw1_4444444444444444444444444444444444444444444444444444444444444444";
+    try memory.backend().add(memory.backend().context, try credential_store.scopeService(), saved_ref, "web-saved-jump-pw");
+
+    var reg: hosts_mod.Registry = .{ .arena = .init(testing.allocator), .hosts = &.{} };
+    defer reg.deinit();
+    const unsaved_hop = try reg.add(.{ .name = "unsaved", .host = "unsaved.invalid", .user = "op", .auth_mode = .password, .password = null, .password_ref = null });
+    const saved_hop = try reg.add(.{ .name = "saved", .host = "saved.invalid", .user = "op", .auth_mode = .password, .password = null, .password_ref = saved_ref });
+
+    const Provider = struct {
+        registry: *const hosts_mod.Registry,
+        owner: identity.SessionHandle,
+        fn resolve(raw: *anyopaque, resource_owner: identity.ResourceOwner, asset_owner: identity.AssetOwner, _: std.mem.Allocator) !ssh.Auth {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (resource_owner != .session or !resource_owner.session.eql(self.owner)) return error.CredentialOwnerDenied;
+            const saved = try self.registry.get(asset_owner);
+            if (saved.password_ref != null) return .password_prompt;
+            return error.AuthenticationInteractionRequired;
+        }
+        fn resolveRef(raw: *anyopaque, resource_owner: identity.ResourceOwner, asset_owner: identity.AssetOwner, alloc: std.mem.Allocator) !?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (resource_owner != .session or !resource_owner.session.eql(self.owner)) return error.CredentialOwnerDenied;
+            const saved = try self.registry.get(asset_owner);
+            return if (saved.password == null) if (saved.password_ref) |ref| try alloc.dupe(u8, ref) else null else null;
+        }
+    };
+
+    const owner: identity.SessionHandle = .{ .session_id = @fromBackingInt(5) };
+    const operation: OperationKey = .{ .owner = .{ .session = owner }, .operation_id = 7, .attempt_id = 1 };
+    var host = host_api.Host.init(testing.allocator);
+    defer host.deinit();
+    var counter: auth.RequestCounter = .{};
+    var bridge = Bridge.init(owner, operation, &host, &counter);
+    defer bridge.cancel();
+
+    var provider: Provider = .{ .registry = &reg, .owner = owner };
+    const Retainer = struct {
+        fn reserve(_: *anyopaque) !void {}
+        fn release(_: *anyopaque) void {}
+        fn adopt(_: *anyopaque, _: *transport.OwnedTransport) void {}
+    };
+    var library: ssh.Library = .{ .active = false };
+    var factory: transport.Factory = .{
+        .allocator = testing.allocator,
+        .library = &library,
+        .credentials = .{ .context = &provider, .resolve = Provider.resolve, .resolve_reference = Provider.resolveRef },
+        .operation_key = operation,
+        .failed_open_owner = .{ .context = &provider, .reserve = Retainer.reserve, .release = Retainer.release, .adopt = Retainer.adopt },
+    };
+    bridge.configure(&factory);
+
+    var unsaved_route = try resolution.Resolver.init(&reg).freezeRoute(&.{unsaved_hop.id}, testing.allocator);
+    defer unsaved_route.deinit();
+    const unsaved_owned = try factory.prepareOwned(.{ .session = owner }, &unsaved_route, .connection, null);
+    defer unsaved_owned.deinit() catch unreachable;
+    try testing.expect(unsaved_owned.options[0].auth == .password_prompt);
+    try testing.expect(unsaved_owned.credential_references[0] == null);
+
+    var saved_route = try resolution.Resolver.init(&reg).freezeRoute(&.{saved_hop.id}, testing.allocator);
+    defer saved_route.deinit();
+    const saved_owned = try factory.prepareOwned(.{ .session = owner }, &saved_route, .connection, null);
+    defer saved_owned.deinit() catch unreachable;
+    try testing.expect(saved_owned.options[0].auth == .password_prompt);
+    try testing.expectEqualStrings(saved_ref, saved_owned.credential_references[0].?);
+    try saved_owned.resolveCredentials();
+    try testing.expectEqualStrings("web-saved-jump-pw", saved_owned.options[0].auth.password);
 }

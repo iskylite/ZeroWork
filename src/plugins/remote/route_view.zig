@@ -16,6 +16,13 @@ fn indexedIds(comptime format: []const u8, comptime count: usize) [count][]const
     return ids;
 }
 
+pub const ExtraAction = struct {
+    label: []const u8,
+    test_id: []const u8,
+    disabled: *ui.Signal(bool),
+    on_click: ui.Handler(void),
+};
+
 pub const Props = struct {
     locked: *ui.Signal(bool),
     insert_disabled: *ui.Signal(bool),
@@ -25,6 +32,7 @@ pub const Props = struct {
     picker_actions: RoutePicker.Actions,
     target_role: []const u8 = "目标主机",
     target_icon: ui.SvgAsset = ui.icons.server,
+    extra_action: ?ExtraAction = null,
 };
 
 pub const Choice = struct { root: *ui.Node, title: *ui.Node, mark: *ui.Node };
@@ -58,6 +66,9 @@ pub const View = struct {
     edges: [9]?Edge = @splat(null),
     controls: [8]?*route_hop.RouteHopControl = @splat(null),
     choices: [2]?Choice = @splat(null),
+    extra_button: ?*ui.Node = null,
+    extra_icon: ?*ui.Node = null,
+    extra_label: ?*ui.Node = null,
     vertical: ?bool = null,
     count: usize = 0,
 
@@ -135,6 +146,12 @@ pub const View = struct {
             choice.title.setTextColor(if (selected) S.theme.current().accent_ink else S.theme.current().fg_1);
             if (choice.root.behavior.interaction.a11y) |*access| access.pressed = selected;
         };
+        if (self.extra_button) |btn| {
+            btn.setDisplay(if (ssh) .flex else .none);
+            const colors = S.theme.current();
+            if (self.extra_icon) |icon| paintIcon(icon, ui.icons.plus, 13, colors.accent);
+            if (self.extra_label) |label| label.setTextColor(colors.accent);
+        }
     }
 };
 
@@ -149,6 +166,19 @@ pub fn naturalHeight(count: usize, vertical: bool) f32 {
     return 12 + 2 * route_endpoint_height + jumps * 52 + (jumps + 1) * 38;
 }
 
+pub fn chromeHeight(compact: bool, extra_lines: usize) f32 {
+    return @as(f32, if (compact) 276 else 284) + @as(f32, @floatFromInt(extra_lines)) * 24;
+}
+
+pub fn modalHeight(count: usize, viewport_width: f32, compact: bool, extra_lines: usize) f32 {
+    return chromeHeight(compact, extra_lines) + naturalHeight(count, isVertical(count, viewport_width));
+}
+
+pub fn chainHeight(count: usize, vertical: bool, viewport_height: f32, compact: bool, extra_lines: usize) f32 {
+    const limit = @min(S.remote_max_height, S.availableModalHeight(viewport_height, compact));
+    return @min(naturalHeight(count, vertical), @max(52, limit - chromeHeight(compact, extra_lines)));
+}
+
 pub fn mount(cx: *ui.Cx, scope: *ui.Scope, props: Props) !*View {
     const root = try ui.box(cx, .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .gap = 8, .flex_shrink = 0 }, .{});
     const card = try ui.box(cx, .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .border = .{ .radius = 12 }, .flex_shrink = 0 }, .{});
@@ -156,7 +186,49 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, props: Props) !*View {
     view.choices[0] = try mountAccessChoice(cx, scope, root, 40, "从本机直接连接", "wizard.access.direct", props.locked, props.direct);
     card.meta.ownership.meta.test_id = "wizard.route.card";
     try root.appendChild(cx.allocator, card);
-    view.choices[1] = try mountAccessChoice(cx, scope, card, 43, "经 SSH 跳板连接", "wizard.access.jump", props.locked, props.ssh);
+    if (props.extra_action) |extra| {
+        const ssh_header = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 43 }, .direction = .row, .align_items = .center, .padding = .{ .right = 16 }, .gap = 8, .flex_shrink = 0 }, .{});
+        try card.appendChild(cx.allocator, ssh_header);
+        const choice = try mountAccessChoice(cx, scope, ssh_header, 43, "经 SSH 跳板连接", "wizard.access.jump", props.locked, props.ssh);
+        choice.root.setStyleInline(cx.allocator, .{ .width = .fill(), .flex = 1, .min_width = 0 });
+        view.choices[1] = choice;
+        const colors = S.theme.current();
+        const extra_style = ui.BoxStyle{
+            .width = .{ .fit = .{} },
+            .height = .{ .px = 26 },
+            .padding = .{ .left = 8, .right = 8 },
+            .direction = .row,
+            .align_items = .center,
+            .justify = .center,
+            .gap = 4,
+            .background = ui.Color.TRANSPARENT,
+            .border = .{ .radius = 6 },
+            .flex_shrink = 0,
+        };
+        const btn = try ui.widgets.Button(.{
+            .variant = .ghost,
+            .a11y_label = extra.label,
+            .disabled = extra.disabled,
+            .base_style = extra_style,
+            .on_click = extra.on_click,
+        }).mount(scope, cx);
+        for (btn.children.items) |child| child.setDisplay(.none);
+        btn.setStyleInline(cx.allocator, extra_style);
+        btn.meta.ownership.meta.test_id = extra.test_id;
+        const icon = try ui.iconTint(cx, ui.icons.plus, colors.accent, S.icon(13));
+        try btn.appendChild(cx.allocator, icon);
+        var label_style = S.text(12, 500, false);
+        label_style.color = colors.accent;
+        const label = try ui.text(cx, extra.label, label_style);
+        try btn.appendChild(cx.allocator, label);
+        btn.setDisplay(.none);
+        try ssh_header.appendChild(cx.allocator, btn);
+        view.extra_button = btn;
+        view.extra_icon = icon;
+        view.extra_label = label;
+    } else {
+        view.choices[1] = try mountAccessChoice(cx, scope, card, 43, "经 SSH 跳板连接", "wizard.access.jump", props.locked, props.ssh);
+    }
 
     const area = try ui.widgets.ScrollArea(.{ .direction = .vertical, .rubber_band_y = false }).mount(scope, cx);
     area.container.meta.ownership.meta.test_id = "wizard.route.chain";

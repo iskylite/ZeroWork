@@ -102,6 +102,7 @@ pub const Code = enum {
     none,
     route_connected,
     tls_trusted,
+    public_identity_unrecognized,
     public_material_verified,
     firmware_verified,
     web_authenticated,
@@ -110,6 +111,7 @@ pub const Code = enum {
     request_started,
     request_completed,
     management_discovery_incomplete,
+    management_root_link_unavailable,
     resource_response_rejected,
     resource_response_partial,
     resource_fields_available,
@@ -160,6 +162,11 @@ pub const Event = struct {
     count: ?u16 = null,
     validity: ?Validity = null,
     context: ?Context = null,
+
+    pub fn isDiscoveryIssue(self: Event) bool {
+        return self.stage == .redfish_discovery and self.kind != .failure and
+            (self.error_code != null or (if (self.validity) |validity| validity != .valid else false));
+    }
 };
 pub const Snapshot = struct {
     revision: u64 = 0,
@@ -177,6 +184,8 @@ pub const Snapshot = struct {
     failure_event: ?Event = null,
     /// Preserve the first optional discovery problem across successful reads.
     discovery_issue: ?Event = null,
+    /// Preserve the identity warning even when later events evict it.
+    identity_warning: ?Event = null,
     /// Oldest first; only events[0..event_count] contain published events.
     events: [capacity]Event = @splat(.{}),
     event_count: u8 = 0,
@@ -300,8 +309,8 @@ pub const Tracker = struct {
         var published = event;
         published.sequence = self.value.revision;
         published.at_unix_ms = event.at_unix_ms orelse self.wallTime();
-        if (self.value.discovery_issue == null and event.stage == .redfish_discovery and
-            (event.error_code != null or (if (event.validity) |validity| validity != .valid else false))) self.value.discovery_issue = published;
+        if (self.value.identity_warning == null and event.code == .public_identity_unrecognized) self.value.identity_warning = published;
+        if (self.value.discovery_issue == null and event.isDiscoveryIssue()) self.value.discovery_issue = published;
         const count: usize = self.value.event_count;
         if (count == capacity) {
             std.mem.copyForwards(Event, self.value.events[0 .. capacity - 1], self.value.events[1..]);
@@ -432,6 +441,7 @@ pub fn codeLabel(code: Code) []const u8 {
         .none => "",
         .route_connected => "路由已建立",
         .tls_trusted => "TLS 证书信任已确认",
+        .public_identity_unrecognized => "未识别公开设备型号，继续连接",
         .public_material_verified => "公开脚本摘要已匹配",
         .firmware_verified => "固件版本已确认",
         .web_authenticated => "WEB 登录成功",
@@ -440,6 +450,7 @@ pub fn codeLabel(code: Code) []const u8 {
         .request_started => "请求已开始",
         .request_completed => "请求已完成",
         .management_discovery_incomplete => "管理资源发现未完成",
+        .management_root_link_unavailable => "服务根未提供可用的管理资源链接",
         .resource_response_rejected => "资源读取失败",
         .resource_response_partial => "所需管理信息未完整获取或校验未通过",
         .resource_fields_available => "所需管理信息已获取（设备附带诊断）",

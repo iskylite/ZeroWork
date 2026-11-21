@@ -1,5 +1,4 @@
-//! Evidence-gated OEM profile with reviewed public material and sanitized
-//! read-only protocol vectors for the exact Sugon 1.80 firmware family.
+//! OEM iKVM profile and public device recognition.
 const std = @import("std");
 const builtin = @import("builtin");
 const http = @import("http.zig");
@@ -61,6 +60,25 @@ fn jsonMember(value: std.json.Value, key: []const u8) ?std.json.Value {
 fn jsonText(value: std.json.Value, key: []const u8) ?[]const u8 {
     const field = jsonMember(value, key) orelse return null;
     return if (field == .string) field.string else null;
+}
+
+/// Device names are advisory when trying the installed iKVM profile.
+pub fn recognizesPublicDevice(root: std.json.Value) bool {
+    const oem = jsonMember(root, "Oem") orelse .null;
+    const public = jsonMember(oem, "Public") orelse .null;
+    const copyright = jsonMember(public, "Copyright") orelse .null;
+    const copyright_en = if (copyright == .string) copyright.string else jsonText(copyright, "EN") orelse "";
+    return recognizedProduct(jsonText(public, "ProductName") orelse "") or
+        recognizedProduct(jsonText(root, "ProductName") orelse "") or
+        recognizedProduct(jsonText(root, "Product") orelse "") or
+        hasVendorWord(copyright_en, "Sugon") or
+        hasVendorWord(jsonText(public, "Manufacturer") orelse "", "Sugon") or
+        hasVendorWord(jsonText(root, "Manufacturer") orelse "", "Sugon") or
+        hasVendorWord(jsonText(root, "Vendor") orelse "", "Sugon");
+}
+
+fn recognizedProduct(product: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(product, "SuperPod") or std.ascii.startsWithIgnoreCase(product, "scale");
 }
 
 /// Matching the family without a version only permits a bounded anonymous
@@ -208,6 +226,10 @@ fn validateFixedMaterials() !void {
 pub fn select(identity: Identity) !Profile {
     const id = try detect(identity);
     return selectReviewed(id);
+}
+
+pub fn selectForConnection() !Profile {
+    return selectReviewed(.sugon_1_80_oem_rfb);
 }
 
 fn selectReviewed(id: Id) !Profile {
