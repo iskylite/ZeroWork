@@ -180,6 +180,7 @@ pub const Surface = struct {
     modal_open: ?*ui.Signal(bool) = null,
     modal: ?ui.widgets.ModalResult = null,
     modal_text: ?*ui.Node = null,
+    modal_preview: ?ui.widgets.ScrollAreaResult = null,
 
     pub fn create(cx: *ui.Cx, host: *ui.Node, service: terminal.Service, options: Options) !*Surface {
         if (service.binding.kind != .terminal) return error.InvalidTerminalBinding;

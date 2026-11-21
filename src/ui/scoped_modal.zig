@@ -7,7 +7,11 @@ pub const Owner = union(enum) {
     node: *ui.Node,
     resolve: struct { context: *anyopaque, get: *const fn (*anyopaque) ?*ui.Node },
 };
-pub const Options = struct { owner: Owner, mode: Mode = .content };
+pub const Options = struct {
+    owner: Owner,
+    mode: Mode = .content,
+    initial_focus: ?*ui.Node = null,
+};
 
 const WindowCover = struct { node_id: u32 };
 
@@ -43,6 +47,7 @@ pub fn bind(cx: *ui.Cx, scope: *ui.Scope, modal: ui.widgets.modal.ModalResult, o
             .resolve => |resolver| .{ .resolve = .{ .context = resolver.context, .get = resolver.get } },
         },
         .mode = options.mode,
+        .initial_focus = if (options.initial_focus) |target| cx.node_registry.handleFor(target) else null,
         .barrier_color = modal.overlay.getBackground(),
         .max_width = modal.dialog.style.getExt().max_width,
         .max_height = modal.dialog.style.getExt().max_height,
@@ -64,6 +69,7 @@ pub const Binding = struct {
         resolve: struct { context: *anyopaque, get: *const fn (*anyopaque) ?*ui.Node },
     },
     mode: Mode,
+    initial_focus: ?ui.hit.NodeHandle,
     barrier_color: ui.Color,
     max_width: f32,
     max_height: f32,
@@ -165,11 +171,18 @@ pub const Binding = struct {
             if (self.cx.focus_manager.getFocused()) |focused| {
                 if (focused.isDescendantOf(node) and !self.cx.overlay_stack.allowsScopedFocus(focused)) {
                     self.prior_focus = self.cx.node_registry.handleFor(focused);
-                    self.cx.setFocus(firstFocusable(self.modal.dialog) orelse self.modal.dialog);
+                    self.cx.setFocus(self.initialFocus() orelse self.modal.dialog);
                 }
-            } else if (reveal) self.cx.setFocus(firstFocusable(self.modal.dialog));
+            } else if (reveal) self.cx.setFocus(self.initialFocus());
         }
         return changed;
+    }
+
+    fn initialFocus(self: *Binding) ?*ui.Node {
+        if (self.cx.node_registry.resolve(self.initial_focus, null)) |target| {
+            if (target.isDisplayedInTree() and target.behavior.interaction.focusable) return target;
+        }
+        return firstFocusable(self.modal.dialog);
     }
 
     fn restoreFocus(self: *Binding) void {

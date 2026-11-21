@@ -1,6 +1,8 @@
 //! Native input and selection for TerminalSurface. No shell or VT parser.
 const std = @import("std");
 const ui = @import("ui");
+const theme = @import("app_theme.zig");
+const styles = @import("terminal_styles.zig");
 const terminal = @import("../host/terminal_service.zig");
 const Surface = @import("terminal_surface.zig").Surface;
 const absolute = @import("terminal_surface.zig").absolute;
@@ -580,32 +582,55 @@ fn showPasteModal(self: *Surface) !void {
         const scope = try ui.Scope.init(self.cx.allocator, null, self.cx.owner);
         errdefer scope.dispose();
         const open = try scope.createSignal(bool, false);
-        const modal = try ui.widgets.Modal(.{ .open = open, .width = 480, .max_height = 520, .managed_focus = false, .close_on_overlay = false, .on_open_change = self.cx.on(Surface, self, modalChanged) }).mount(scope, self.cx);
+        const modal = try ui.widgets.Modal(.{ .open = open, .width = 480, .max_height = 360, .managed_focus = false, .close_on_overlay = false, .on_open_change = self.cx.on(Surface, self, modalChanged) }).mount(scope, self.cx);
         modal.overlay.meta.ownership.meta.test_id = "terminal.paste.overlay";
+        modal.dialog.meta.ownership.meta.test_id = "terminal.paste.dialog";
+        if (modal.dialog.behavior.interaction.a11y) |*a11y| a11y.label = "确认多行粘贴";
+        modal.body.setStyle(self.cx.allocator, .gap, 12);
         if (!modal.portaled) try self.host.appendChild(self.cx.allocator, modal.overlay);
-        _ = try @import("scoped_modal.zig").bind(self.cx, scope, modal, .{ .owner = .{ .node = self.host } });
         const heading = try ui.box(self.cx, .{ .width = .fill(), .direction = .row, .align_items = .center, .gap = 8, .flex_shrink = 0 }, .{});
         heading.meta.ownership.meta.test_id = "terminal.paste.heading";
-        try heading.appendChild(self.cx.allocator, try ui.iconTint(self.cx, ui.icons.clipboard_paste, @import("app_theme.zig").current().warn_ink, .{ .width = .{ .px = 18 }, .height = .{ .px = 18 }, .flex_shrink = 0 }));
-        try heading.appendChild(self.cx.allocator, try ui.text(self.cx, "确认多行粘贴", .{ .font_size = 15, .font_weight = 700, .color = @import("app_theme.zig").current().fg_1 }));
+        try heading.appendChild(self.cx.allocator, try ui.iconTint(self.cx, ui.icons.clipboard_paste, theme.current().warn_ink, .{ .width = .{ .px = 18 }, .height = .{ .px = 18 }, .flex_shrink = 0 }));
+        try heading.appendChild(self.cx.allocator, try ui.textStyled(self.cx, styles.pasteTitle, "确认多行粘贴"));
         try modal.body.appendChild(self.cx.allocator, heading);
-        try modal.body.appendChild(self.cx.allocator, try ui.text(self.cx, "以下原文将插入当前终端。广播开启时，也会发送给已批准的接收终端；换行可能提交命令，尾部不会额外追加回车。", .{ .font_size = 12, .wrap = .word }));
-        const scroll = try ui.widgets.ScrollArea(.{ .height = 260, .direction = .vertical }).mount(scope, self.cx);
-        const text = try ui.text(self.cx, "", .{ .font_size = 12, .use_monospace_font = true, .wrap = .word });
+        const hint = try ui.textStyled(self.cx, styles.pasteHint, "换行可能执行命令。广播开启时，也会发给已批准的接收终端。\n按原文插入，末尾不追加回车。");
+        hint.setStyle(self.cx.allocator, .flex_shrink, 0);
+        try modal.body.appendChild(self.cx.allocator, hint);
+        const scroll = try ui.widgets.ScrollArea(.{ .direction = .vertical, .rubber_band_y = false }).mount(scope, self.cx);
+        scroll.container.setStyleInline(self.cx.allocator, .{
+            .height = .{ .fit = .{ .max = 168 } },
+            .min_height = 0,
+            .corner_radius = 6,
+            .flex_shrink = 1,
+        });
+        scroll.container.meta.ownership.meta.test_id = "terminal.paste.preview";
+        scroll.content.setStyle(self.cx.allocator, .padding, .{ .left = 12, .right = 12, .top = 10, .bottom = 10 });
+        const text = try ui.textStyled(self.cx, styles.pastePreview, "");
+        text.meta.ownership.meta.test_id = "terminal.paste.text";
         try scroll.content.appendChild(self.cx.allocator, text);
         try modal.body.appendChild(self.cx.allocator, scroll.container);
         const buttons = try ui.hstack(self.cx, .{ .width = .fill(), .justify = .end, .gap = 8, .flex_shrink = 0 }, .{});
-        try buttons.appendChild(self.cx.allocator, try ui.widgets.Button(.{ .label = "取消", .on_click = self.cx.on(Surface, self, cancelClick) }).mount(scope, self.cx));
+        const cancel = try ui.widgets.Button(.{ .label = "取消", .variant = .ghost, .on_click = self.cx.on(Surface, self, cancelClick) }).mount(scope, self.cx);
+        cancel.meta.ownership.meta.test_id = "terminal.paste.cancel";
+        try buttons.appendChild(self.cx.allocator, cancel);
         const approve = try ui.widgets.Button(.{ .label = "确认插入", .variant = .primary, .on_click = self.cx.on(Surface, self, approveClick) }).mount(scope, self.cx);
-        try @import("app_theme.zig").stylePrimary(self.cx, scope, approve, null);
+        approve.meta.ownership.meta.test_id = "terminal.paste.confirm";
         try buttons.appendChild(self.cx.allocator, approve);
         try modal.body.appendChild(self.cx.allocator, buttons);
+        _ = try @import("scoped_modal.zig").bind(self.cx, scope, modal, .{
+            .owner = .{ .node = self.host },
+            .initial_focus = approve,
+        });
         self.modal_scope = scope;
         self.modal_open = open;
         self.modal = modal;
         self.modal_text = text;
+        self.modal_preview = scroll;
     }
     try self.modal_text.?.setTextContent(self.cx.allocator, self.pending_paste.?.text);
+    const preview = self.modal_preview.?;
+    preview.container.setStyle(self.cx.allocator, .background, theme.current().well);
+    ui.widgets.setScrollY(preview.state, preview.content, 0);
     self.modal_open.?.set(true);
 }
 pub fn buildDocument(self: *Surface) !void {

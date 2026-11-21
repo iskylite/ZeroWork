@@ -54,6 +54,18 @@ pub fn selection(t: *const ui.ThemeTokens) ui.Color {
     return t.tokens.color.accent.withAlpha(55);
 }
 
+pub fn pasteTitle(t: *const ui.ThemeTokens) ui.TextStyle {
+    return .{ .font_size = 15, .font_weight = 700, .color = t.tokens.color.fg_primary };
+}
+
+pub fn pasteHint(t: *const ui.ThemeTokens) ui.TextStyle {
+    return .{ .font_size = 12, .line_height = 17.0 / 12.0, .wrap = .word, .color = t.tokens.color.fg_secondary };
+}
+
+pub fn pastePreview(t: *const ui.ThemeTokens) ui.TextStyle {
+    return .{ .font_size = 12, .line_height = 17.0 / 12.0, .use_monospace_font = true, .wrap = .char, .color = t.tokens.color.fg_primary };
+}
+
 // Bridge copied states 236:563266 / 236:563499 / 236:563732. Insets are
 // relative to the owning terminal pane, not the window or the active tab.
 pub const message_duration_ns = 3 * @import("std").time.ns_per_s;
