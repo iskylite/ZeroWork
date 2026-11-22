@@ -76,7 +76,7 @@ test "notification actual settings switches call explicit user edit hook while m
     defer scope.dispose();
     cx.setViewport(636, 700);
     cx.root = try ui.box(cx, .{ .width = .{ .px = 636 }, .height = .{ .px = 700 } }, .{});
-    controller.model.selectPage(6);
+    controller.model.selectPage(10);
     controller.folded_sections = std.math.maxInt(u64);
     var probe: Probe = .{ .controller = &controller };
     const mounted = try view.mountPage(cx, scope, &controller, .{ .context = &probe, .changed = Probe.changed, .request_edit = Probe.request, .action = Probe.action, .edit = Probe.edit, .authorization_help = Probe.help });
@@ -109,7 +109,7 @@ test "notification actual switch preserves waiting and failed authorization feed
     defer scope.dispose();
     cx.setViewport(636, 700);
     cx.root = try ui.box(cx, .{ .width = .{ .px = 636 }, .height = .{ .px = 700 } }, .{});
-    controller.model.selectPage(6);
+    controller.model.selectPage(10);
     controller.folded_sections = std.math.maxInt(u64);
     try controller.editKey("notify", "transfer_done", .{ .boolean = false });
     var probe: Probe = .{ .controller = &controller, .feedback_on_edit = "正在等待系统通知授权结果…" };
@@ -129,7 +129,7 @@ test "notification actual switch preserves waiting and failed authorization feed
     const rebuilt = try view.mountPage(cx, scope, &controller, .{ .context = &probe, .changed = Probe.changed, .request_edit = Probe.request, .action = Probe.action, .authorization_feedback = Probe.feedback });
     try cx.root.?.appendChild(a, rebuilt.root);
     try std.testing.expectEqualStrings("系统通知授权请求失败", rebuilt.status_label.getText().?.content);
-    controller.model.selectPage(7);
+    controller.model.selectPage(11);
     mounted.refreshFooter();
     try std.testing.expect(!std.mem.eql(u8, "系统通知授权请求失败", mounted.status_label.getText().?.content));
 }
@@ -154,7 +154,7 @@ test "notification permission action follows system status and does not edit set
         defer scope.dispose();
         cx.setViewport(636, 700);
         cx.root = try ui.box(cx, .{ .width = .{ .px = 636 }, .height = .{ .px = 700 } }, .{});
-        controller.model.selectPage(6);
+        controller.model.selectPage(10);
         controller.folded_sections = std.math.maxInt(u64);
         var probe: Probe = .{ .controller = &controller, .help_text = case.help, .feedback_text = case.feedback };
         const mounted = try view.mountPage(cx, scope, &controller, .{ .context = &probe, .changed = Probe.changed, .request_edit = Probe.request, .action = Probe.action, .authorization_help = Probe.help, .authorization_feedback = Probe.feedback });

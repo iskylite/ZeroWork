@@ -95,18 +95,18 @@ pub const Model = struct {
 
 test "settings model navigates pages and edits selected value" {
     var model: Model = .{};
-    try std.testing.expectEqualStrings("外观与主题", model.page().name);
+    try std.testing.expectEqualStrings("外观主题", model.page().name);
     try std.testing.expectEqualStrings("icon_background", model.selectedKey().?.key);
     try std.testing.expectEqualStrings("transparent", model.selectedValue().?.text);
     model.selectKey(1);
     try std.testing.expectEqualStrings("theme", model.selectedKey().?.key);
     try std.testing.expectEqualStrings("dark", model.selectedValue().?.text);
     model.selectNextPage();
-    try std.testing.expectEqualStrings("快捷键", model.page().name);
+    try std.testing.expectEqualStrings("终端配置", model.page().name);
     model.value.ui.font_size = 22;
     model.original.ui.font_size = 14;
-    model.selectPage(4);
-    try std.testing.expectEqualStrings("AI 辅助", model.page().name);
+    model.selectPage(6);
+    try std.testing.expectEqualStrings("AI 助手行为", model.page().name);
     model.selectKey(1); // permission_mode, rather than the default_provider row
     try model.editSelected(.{ .text = "auto" });
     try std.testing.expectEqual(config.PermissionMode.auto, model.value.ai.permission_mode);

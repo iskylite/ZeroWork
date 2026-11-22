@@ -31,7 +31,7 @@ pub const Hooks = struct {
     authorization_feedback: ?*const fn (*anyopaque) ?[]const u8 = null,
 };
 const Row = struct { label: []const u8, section: []const u8, key: []const u8 };
-pub const modal_heights: [9]f32 = @splat(styles.geometry.panel_height);
+pub const modal_heights: [13]f32 = @splat(styles.geometry.panel_height);
 
 /// Keep a settings card inside the usable viewport.  The 32px inset is the
 /// same boundary used by the host when constraining the modal during resize.
@@ -284,13 +284,17 @@ fn mountCategory(cx: *ui.Cx, binding: *Binding, index: usize) !*ui.Node {
     }
     return switch (index) {
         0 => @import("settings_parts/settings.zig").mountContent(cx, binding),
-        1 => @import("settings_parts/settings_keys.zig").mountContent(cx, binding),
-        2 => @import("settings_parts/settings_ssh.zig").mountContent(cx, binding),
-        3 => @import("settings_parts/settings_transfer.zig").mountContent(cx, binding),
-        4 => @import("settings_parts/settings_ai.zig").mountContent(cx, binding),
-        5 => @import("settings_parts/settings_plugins.zig").mountContent(cx, binding),
-        6 => @import("settings_parts/settings_notify.zig").mountContent(cx, binding),
-        7 => @import("settings_parts/settings_data.zig").mountContent(cx, binding),
+        1 => @import("settings_parts/settings.zig").mountTerminalContent(cx, binding),
+        2 => @import("settings_parts/settings_keys.zig").mountContent(cx, binding),
+        3 => @import("settings_parts/settings_ssh.zig").mountContent(cx, binding),
+        4 => @import("settings_parts/settings_transfer.zig").mountContent(cx, binding),
+        5 => @import("settings_parts/settings_ai.zig").mountModelServices(cx, binding),
+        6 => @import("settings_parts/settings_ai.zig").mountContent(cx, binding),
+        7 => @import("settings_parts/settings_ai.zig").mountChildren(cx, binding),
+        8 => @import("settings_parts/settings_ai.zig").mountContext(cx, binding),
+        9 => @import("settings_parts/settings_plugins.zig").mountContent(cx, binding),
+        10 => @import("settings_parts/settings_notify.zig").mountContent(cx, binding),
+        11 => @import("settings_parts/settings_data.zig").mountContent(cx, binding),
         else => @import("settings_parts/settings_updates.zig").mountContent(cx, binding),
     };
 }
@@ -454,7 +458,7 @@ pub const Binding = struct {
         var message = footerStateText(self.controller);
         // Native permission callbacks outlive a field refresh and can rebuild
         // this page. Keep their feedback separate from save/validation state.
-        if (self.controller.model.page_index == 6 and (self.controller.state() == .clean or self.controller.state() == .dirty_valid)) {
+        if (self.controller.model.page_index == 10 and (self.controller.state() == .clean or self.controller.state() == .dirty_valid)) {
             if (self.hooks.authorization_feedback) |read_feedback| {
                 if (read_feedback(self.hooks.context)) |feedback| message = feedback;
             }

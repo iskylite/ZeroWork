@@ -67,9 +67,9 @@ test "settings search schema aliases mount their actual appearance section and c
     for (cases) |case| {
         var f = try Fixture.init();
         defer f.deinit();
-        f.controller.model.selectPage(2);
+        f.controller.model.selectPage(3);
         try f.controller.setSearch(case.query);
-        try std.testing.expectEqual(@as(usize, 2), f.controller.model.page_index);
+        try std.testing.expectEqual(@as(usize, 3), f.controller.model.page_index);
         const mounted = try f.mount();
         var buffer: [80]u8 = undefined;
         const id = try std.fmt.bufPrint(&buffer, "settings.appearance.{s}", .{case.section});
@@ -87,7 +87,7 @@ test "settings search schema aliases mount their actual appearance section and c
 test "settings search aliases preserve invalid raw draft and original category on clear" {
     var f = try Fixture.init();
     defer f.deinit();
-    f.controller.model.selectPage(3);
+    f.controller.model.selectPage(4);
     try std.testing.expectError(error.OutOfRange, f.controller.editRaw("ui", "font_size", "97"));
     const folds = f.controller.folded_sections;
     try f.controller.setSearch("font_size");
@@ -104,7 +104,7 @@ test "settings search aliases preserve invalid raw draft and original category o
     try std.testing.expect(raw.problem != null);
     try std.testing.expect(!f.controller.canSave());
     try f.controller.setSearch("");
-    try std.testing.expectEqual(@as(usize, 3), f.controller.model.page_index);
+    try std.testing.expectEqual(@as(usize, 4), f.controller.model.page_index);
     try std.testing.expectEqual(folds, f.controller.folded_sections);
     try std.testing.expectEqualStrings("97", f.controller.raw_fields[schema.find("ui", "font_size").?].input.?);
 }
@@ -142,7 +142,8 @@ test "settings search every scalar schema key keeps its own category and mounts 
         try std.testing.expectEqual(expected_page, f.controller.model.page_index);
         const mounted = try f.mount();
         var buffer: [96]u8 = undefined;
-        const id = if (expected_page == 0) blk: {
+        // 外观主题（0）与终端配置（1）共用同一套外观字段标识。
+        const id = if (expected_page <= 1) blk: {
             if (std.mem.eql(u8, entry.key, "theme")) break :blk "settings.theme.current";
             if (std.mem.eql(u8, entry.key, "path") or std.mem.eql(u8, entry.key, "source")) break :blk "settings.background.filename";
             if (std.mem.eql(u8, entry.key, "alignment_x") or std.mem.eql(u8, entry.key, "alignment_y")) break :blk "settings.field.alignment";

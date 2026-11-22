@@ -607,6 +607,26 @@ pub const Host = struct {
         try self.publishOperationError(window_id, owner, "工作区", "操作未完成", summary, null);
     }
 
+    pub fn publishWindowAdvisory(self: *Host, window_id: WindowId, title: []const u8, location: []const u8) !void {
+        if (self.windowFor(window_id) == null) return error.NotificationWindowClosed;
+        if (self.next_feedback == std.math.maxInt(u64)) return error.NotificationOperationIdentityExhausted;
+        const operation = self.next_feedback;
+        self.next_feedback += 1;
+        _ = try self.coordinator.publishNotification(.{
+            .definition_id = "host.feedback",
+            .owner = .{ .window_id = @backingInt(window_id), .window_only = true },
+            .operation_id = operation,
+            .event_revision = 1,
+            .phase = .succeeded,
+            .severity = .warning,
+            .title = bounded(title, 256),
+            .object_name = bounded(location, 1024),
+            .system_enabled = false,
+            // The presenter waits for the window to gain focus before showing it.
+            .attention = .{ .kind = .advisory },
+        }, try localClock());
+    }
+
     pub const OperationAction = enum(u64) { settings_problem = 1, ai_settings = 2, open_content = 3 };
     pub fn publishOperationError(self: *Host, window_id: WindowId, owner: ?ContentOwner, topic: []const u8, title: []const u8, detail: []const u8, action: ?OperationAction) !void {
         const window = self.windowFor(window_id) orelse return error.NotificationWindowClosed;

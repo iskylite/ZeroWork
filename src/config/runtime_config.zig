@@ -54,6 +54,7 @@ pub const Snapshot = struct {
         errdefer arena.deinit();
         const owned = arena.allocator();
         var copy = value;
+        try copy.cloneUnknownFields(owned, value.unknown_fields);
         copy.ui.theme = try owned.dupe(u8, value.ui.theme);
         copy.ui.font_family = try owned.dupe(u8, value.ui.font_family);
         copy.ui.font_weight = try owned.dupe(u8, value.ui.font_weight);

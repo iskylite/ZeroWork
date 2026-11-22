@@ -6,6 +6,8 @@ pub const ai_extensions = @import("ai_extensions.zig");
 pub const ai_role_templates = @import("ai_role_templates.zig");
 pub const material = @import("background_asset.zig");
 
+pub const ParseDetails = struct { line: ?usize = null, allow_unknown: bool = false };
+
 pub const Config = struct {
     /// Persisted monotonic identity of the committed global configuration.
     config_revision: u64 = 1,
@@ -21,6 +23,7 @@ pub const Config = struct {
     updates: Updates = .{},
     keys: keybindings.Map = .{},
     plugin_preferences: []const PluginPreference = &.{},
+    unknown_fields: []const UnknownField = &.{},
 
     pub fn agentPolicyRevision(self: Config) u64 {
         return self.agent_policy_revision orelse self.config_revision;
@@ -31,13 +34,25 @@ pub const Config = struct {
     }
 
     pub fn parseWithAllocator(allocator: ?std.mem.Allocator, text: []const u8) ParseError!Config {
+        return parseWithDetails(allocator, text, null);
+    }
+
+    pub fn parseWithDetails(allocator: ?std.mem.Allocator, text: []const u8, details: ?*ParseDetails) ParseError!Config {
         var result: Config = .{};
+        const allow_unknown = if (details) |diagnostic| diagnostic.allow_unknown else false;
+        var unknown: std.ArrayList(UnknownField) = .empty;
+        var filtered_keys: ?[]u8 = null;
         var section: Section = .none;
         var provider_index: ?usize = null;
+        var provider_array_started = false;
         var model_index: ?usize = null;
         var preference_index: ?usize = null;
+        var unknown_scope: UnknownSectionScope = .independent;
         var lines = std.mem.splitScalar(u8, text, '\n');
+        var line_number: usize = 0;
         while (lines.next()) |raw| {
+            line_number += 1;
+            if (details) |diagnostic| diagnostic.line = line_number;
             const line = trim(stripComment(raw));
             if (line.len == 0) continue;
             if (eq(line, "[[plugin_preferences]]")) {
@@ -58,87 +73,225 @@ pub const Config = struct {
                 section = .ai;
                 preference_index = null;
                 if (eq(line, "[[ai.providers]]")) {
-                    const i = if (provider_index) |index| index + 1 else 0;
-                    if (i == 0) {
+                    if (!provider_array_started) {
                         result.ai.providers = @constCast(&[_]AiProvider{});
                         result.ai.provider_count = 0;
+                        provider_array_started = true;
                     }
-                    const next = a.alloc(AiProvider, i + 1) catch return error.OutOfMemory;
+                    const i = result.ai.provider_count;
+                    if (i != result.ai.providers.len) return error.OutOfRange;
+                    const next_count = std.math.add(usize, i, 1) catch return error.Overflow;
+                    const next = a.alloc(AiProvider, next_count) catch return error.OutOfMemory;
                     @memcpy(next[0..i], result.ai.providers);
                     next[i] = .{};
                     result.ai.providers = next;
-                    result.ai.provider_count = i + 1;
+                    result.ai.provider_count = next_count;
                     provider_index = i;
                     model_index = null;
                 } else {
-                    const i = provider_index orelse return error.InvalidSection;
+                    const i = provider_index orelse if (provider_array_started and result.ai.provider_count > 0) result.ai.provider_count - 1 else return error.InvalidSection;
+                    if (i >= result.ai.providers.len or i >= result.ai.provider_count) return error.OutOfRange;
+                    provider_index = i;
                     const p = &result.ai.providers[i];
                     const j = p.model_count;
-                    const next = a.alloc(AiModel, j + 1) catch return error.OutOfMemory;
+                    if (j != p.models.len) return error.OutOfRange;
+                    const next_count = std.math.add(usize, j, 1) catch return error.Overflow;
+                    const next = a.alloc(AiModel, next_count) catch return error.OutOfMemory;
                     @memcpy(next[0..j], p.models);
                     next[j] = .{};
                     p.models = next;
-                    p.model_count = j + 1;
+                    p.model_count = next_count;
                     model_index = j;
                 }
                 continue;
             }
             if (line[0] == '[') {
-                preference_index = null;
-                provider_index = null;
-                model_index = null;
-                section = try parseSection(line);
+                section = parseSection(line) catch |err| block: {
+                    if (!allow_unknown) return err;
+                    unknown_scope = unknownSectionScope(line) orelse return err;
+                    switch (unknown_scope) {
+                        .independent => {
+                            preference_index = null;
+                            provider_index = null;
+                            model_index = null;
+                        },
+                        .provider, .model => {
+                            if (provider_index == null and provider_array_started and result.ai.provider_count > 0) provider_index = result.ai.provider_count - 1;
+                            const i = provider_index orelse return err;
+                            if (i >= result.ai.providers.len or i >= result.ai.provider_count) return error.OutOfRange;
+                            if (unknown_scope == .model and result.ai.providers[i].model_count > result.ai.providers[i].models.len) return error.OutOfRange;
+                            if (unknown_scope == .model and model_index == null and result.ai.providers[i].model_count > 0) model_index = result.ai.providers[i].model_count - 1;
+                            if (unknown_scope == .model and model_index == null) return err;
+                            if (unknown_scope == .model and model_index.? >= result.ai.providers[i].model_count) return error.OutOfRange;
+                        },
+                        .preference => {
+                            if (preference_index == null and result.plugin_preferences.len > 0) preference_index = result.plugin_preferences.len - 1;
+                            if (preference_index == null) return err;
+                        },
+                    }
+                    const a = allocator orelse return error.RequiresAllocator;
+                    unknown.append(a, unknownSectionField(line_number, line, unknown_scope, provider_index, model_index, preference_index, true)) catch return error.OutOfMemory;
+                    break :block .unknown;
+                };
+                if (section != .unknown) {
+                    preference_index = null;
+                    provider_index = null;
+                    model_index = null;
+                }
                 continue;
             }
-            if (section == .keys) continue;
+            if (section == .keys) {
+                if (!allow_unknown) continue;
+                const separator = assignmentSeparator(line) orelse return error.InvalidAssignment;
+                const key = trim(line[0..separator]);
+                if (!eq(key, "layout_version") and std.meta.stringToEnum(keybindings.Action, key) == null) {
+                    var trailing = line;
+                    _ = nextAssignment(&trailing);
+                    if (trim(trailing).len != 0) return error.InvalidAssignment;
+                    try recordUnknown(allocator, &unknown, .{ .line = line_number, .assignment = line, .section = section }, key, trim(line[separator + 1 ..]), text, &lines, &line_number, details, &trailing, &filtered_keys);
+                    const a = allocator orelse return error.RequiresAllocator;
+                    if (filtered_keys == null) filtered_keys = a.dupe(u8, text) catch return error.OutOfMemory;
+                    const offset = @intFromPtr(raw.ptr) - @intFromPtr(text.ptr);
+                    const assignment = unknown.items[unknown.items.len - 1].assignment;
+                    const end = @max(offset + raw.len, @intFromPtr(assignment.ptr) - @intFromPtr(text.ptr) + assignment.len);
+                    for (filtered_keys.?[offset..end]) |*byte| if (byte.* != '\n') {
+                        byte.* = ' ';
+                    };
+                }
+                continue;
+            }
             var remaining = line;
             while (nextAssignment(&remaining)) |raw_pair| {
                 const pair = trim(raw_pair);
                 if (pair.len == 0) continue;
-                const separator = std.mem.indexOfScalar(u8, pair, '=') orelse return error.InvalidAssignment;
+                const separator = assignmentSeparator(pair) orelse return error.InvalidAssignment;
                 const key = trim(pair[0..separator]);
                 const value = trim(pair[separator + 1 ..]);
-                if (preference_index) |i| {
+                if (section == .none and allow_unknown) {
+                    try recordUnknown(allocator, &unknown, .{ .line = line_number, .assignment = pair, .section = section }, key, value, text, &lines, &line_number, details, &remaining, &filtered_keys);
+                } else if (section == .unknown) {
+                    try recordUnknown(allocator, &unknown, unknownSectionField(line_number, pair, unknown_scope, provider_index, model_index, preference_index, false), key, value, text, &lines, &line_number, details, &remaining, &filtered_keys);
+                } else if (preference_index) |i| {
                     const preference = &@constCast(result.plugin_preferences)[i];
-                    if (eq(key, "plugin_id")) preference.plugin_id = try parseOwnedString(allocator, value) else if (eq(key, "key")) preference.key = try parseOwnedString(allocator, value) else if (eq(key, "value")) preference.value = try parseOwnedString(allocator, value) else return error.UnknownKey;
+                    if (eq(key, "plugin_id")) preference.plugin_id = try parseOwnedString(allocator, value) else if (eq(key, "key")) preference.key = try parseOwnedString(allocator, value) else if (eq(key, "value")) preference.value = try parseOwnedString(allocator, value) else {
+                        if (!allow_unknown) return error.UnknownKey;
+                        try recordUnknown(allocator, &unknown, .{ .line = line_number, .assignment = pair, .section = section, .preference_index = i }, key, value, text, &lines, &line_number, details, &remaining, &filtered_keys);
+                    }
                 } else if (provider_index) |i| {
+                    if (!isKnownProviderField(key, model_index != null)) {
+                        if (!allow_unknown) return error.UnknownKey;
+                        try recordUnknown(allocator, &unknown, .{ .line = line_number, .assignment = pair, .section = section, .provider_index = i, .model_index = model_index }, key, value, text, &lines, &line_number, details, &remaining, &filtered_keys);
+                        continue;
+                    }
                     var key_buffer: [128]u8 = undefined;
                     const field = if (eq(key, "name") and model_index != null) "id" else if (eq(key, "id") and model_index == null) "name" else key;
                     const flat = if (model_index) |j| std.fmt.bufPrint(&key_buffer, "provider_{d}_model_{d}_{s}", .{ i, j, field }) catch return error.InvalidValue else std.fmt.bufPrint(&key_buffer, "provider_{d}_{s}", .{ i, field }) catch return error.InvalidValue;
                     try result.applyProvider(allocator, flat, value);
-                } else try result.apply(allocator, section, key, value);
+                } else result.apply(allocator, section, key, value) catch |err| {
+                    if (err != error.UnknownKey or !allow_unknown) return err;
+                    try recordUnknown(allocator, &unknown, .{ .line = line_number, .assignment = pair, .section = section }, key, value, text, &lines, &line_number, details, &remaining, &filtered_keys);
+                };
             }
         }
+        // Counts in legacy input may precede their fields, but must be valid
+        // before resolving owners or trimming placeholders.
+        try result.validateEntityCounts();
+        if (provider_array_started and result.ai.provider_count != result.ai.providers.len) return error.OutOfRange;
+        for (unknown.items) |*field| {
+            if (field.section != .ai or field.provider_index != null or field.is_section) continue;
+            const owner = legacyUnknownOwner(field.assignment) orelse continue;
+            if (owner.provider_index >= result.ai.provider_count) continue;
+            const provider = result.ai.providers[owner.provider_index];
+            if (owner.model_index) |i| if (i >= provider.model_count) continue;
+            field.provider_index = owner.provider_index;
+            field.model_index = owner.model_index;
+            field.assignment_key_offset = owner.key_offset;
+        }
         // Retire only untouched protocol placeholders left by older versions.
-        if (allocator != null and result.ai.provider_count > 0) {
+        if (allocator) |a| if (result.ai.provider_count > 0) {
+            if (result.ai.providers.ptr == default_providers[0..].ptr) {
+                result.ai.providers = a.dupe(AiProvider, result.ai.providers) catch return error.OutOfMemory;
+            }
             var count: usize = 0;
-            for (result.ai.providers[0..@min(result.ai.provider_count, result.ai.providers.len)]) |provider| {
-                if (!provider.enabled and provider.name.len == 0 and provider.endpoint.len == 0 and provider.api_key.len == 0 and provider.api_key_ref == null and provider.model_count == 0 and provider.model.len == 0) continue;
+            for (result.ai.providers[0..result.ai.provider_count], 0..) |provider, original_index| {
+                var has_unknown = false;
+                for (unknown.items) |field| if (field.provider_index != null and field.provider_index.? == original_index) {
+                    has_unknown = true;
+                    break;
+                };
+                if (!has_unknown and !provider.enabled and provider.name.len == 0 and provider.endpoint.len == 0 and provider.api_key.len == 0 and provider.api_key_ref == null and provider.model_count == 0 and provider.model.len == 0) continue;
+                for (unknown.items) |*field| if (field.provider_index != null and field.provider_index.? == original_index) {
+                    field.provider_index = count;
+                };
                 result.ai.providers[count] = provider;
                 count += 1;
             }
             result.ai.provider_count = count;
             result.ai.providers = result.ai.providers[0..count];
+        };
+        // Capture stable identities after placeholder removal and index remapping.
+        for (unknown.items) |*field| {
+            if (field.provider_index) |i| {
+                if (i >= result.ai.provider_count) return error.OutOfRange;
+                field.provider_name = result.ai.providers[i].name;
+                field.provider_signature = providerSignature(result.ai.providers[i]);
+                for (result.ai.providers[0..result.ai.provider_count]) |provider| if (eq(provider.name, field.provider_name)) {
+                    field.provider_name_count += 1;
+                    if (providerSignature(provider) == field.provider_signature) field.provider_signature_count += 1;
+                };
+                if (field.model_index) |j| {
+                    if (j >= result.ai.providers[i].model_count) return error.OutOfRange;
+                    field.model_name = result.ai.providers[i].models[j].id;
+                    field.model_signature = modelSignature(result.ai.providers[i].models[j]);
+                    const provider = result.ai.providers[i];
+                    for (provider.models[0..provider.model_count]) |model| if (eq(model.id, field.model_name)) {
+                        field.model_name_count += 1;
+                        if (modelSignature(model) == field.model_signature) field.model_signature_count += 1;
+                    };
+                }
+            }
+            if (field.preference_index) |i| {
+                const preference = result.plugin_preferences[i];
+                field.preference_plugin_id = preference.plugin_id;
+                field.preference_key = preference.key;
+            }
         }
-        result.keys = keybindings.Map.parse(text) catch return error.InvalidValue;
+        if (details) |diagnostic| diagnostic.line = null;
+        result.keys = keybindings.Map.parse(if (filtered_keys) |filtered| filtered else text) catch return error.InvalidValue;
+        if (allocator) |a| result.unknown_fields = unknown.toOwnedSlice(a) catch return error.OutOfMemory;
         try result.validate();
         return result;
     }
 
     pub fn format(self: Config, buffer: []u8) ![]const u8 {
+        try self.validateEntityCounts();
+        try self.validateUnknownOwners();
         var writer = std.Io.Writer.fixed(buffer);
-        try writer.print("[meta]\nconfig_revision = {d}\n\n", .{self.config_revision});
+        try self.writeUnknown(&writer, .none, null, null, null);
+        try writer.print("[meta]\nconfig_revision = {d}\n", .{self.config_revision});
+        try self.writeUnknown(&writer, .meta, null, null, null);
+        try writer.writeByte('\n');
         try writer.print("[ui]\nicon_background = \"{s}\"\ntheme = \"{s}\"\nfont_family = \"{s}\"\nfont_size = {d}\nfont_weight = \"{s}\"\nline_height = {d}\ncursor_style = \"{s}\"\nsidebar_collapsed = {}\ninput_line_highlight = {}\ntimestamp_gutter = {}\ncommand_info = {}\nscrollback_limit = {d}\n\n", .{ @tagName(self.ui.icon_background), self.ui.theme, self.ui.font_family, self.ui.font_size, self.ui.font_weight, self.ui.line_height, self.ui.cursor_style, self.ui.sidebar_collapsed, self.ui.input_line_highlight, self.ui.timestamp_gutter, self.ui.command_info, self.ui.scrollback_limit });
         if (self.ui.sidebar_width) |width| try writer.print("sidebar_width = {d}\n\n", .{width});
+        try self.writeUnknown(&writer, .ui, null, null, null);
         const background = self.ui.materials.background;
-        try writer.print("[ui.materials]\nblur_px = {d}\n\n[ui.materials.background]\nenabled = {}\npath = ", .{ self.ui.materials.blur_px, background.enabled });
+        try writer.print("[ui.materials]\nblur_px = {d}\n", .{self.ui.materials.blur_px});
+        try self.writeUnknown(&writer, .@"ui.materials", null, null, null);
+        try writer.print("\n[ui.materials.background]\nenabled = {}\npath = ", .{background.enabled});
         try std.json.Stringify.value(background.path, .{}, &writer);
         try writer.print("\nsource = \"{s}\"\norder = \"{s}\"\ninterval_minutes = {d}", .{ @tagName(background.source), @tagName(background.order), background.interval_minutes });
         try writer.print("\nfit = \"{s}\"\nalignment_x = \"{s}\"\nalignment_y = \"{s}\"\ntransparency = {d}\n\n", .{ @tagName(background.fit), @tagName(background.alignment_x), @tagName(background.alignment_y), background.transparency });
-        try writer.print("[updates]\nauto_check = {}\n\n", .{self.updates.auto_check});
-        try writer.print("[completion]\nenabled = {}\n\n", .{self.completion.enabled});
+        try self.writeUnknown(&writer, .@"ui.materials.background", null, null, null);
+        try writer.print("[updates]\nauto_check = {}\n", .{self.updates.auto_check});
+        try self.writeUnknown(&writer, .updates, null, null, null);
+        try writer.writeByte('\n');
+        try writer.print("[completion]\nenabled = {}\n", .{self.completion.enabled});
+        try self.writeUnknown(&writer, .completion, null, null, null);
+        try writer.writeByte('\n');
         try writer.print("[transfer]\ndedicated_connection = {}\nwindow_chunks = {d}\nchunk_kb = {d}\ndownload_dir = \"{s}\"\nverify_md5 = {}\nshared_pacing_kbps = {d}\nresume = {}\nmax_tasks = {d}\nconflict_policy = \"{s}\"\n\n", .{ self.transfer.dedicated_connection, self.transfer.window_chunks, self.transfer.chunk_kb, self.transfer.download_dir, self.transfer.verify_md5, self.transfer.shared_pacing_kbps, self.transfer.@"resume", self.transfer.max_tasks, self.transfer.conflict_policy });
+        try self.writeUnknown(&writer, .transfer, null, null, null);
         try writer.print("[ssh]\nkeepalive_sec = {d}\nreconnect_max = {d}\nreconnect_backoff = [{d},{d},{d},{d},{d}]\nconnect_timeout_sec = {d}\nterm = \"{s}\"\ncompression = {}\nauto_shell_integration = {}\nauto_reconnect = {}\nbuffer_input = {}\nsocks_port = {d}\nsocks_bind = \"{s}\"\notp_modal = {}\ntotp_autofill = {}\n\n", .{ self.ssh.keepalive_sec, self.ssh.reconnect_max, self.ssh.reconnect_backoff[0], self.ssh.reconnect_backoff[1], self.ssh.reconnect_backoff[2], self.ssh.reconnect_backoff[3], self.ssh.reconnect_backoff[4], self.ssh.connect_timeout_sec, self.ssh.term, self.ssh.compression, self.ssh.auto_shell_integration, self.ssh.auto_reconnect, self.ssh.buffer_input, self.ssh.socks_port, self.ssh.socks_bind, self.ssh.otp_modal, self.ssh.totp_autofill });
+        try self.writeUnknown(&writer, .ssh, null, null, null);
         try writer.print("[ai]\ndefault_provider = \"{s}\"\npermission_mode = \"{s}\"\nexecution_mode = \"{s}\"\nsession_retention = \"{s}\"\nfollow_up_mode = \"{s}\"\nstep_display = \"{s}\"\nredact_ip = {}\nerror_hint = {}\nprovider_count = {d}\n", .{ self.ai.default_provider, @tagName(self.ai.permission_mode), @tagName(self.ai.execution_mode), @tagName(self.ai.session_retention), @tagName(self.ai.follow_up_mode), @tagName(self.ai.step_display), self.ai.redact_ip, self.ai.error_hint, self.ai.provider_count });
         if (self.ai.default_effort) |effort| try writer.print("default_effort = \"{s}\"\n", .{@tagName(effort)});
         try writer.print("child_context_mode = \"{s}\"\nchild_reuse_policy = \"{s}\"\n", .{ @tagName(self.ai.child_context_mode), @tagName(self.ai.child_reuse_policy) });
@@ -160,12 +313,19 @@ pub const Config = struct {
             try std.json.Stringify.value(encoded, .{}, &writer);
             try writer.writeAll("\n");
         }
+        try self.writeUnknown(&writer, .ai, null, null, null);
         var has_provider = false;
         for (self.ai.providers) |p| if (p.endpoint.len > 0 or p.api_key.len > 0 or p.api_key_ref != null or p.name.len > 0 or p.model_count > 0 or p.enabled) {
             has_provider = true;
             break;
         };
-        if (has_provider) for (self.ai.providers[0..self.ai.provider_count]) |p| {
+        if (!has_provider) for (self.unknown_fields) |field| {
+            if (field.provider_index != null) {
+                has_provider = true;
+                break;
+            }
+        };
+        if (has_provider) for (self.ai.providers[0..self.ai.provider_count], 0..) |p, provider_i| {
             const id = p.name;
             try writer.print("[[ai.providers]]\nid = \"{s}\"\nkind = \"{s}\"\nendpoint = \"{s}\"\n", .{ id, @tagName(p.kind), p.endpoint });
             if (p.api_key_ref) |reference| {
@@ -178,7 +338,9 @@ pub const Config = struct {
                 try writer.writeByte('\n');
             }
             try writer.print("enabled = {}\n", .{p.enabled});
-            for (p.models[0..p.model_count]) |m| {
+            try self.writeUnknown(&writer, .ai, provider_i, null, null);
+            try self.writeUnknown(&writer, .unknown, provider_i, null, null);
+            for (p.models[0..p.model_count], 0..) |m, model_i| {
                 try writer.print("[[ai.providers.models]]\nname = \"{s}\"\ncontext_window = {d}\ndefault = {}\nreasoning = {}\nvision = {}\nefforts = [", .{ m.id, m.context_window, m.default, m.reasoning, m.vision });
                 const names = [_][]const u8{ "low", "medium", "high", "xhigh", "max", "none", "ultra" };
                 var first = true;
@@ -192,14 +354,19 @@ pub const Config = struct {
                 if (m.image_token_reservation) |reservation| try writer.print("image_token_reservation = {d}\n", .{reservation});
                 if (m.image_token_max_width) |value| try writer.print("image_token_max_width = {d}\n", .{value});
                 if (m.image_token_max_height) |value| try writer.print("image_token_max_height = {d}\n", .{value});
+                try self.writeUnknown(&writer, .ai, provider_i, model_i, null);
+                try self.writeUnknown(&writer, .unknown, provider_i, model_i, null);
             }
         };
         try writer.writeAll("\n");
         try writer.print("[log]\nring_mb = {d}\ncheckpoint_sec = {d}\nretention_days = {d}\nexport_format = \"{s}\"\n\n", .{ self.log.ring_mb, self.log.checkpoint_sec, self.log.retention_days, self.log.export_format });
+        try self.writeUnknown(&writer, .log, null, null, null);
         try writer.print("[notify]\ntransfer_done = {}\nreconnect = {}\nai_ready = {}\nbell = {}\ntab_dot = {}\nquiet_hours = \"{s}\"\n\n", .{ self.notify.transfer_done, self.notify.reconnect, self.notify.ai_ready, self.notify.bell, self.notify.tab_dot, self.notify.quiet_hours });
+        try self.writeUnknown(&writer, .notify, null, null, null);
         var key_buffer: [4096]u8 = undefined;
         try writer.writeAll(try self.keys.format(&key_buffer));
-        for (self.plugin_preferences) |preference| {
+        try self.writeUnknown(&writer, .keys, null, null, null);
+        for (self.plugin_preferences, 0..) |preference, preference_i| {
             try writer.writeAll("\n[[plugin_preferences]]\nplugin_id = ");
             try std.json.Stringify.value(preference.plugin_id, .{}, &writer);
             try writer.writeAll("\nkey = ");
@@ -207,8 +374,110 @@ pub const Config = struct {
             try writer.writeAll("\nvalue = ");
             try std.json.Stringify.value(preference.value, .{}, &writer);
             try writer.writeAll("\n");
+            try self.writeUnknown(&writer, .plugin_preferences, null, null, preference_i);
+            try self.writeUnknown(&writer, .unknown, null, null, preference_i);
         }
+        try self.writeUnknown(&writer, .unknown, null, null, null);
         return writer.buffered();
+    }
+
+    /// Clone preserved assignments and owner identities into the caller's arena.
+    pub fn cloneUnknownFields(self: *Config, allocator: std.mem.Allocator, fields: []const UnknownField) !void {
+        const copy = try allocator.alloc(UnknownField, fields.len);
+        for (copy, fields) |*dst, src| {
+            dst.* = src;
+            dst.assignment = try allocator.dupe(u8, src.assignment);
+            dst.provider_name = try allocator.dupe(u8, src.provider_name);
+            dst.model_name = try allocator.dupe(u8, src.model_name);
+            dst.preference_plugin_id = try allocator.dupe(u8, src.preference_plugin_id);
+            dst.preference_key = try allocator.dupe(u8, src.preference_key);
+        }
+        self.unknown_fields = copy;
+    }
+
+    fn unknownProviderIndex(self: Config, field: UnknownField) !usize {
+        var first: ?usize = null;
+        var same_name: usize = 0;
+        var same_signature: usize = 0;
+        var signature_index: usize = 0;
+        for (self.ai.providers[0..self.ai.provider_count], 0..) |provider, index| {
+            if (!eq(provider.name, field.provider_name)) continue;
+            if (first == null) first = index;
+            same_name += 1;
+            if (providerSignature(provider) == field.provider_signature) {
+                same_signature += 1;
+                signature_index = index;
+            }
+        }
+        if (same_name == 0) return error.MissingUnknownFieldOwner;
+        if (field.provider_signature_count > 1 and same_signature < field.provider_signature_count) return error.AmbiguousUnknownFieldOwner;
+        if (same_name == 1) {
+            if (field.provider_name_count > 1 and same_signature != 1) return error.AmbiguousUnknownFieldOwner;
+            return first.?;
+        }
+        if (same_signature == 1) return signature_index;
+        if (same_signature > 1) {
+            const index = field.provider_index.?;
+            if (index < self.ai.provider_count and eq(self.ai.providers[index].name, field.provider_name) and providerSignature(self.ai.providers[index]) == field.provider_signature) return index;
+        }
+        return error.AmbiguousUnknownFieldOwner;
+    }
+
+    fn unknownModelIndex(self: Config, field: UnknownField, provider_index: usize) !usize {
+        const provider = self.ai.providers[provider_index];
+        var first: ?usize = null;
+        var same_name: usize = 0;
+        var same_signature: usize = 0;
+        var signature_index: usize = 0;
+        for (provider.models[0..provider.model_count], 0..) |model, index| {
+            if (!eq(model.id, field.model_name)) continue;
+            if (first == null) first = index;
+            same_name += 1;
+            if (modelSignature(model) == field.model_signature) {
+                same_signature += 1;
+                signature_index = index;
+            }
+        }
+        if (same_name == 0) return error.MissingUnknownFieldOwner;
+        if (field.model_signature_count > 1 and same_signature < field.model_signature_count) return error.AmbiguousUnknownFieldOwner;
+        if (same_name == 1) {
+            if (field.model_name_count > 1 and same_signature != 1) return error.AmbiguousUnknownFieldOwner;
+            return first.?;
+        }
+        if (same_signature == 1) return signature_index;
+        if (same_signature > 1) {
+            const index = field.model_index.?;
+            if (index < provider.model_count and eq(provider.models[index].id, field.model_name) and modelSignature(provider.models[index]) == field.model_signature) return index;
+        }
+        return error.AmbiguousUnknownFieldOwner;
+    }
+
+    fn unknownPreferenceIndex(self: Config, field: UnknownField) !usize {
+        for (self.plugin_preferences, 0..) |preference, index| {
+            if (eq(preference.plugin_id, field.preference_plugin_id) and eq(preference.key, field.preference_key)) return index;
+        }
+        return error.MissingUnknownFieldOwner;
+    }
+
+    fn validateUnknownOwners(self: Config) !void {
+        for (self.unknown_fields) |field| {
+            if (field.provider_index != null) {
+                const index = try self.unknownProviderIndex(field);
+                if (field.model_index != null) _ = try self.unknownModelIndex(field, index);
+            }
+            if (field.preference_index != null) _ = try self.unknownPreferenceIndex(field);
+        }
+    }
+
+    fn writeUnknown(self: Config, writer: *std.Io.Writer, section: Section, provider_index: ?usize, model_index: ?usize, preference_index: ?usize) !void {
+        for (self.unknown_fields) |field| {
+            if (field.section != section or (field.provider_index == null) != (provider_index == null) or
+                (field.model_index == null) != (model_index == null) or (field.preference_index == null) != (preference_index == null)) continue;
+            if (provider_index) |index| if (try self.unknownProviderIndex(field) != index) continue;
+            if (model_index) |index| if (try self.unknownModelIndex(field, provider_index.?) != index) continue;
+            if (preference_index) |index| if (try self.unknownPreferenceIndex(field) != index) continue;
+            try writer.print("{s}\n", .{field.assignment[field.assignment_key_offset..]});
+        }
     }
 
     pub fn pluginPreference(self: Config, plugin_id: []const u8, key: []const u8) ?[]const u8 {
@@ -293,26 +562,29 @@ pub const Config = struct {
                 if (eq(key, "transfer_done")) self.notify.transfer_done = try parseBool(value) else if (eq(key, "reconnect")) self.notify.reconnect = try parseBool(value) else if (eq(key, "ai_ready")) self.notify.ai_ready = try parseBool(value) else if (eq(key, "bell")) self.notify.bell = try parseBool(value) else if (eq(key, "tab_dot")) self.notify.tab_dot = try parseBool(value) else if (eq(key, "quiet_hours")) self.notify.quiet_hours = try parseString(value) else return error.UnknownKey;
             },
             .keys => unreachable,
-            .plugin_preferences => return error.InvalidSection,
+            .plugin_preferences, .unknown => return error.InvalidSection,
             .none => return error.MissingSection,
         }
     }
 
     fn applyProvider(self: *Config, allocator: ?std.mem.Allocator, key: []const u8, value: []const u8) ParseError!void {
+        // Reject unknown flat fields before allocating from their untrusted indexes.
+        if (!isKnownFlatProviderField(key)) return error.UnknownKey;
         if (!std.mem.startsWith(u8, key, "provider_")) return error.UnknownKey;
         const rest = key[9..];
         const sep = std.mem.indexOfScalar(u8, rest, '_') orelse return error.UnknownKey;
         const i = try parseInt(usize, rest[0..sep]);
+        const provider_count = std.math.add(usize, i, 1) catch return error.Overflow;
         const a = allocator orelse return error.RequiresAllocator;
         if (i >= self.ai.providers.len) {
-            const next = a.alloc(AiProvider, i + 1) catch return error.OutOfMemory;
+            const next = a.alloc(AiProvider, provider_count) catch return error.OutOfMemory;
             @memcpy(next[0..self.ai.providers.len], self.ai.providers);
             @memset(next[self.ai.providers.len..], .{});
             self.ai.providers = next;
         } else if (self.ai.providers.ptr == default_providers[0..].ptr) {
             self.ai.providers = a.dupe(AiProvider, self.ai.providers) catch return error.OutOfMemory;
         }
-        self.ai.provider_count = @max(self.ai.provider_count, i + 1);
+        self.ai.provider_count = @max(self.ai.provider_count, provider_count);
         const suffix = rest[sep + 1 ..];
         const p = &self.ai.providers[i];
         if (eq(suffix, "name")) {
@@ -323,8 +595,9 @@ pub const Config = struct {
             const fields = suffix[6..];
             const split = std.mem.indexOfScalar(u8, fields, '_') orelse return error.UnknownKey;
             const j = try parseInt(usize, fields[0..split]);
+            const model_count = std.math.add(usize, j, 1) catch return error.Overflow;
             if (j >= p.models.len) {
-                const next = a.alloc(AiModel, j + 1) catch return error.OutOfMemory;
+                const next = a.alloc(AiModel, model_count) catch return error.OutOfMemory;
                 @memcpy(next[0..p.models.len], p.models);
                 @memset(next[p.models.len..], .{});
                 p.models = next;
@@ -360,6 +633,13 @@ pub const Config = struct {
         }
     }
 
+    fn validateEntityCounts(self: Config) ParseError!void {
+        if (self.ai.provider_count > self.ai.providers.len) return error.OutOfRange;
+        for (self.ai.providers[0..self.ai.provider_count]) |provider| {
+            if (provider.model_count > provider.models.len) return error.OutOfRange;
+        }
+    }
+
     pub fn validate(self: Config) ParseError!void {
         if (self.plugin_preferences.len > 1024) return error.OutOfRange;
         for (self.plugin_preferences, 0..) |preference, i| {
@@ -368,12 +648,11 @@ pub const Config = struct {
         }
         if (self.config_revision == 0) return error.OutOfRange;
         self.ai.extensions.validate() catch return error.InvalidValue;
-        if (self.ai.provider_count > self.ai.providers.len) return error.OutOfRange;
+        try self.validateEntityCounts();
         for (self.ai.providers[0..self.ai.provider_count]) |p| {
             for ([_][]const u8{ p.name, p.endpoint, p.api_key, p.model }) |text| {
                 if (std.mem.indexOfAny(u8, text, "\"\\\n\r;#") != null) return error.InvalidValue;
             }
-            if (p.model_count > p.models.len) return error.OutOfRange;
             if (p.enabled and p.model_count > 0 and p.endpoint.len == 0) return error.InvalidValue;
             for (p.models[0..p.model_count]) |m| {
                 if (std.mem.indexOfAny(u8, m.id, "\"\\\n\r;#") != null) return error.InvalidValue;
@@ -555,23 +834,339 @@ pub const Updates = struct { auto_check: bool = true };
 
 pub const Notify = struct { transfer_done: bool = false, reconnect: bool = true, ai_ready: bool = false, bell: bool = false, tab_dot: bool = true, quiet_hours: []const u8 = "22:00-08:00" };
 
-const Section = enum { plugin_preferences, none, meta, ui, @"ui.materials", @"ui.materials.background", completion, transfer, ssh, ai, log, notify, updates, keys };
+const Section = enum { plugin_preferences, unknown, none, meta, ui, @"ui.materials", @"ui.materials.background", completion, transfer, ssh, ai, log, notify, updates, keys };
+
+/// Unknown assignment text borrows the input, just like ordinary parsed strings.
+pub const UnknownField = struct {
+    line: usize,
+    assignment: []const u8,
+    section: Section,
+    is_section: bool = false,
+    // Legacy flat keys keep their original text for diagnostics, but are
+    // written without this prefix inside their owning array table.
+    assignment_key_offset: usize = 0,
+    provider_index: ?usize = null,
+    model_index: ?usize = null,
+    preference_index: ?usize = null,
+    provider_name: []const u8 = "",
+    model_name: []const u8 = "",
+    provider_signature: u64 = 0,
+    model_signature: u64 = 0,
+    provider_name_count: usize = 0,
+    provider_signature_count: usize = 0,
+    model_name_count: usize = 0,
+    model_signature_count: usize = 0,
+    preference_plugin_id: []const u8 = "",
+    preference_key: []const u8 = "",
+};
+
+fn providerSignature(provider: AiProvider) u64 {
+    var hash = std.hash.Wyhash.init(0);
+    hash.update(provider.name);
+    hash.update("\x00");
+    hash.update(@tagName(provider.kind));
+    hash.update("\x00");
+    hash.update(provider.endpoint);
+    for (provider.models[0..@min(provider.model_count, provider.models.len)]) |model| {
+        hash.update("\x00");
+        hash.update(model.id);
+    }
+    return hash.final();
+}
+
+fn modelSignature(model: AiModel) u64 {
+    var hash = std.hash.Wyhash.init(0);
+    hash.update(model.id);
+    hash.update(std.mem.asBytes(&model.context_window));
+    return hash.final();
+}
+
+fn recordUnknown(
+    allocator: ?std.mem.Allocator,
+    fields: *std.ArrayList(UnknownField),
+    initial: UnknownField,
+    key: []const u8,
+    value: []const u8,
+    text: []const u8,
+    lines: *std.mem.SplitIterator(u8, .scalar),
+    line_number: *usize,
+    details: ?*ParseDetails,
+    remaining: *[]const u8,
+    filtered_keys: *?[]u8,
+) ParseError!void {
+    if (!validUnknownKey(key)) return error.InvalidAssignment;
+    if (value.len == 0) return error.InvalidValue;
+    const a = allocator orelse return error.RequiresAllocator;
+    var field = initial;
+    var scan: UnknownValueScanner = .{};
+    try scan.feed(value);
+    if (!scan.complete()) {
+        if (trim(remaining.*).len != 0 or (scan.quote != 0 and !scan.multiline)) return error.InvalidValue;
+        const start = @intFromPtr(initial.assignment.ptr) - @intFromPtr(text.ptr);
+        while (lines.next()) |raw| {
+            line_number.* += 1;
+            if (details) |diagnostic| diagnostic.line = line_number.*;
+            scan.comment = false;
+            try scan.feed(raw);
+            if (scan.complete()) {
+                const end = @intFromPtr(raw.ptr) - @intFromPtr(text.ptr) + raw.len;
+                field.assignment = text[start..end];
+                break;
+            }
+            if (scan.quote != 0 and !scan.multiline) return error.InvalidValue;
+        }
+        if (!scan.complete()) return error.InvalidValue;
+    }
+    // A literal "[keys]" in a multi-line unknown value is not a section.
+    if (std.mem.indexOfScalar(u8, field.assignment, '\n') != null) {
+        if (filtered_keys.* == null) filtered_keys.* = a.dupe(u8, text) catch return error.OutOfMemory;
+        const start = @intFromPtr(field.assignment.ptr) - @intFromPtr(text.ptr);
+        const end = start + field.assignment.len;
+        for (filtered_keys.*.?[start..end]) |*byte| if (byte.* != '\n') {
+            byte.* = ' ';
+        };
+    }
+    fields.append(a, field) catch return error.OutOfMemory;
+}
+
+const UnknownValueScanner = struct {
+    stack: [128]u8 = undefined,
+    depth: usize = 0,
+    quote: u8 = 0,
+    multiline: bool = false,
+    escaped: bool = false,
+    comment: bool = false,
+    terminal: bool = false,
+
+    fn complete(self: UnknownValueScanner) bool {
+        return self.depth == 0 and self.quote == 0;
+    }
+
+    fn feed(self: *UnknownValueScanner, input: []const u8) ParseError!void {
+        var i: usize = 0;
+        while (i < input.len) : (i += 1) {
+            const byte = input[i];
+            if (self.comment) continue;
+            if (self.quote != 0) {
+                if (self.quote == '"' and !self.escaped and byte == '\\') {
+                    self.escaped = true;
+                    continue;
+                }
+                if (!self.escaped and byte == self.quote) {
+                    if (self.multiline) {
+                        if (i + 2 < input.len and input[i + 1] == byte and input[i + 2] == byte) {
+                            self.quote = 0;
+                            self.multiline = false;
+                            i += 2;
+                            if (self.depth == 0) self.terminal = true;
+                        }
+                    } else {
+                        self.quote = 0;
+                        if (self.depth == 0) self.terminal = true;
+                    }
+                }
+                self.escaped = false;
+                continue;
+            }
+            if (byte == '#') {
+                self.comment = true;
+                continue;
+            }
+            if (byte == ' ' or byte == '\t' or byte == '\r') continue;
+            if (self.terminal) return error.InvalidValue;
+            if (byte == '"' or byte == '\'') {
+                self.quote = byte;
+                self.multiline = i + 2 < input.len and input[i + 1] == byte and input[i + 2] == byte;
+                if (self.multiline) i += 2;
+            } else if (byte == '[' or byte == '{') {
+                if (self.depth == self.stack.len) return error.InvalidValue;
+                self.stack[self.depth] = byte;
+                self.depth += 1;
+            } else if (byte == ']' or byte == '}') {
+                if (self.depth == 0 or (byte == ']' and self.stack[self.depth - 1] != '[') or (byte == '}' and self.stack[self.depth - 1] != '{')) return error.InvalidValue;
+                self.depth -= 1;
+                if (self.depth == 0) self.terminal = true;
+            }
+        }
+    }
+};
+
+fn validUnknownKey(key: []const u8) bool {
+    var i: usize = 0;
+    while (true) {
+        while (i < key.len and (key[i] == ' ' or key[i] == '\t')) : (i += 1) {}
+        if (i == key.len) return false;
+        if (key[i] == '"' or key[i] == '\'') {
+            const quote = key[i];
+            i += 1;
+            var closed = false;
+            while (i < key.len) : (i += 1) {
+                if (key[i] < 0x20 or key[i] == 0x7f) return false;
+                if (quote == '"' and key[i] == '\\') {
+                    i += 1;
+                    if (i == key.len or std.mem.indexOfScalar(u8, "\"\\btnfruU", key[i]) == null) return false;
+                    continue;
+                }
+                if (key[i] == quote) {
+                    i += 1;
+                    closed = true;
+                    break;
+                }
+            }
+            if (!closed) return false;
+        } else {
+            const start = i;
+            while (i < key.len and (std.ascii.isAlphanumeric(key[i]) or key[i] == '_' or key[i] == '-')) : (i += 1) {}
+            if (i == start) return false;
+        }
+        while (i < key.len and (key[i] == ' ' or key[i] == '\t')) : (i += 1) {}
+        if (i == key.len) return true;
+        if (key[i] != '.') return false;
+        i += 1;
+    }
+}
+
+const UnknownSectionScope = enum { independent, provider, model, preference };
+
+fn unknownSectionField(line: usize, assignment: []const u8, scope: UnknownSectionScope, provider: ?usize, model: ?usize, preference: ?usize, is_section: bool) UnknownField {
+    return .{
+        .line = line,
+        .assignment = assignment,
+        .section = .unknown,
+        .is_section = is_section,
+        .provider_index = if (scope == .provider or scope == .model) provider else null,
+        .model_index = if (scope == .model) model else null,
+        .preference_index = if (scope == .preference) preference else null,
+    };
+}
+
+fn unknownSectionScope(line: []const u8) ?UnknownSectionScope {
+    if (line.len < 3 or line[0] != '[' or line[line.len - 1] != ']') return null;
+    const array = line.len >= 4 and line[1] == '[';
+    if (array and line[line.len - 2] != ']') return null;
+    const name = trim(if (array) line[2 .. line.len - 2] else line[1 .. line.len - 1]);
+    if (!validUnknownKey(name)) return null;
+    var segments: [4][]const u8 = @splat("");
+    var count: usize = 0;
+    var i: usize = 0;
+    while (i < name.len) {
+        while (i < name.len and (name[i] == ' ' or name[i] == '\t')) : (i += 1) {}
+        const quoted = name[i] == '"' or name[i] == '\'';
+        const quote: u8 = if (quoted) name[i] else 0;
+        if (quoted) i += 1;
+        const start = i;
+        while (i < name.len and (if (quoted) name[i] != quote else name[i] != '.' and name[i] != ' ' and name[i] != '\t')) : (i += 1) {
+            // Escaped table segments require full TOML decoding to classify.
+            if (quoted and name[i] == '\\') return null;
+        }
+        if (count < segments.len) segments[count] = name[start..i];
+        count += 1;
+        if (quoted) i += 1;
+        while (i < name.len and (name[i] == ' ' or name[i] == '\t')) : (i += 1) {}
+        if (i < name.len) i += 1; // dot, validated above
+    }
+    const first = segments[0];
+    const second = segments[1];
+    const third = segments[2];
+    if (eq(first, "ai") and count > 1 and eq(second, "providers")) {
+        if (count == 2) return null;
+        if (eq(third, "models")) return if (count > 3) .model else null;
+        return .provider;
+    }
+    if (eq(first, "plugin_preferences")) return if (count > 1) .preference else null;
+    if (count == 1 and std.mem.indexOfScalar(u8, first, '.') == null) {
+        if (std.meta.stringToEnum(Section, first)) |section| {
+            if (section != .unknown and section != .none) return null;
+        }
+    }
+    if (eq(first, "ui") and count >= 2 and eq(second, "materials") and (count == 2 or (count == 3 and eq(third, "background")))) return null;
+    return .independent;
+}
+
+fn legacyUnknownOwner(assignment: []const u8) ?struct { provider_index: usize, model_index: ?usize, key_offset: usize } {
+    if (!std.mem.startsWith(u8, assignment, "provider_")) return null;
+    const separator = assignmentSeparator(assignment) orelse return null;
+    const key = trim(assignment[0..separator]);
+    const rest = key[9..];
+    const split = std.mem.indexOfScalar(u8, rest, '_') orelse return null;
+    if (split == 0) return null;
+    for (rest[0..split]) |byte| if (!std.ascii.isDigit(byte)) return null;
+    const provider_index = std.fmt.parseInt(usize, rest[0..split], 10) catch return null;
+    var offset = 9 + split + 1;
+    var suffix = key[offset..];
+    if (suffix.len == 0) return null;
+    var model_index: ?usize = null;
+    if (std.mem.startsWith(u8, suffix, "model_")) {
+        const model = suffix[6..];
+        if (std.mem.indexOfScalar(u8, model, '_')) |model_split| {
+            var digits = model_split > 0;
+            for (model[0..model_split]) |byte| if (!std.ascii.isDigit(byte)) {
+                digits = false;
+                break;
+            };
+            if (digits) {
+                model_index = std.fmt.parseInt(usize, model[0..model_split], 10) catch return null;
+                offset += 6 + model_split + 1;
+                suffix = key[offset..];
+                if (suffix.len == 0) return null;
+            }
+        }
+    }
+    // An old unknown key such as provider_0_id must not overwrite a known
+    // array-table key when the saved configuration is read again.
+    if (isKnownProviderField(suffix, model_index != null)) return null;
+    return .{ .provider_index = provider_index, .model_index = model_index, .key_offset = offset };
+}
+
+fn isKnownProviderField(key: []const u8, model: bool) bool {
+    const provider_fields = [_][]const u8{ "id", "name", "kind", "endpoint", "api_key", "api_key_ref", "enabled", "model_count" };
+    const model_fields = [_][]const u8{ "id", "name", "context_window", "default", "catalog_managed", "reasoning", "vision", "image_token_reservation", "image_token_max_width", "image_token_max_height", "efforts" };
+    const fields: []const []const u8 = if (model) &model_fields else &provider_fields;
+    for (fields) |field| if (eq(key, field)) return true;
+    if (!model and std.mem.startsWith(u8, key, "model_")) {
+        const rest = key[6..];
+        const split = std.mem.indexOfScalar(u8, rest, '_') orelse return false;
+        if (split == 0) return false;
+        for (rest[0..split]) |byte| if (!std.ascii.isDigit(byte)) return false;
+        return isKnownProviderField(rest[split + 1 ..], true) and !eq(rest[split + 1 ..], "name");
+    }
+    return false;
+}
+
+fn isKnownFlatProviderField(key: []const u8) bool {
+    if (!std.mem.startsWith(u8, key, "provider_")) return false;
+    const rest = key[9..];
+    const sep = std.mem.indexOfScalar(u8, rest, '_') orelse return false;
+    if (sep == 0) return false;
+    for (rest[0..sep]) |byte| if (!std.ascii.isDigit(byte)) return false;
+    const suffix = rest[sep + 1 ..];
+    if (isKnownProviderField(suffix, false) and !eq(suffix, "id")) return true;
+    if (!std.mem.startsWith(u8, suffix, "model_")) return false;
+    const model = suffix[6..];
+    const split = std.mem.indexOfScalar(u8, model, '_') orelse return false;
+    if (split == 0) return false;
+    for (model[0..split]) |byte| if (!std.ascii.isDigit(byte)) return false;
+    return isKnownProviderField(model[split + 1 ..], true) and !eq(model[split + 1 ..], "name");
+}
+
 pub const ParseError = error{ InvalidSection, InvalidAssignment, InvalidValue, InvalidExecutionMode, InvalidSessionRetention, UnknownKey, MissingSection, OutOfRange, Overflow, RequiresAllocator, OutOfMemory };
 
 fn parseSection(line: []const u8) ParseError!Section {
     if (line.len < 3 or line[line.len - 1] != ']') return error.InvalidSection;
-    return std.meta.stringToEnum(Section, line[1 .. line.len - 1]) orelse error.InvalidSection;
+    const section = std.meta.stringToEnum(Section, line[1 .. line.len - 1]) orelse return error.InvalidSection;
+    if (section == .unknown or section == .none or section == .plugin_preferences) return error.InvalidSection;
+    return section;
 }
 fn stripComment(line: []const u8) []const u8 {
-    var quoted = false;
+    var quote: u8 = 0;
     var escaped = false;
     for (line, 0..) |byte, index| {
-        if (quoted and !escaped and byte == '\\') {
+        if (quote == '"' and !escaped and byte == '\\') {
             escaped = true;
             continue;
         }
-        if (!escaped and byte == '"') quoted = !quoted;
-        if (!quoted and byte == '#') return line[0..index];
+        if (!escaped and quote == 0 and (byte == '"' or byte == '\'')) quote = byte else if (!escaped and quote != 0 and byte == quote) quote = 0;
+        if (quote == 0 and byte == '#') return line[0..index];
         escaped = false;
     }
     return line;
@@ -579,15 +1174,15 @@ fn stripComment(line: []const u8) []const u8 {
 fn nextAssignment(remaining: *[]const u8) ?[]const u8 {
     if (remaining.len == 0) return null;
     const text = remaining.*;
-    var quoted = false;
+    var quote: u8 = 0;
     var escaped = false;
     for (text, 0..) |byte, index| {
-        if (quoted and !escaped and byte == '\\') {
+        if (quote == '"' and !escaped and byte == '\\') {
             escaped = true;
             continue;
         }
-        if (!escaped and byte == '"') quoted = !quoted;
-        if (!quoted and byte == ';') {
+        if (!escaped and quote == 0 and (byte == '"' or byte == '\'')) quote = byte else if (!escaped and quote != 0 and byte == quote) quote = 0;
+        if (quote == 0 and byte == ';') {
             remaining.* = text[index + 1 ..];
             return text[0..index];
         }
@@ -595,6 +1190,20 @@ fn nextAssignment(remaining: *[]const u8) ?[]const u8 {
     }
     remaining.* = "";
     return text;
+}
+fn assignmentSeparator(pair: []const u8) ?usize {
+    var quote: u8 = 0;
+    var escaped = false;
+    for (pair, 0..) |byte, index| {
+        if (quote == '"' and !escaped and byte == '\\') {
+            escaped = true;
+            continue;
+        }
+        if (!escaped and quote == 0 and (byte == '"' or byte == '\'')) quote = byte else if (!escaped and quote != 0 and byte == quote) quote = 0;
+        if (quote == 0 and byte == '=') return index;
+        escaped = false;
+    }
+    return null;
 }
 fn trim(value: []const u8) []const u8 {
     return std.mem.trim(u8, value, " \t\r");
@@ -924,4 +1533,268 @@ test "efficiency bounded image calibration validates and roundtrips paired dimen
     try std.testing.expectEqual(@as(?u32, 1920), restored.ai.providers[0].models[0].image_token_max_width);
     try std.testing.expectEqual(@as(?u32, 1200), restored.ai.providers[0].models[0].image_token_max_height);
     try std.testing.expectError(error.OutOfRange, Config.parseWithAllocator(arena.allocator(), prefix ++ "image_token_max_width=1920\n"));
+}
+
+test "unknown fields preserve their owning sections and entities" {
+    const source =
+        "[ui]\nfont_size=17\nfuture_ui = [1, 2, 3]\n" ++
+        "[ui.materials]\nfuture_blur = { strength = 1 }\n" ++
+        "[ai]\nprovider_999999999999999999999_future = 5\n" ++
+        "[[ai.providers]]\nid=\"first\"\nprovider_future=\"first-value\"\n" ++
+        "[[ai.providers.models]]\nname=\"first-model\"\nmodel_future=true\n" ++
+        "[[ai.providers]]\nid=\"second\"\nprovider_future=\"second-value\"\n" ++
+        "[[plugin_preferences]]\nplugin_id=\"plugin.one\"\nkey=\"setting\"\nvalue=\"one\"\npreference_future=42\n" ++
+        "[keys]\nfuture_action=\"cmd+shift+u\"\n";
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var details: ParseDetails = .{ .allow_unknown = true };
+    const parsed = try Config.parseWithDetails(allocator, source, &details);
+    try std.testing.expectEqual(@as(u8, 17), parsed.ui.font_size);
+    try std.testing.expectEqual(@as(usize, 8), parsed.unknown_fields.len);
+    try std.testing.expectEqual(@as(usize, 3), parsed.unknown_fields[0].line);
+    // Moving a provider must not move its future settings to the other one.
+    std.mem.reverse(AiProvider, parsed.ai.providers);
+    var buffer: [16384]u8 = undefined;
+    const encoded = try parsed.format(&buffer);
+    var again_details: ParseDetails = .{ .allow_unknown = true };
+    const again = try Config.parseWithDetails(allocator, encoded, &again_details);
+    try std.testing.expectEqual(@as(usize, 8), again.unknown_fields.len);
+    for (again.unknown_fields) |field| {
+        if (eq(field.assignment, "provider_future=\"first-value\"")) try std.testing.expectEqualStrings("first", field.provider_name);
+        if (eq(field.assignment, "provider_future=\"second-value\"")) try std.testing.expectEqualStrings("second", field.provider_name);
+        if (eq(field.assignment, "model_future=true")) {
+            try std.testing.expectEqualStrings("first", field.provider_name);
+            try std.testing.expectEqualStrings("first-model", field.model_name);
+        }
+        if (eq(field.assignment, "preference_future=42")) {
+            try std.testing.expectEqualStrings("plugin.one", field.preference_plugin_id);
+            try std.testing.expectEqualStrings("setting", field.preference_key);
+        }
+    }
+    try std.testing.expect(std.mem.indexOf(u8, encoded, "future_ui = [1, 2, 3]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, encoded, "future_action=\"cmd+shift+u\"") != null);
+}
+
+test "configuration input safety preserves legacy provider and model unknown owners" {
+    const source =
+        "[ai]\nprovider_count=2\n" ++
+        "provider_0_future = [1,\n 2]\n" ++
+        "provider_0_model_0_future = \"first\"\n" ++
+        "provider_0_model_1_future = \"second\"\n" ++
+        "provider_1_future = \"other\"\n" ++
+        "provider_999999999999999999999_future = 5\n" ++
+        "provider_0_model_999999999999999999999_future = 6\n" ++
+        "provider_9_future = 7\nprovider_0_model_9_future = 8\n" ++
+        "provider_0_id = \"must-not-overwrite\"\n" ++
+        "provider_0_model_0_name = \"must-not-overwrite\"\n" ++
+        "provider_0_name=\"one\"\nprovider_0_model_count=2\n" ++
+        "provider_0_model_0_id=\"first-model\"\nprovider_0_model_1_id=\"second-model\"\n" ++
+        "provider_1_name=\"two\"\n";
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var details: ParseDetails = .{ .allow_unknown = true };
+    const parsed = try Config.parseWithDetails(allocator, source, &details);
+    try std.testing.expectEqual(@as(usize, 10), parsed.unknown_fields.len);
+    try std.testing.expectEqualStrings("provider_0_future = [1,\n 2]", parsed.unknown_fields[0].assignment);
+    try std.testing.expectEqualStrings("one", parsed.unknown_fields[0].provider_name);
+    try std.testing.expectEqualStrings("first-model", parsed.unknown_fields[1].model_name);
+    std.mem.reverse(AiProvider, parsed.ai.providers);
+    std.mem.reverse(AiModel, parsed.ai.providers[1].models);
+    var cloned = parsed;
+    try cloned.cloneUnknownFields(allocator, parsed.unknown_fields);
+    var buffer: [16384]u8 = undefined;
+    const encoded = try cloned.format(&buffer);
+    const first_provider = std.mem.indexOf(u8, encoded, "[[ai.providers]]").?;
+    for ([_][]const u8{
+        "provider_999999999999999999999_future = 5",
+        "provider_0_model_999999999999999999999_future = 6",
+        "provider_9_future = 7",
+        "provider_0_model_9_future = 8",
+        "provider_0_id = \"must-not-overwrite\"",
+        "provider_0_model_0_name = \"must-not-overwrite\"",
+    }) |unresolved| try std.testing.expect(std.mem.indexOf(u8, encoded, unresolved).? < first_provider);
+    var again_details: ParseDetails = .{ .allow_unknown = true };
+    const again = try Config.parseWithDetails(allocator, encoded, &again_details);
+    try std.testing.expectEqual(parsed.unknown_fields.len, again.unknown_fields.len);
+    for (again.unknown_fields) |field| {
+        if (eq(field.assignment, "future = [1,\n 2]")) try std.testing.expectEqualStrings("one", field.provider_name);
+        if (eq(field.assignment, "future = \"other\"")) try std.testing.expectEqualStrings("two", field.provider_name);
+        if (eq(field.assignment, "future = \"first\"")) try std.testing.expectEqualStrings("first-model", field.model_name);
+        if (eq(field.assignment, "future = \"second\"")) try std.testing.expectEqualStrings("second-model", field.model_name);
+    }
+    cloned.ai.providers[1].name = "replacement";
+    try std.testing.expectError(error.MissingUnknownFieldOwner, cloned.format(&buffer));
+}
+
+test "configuration input safety migrates legacy fields from array tables" {
+    const source = "[ai]\nprovider_0_future=1\nprovider_0_model_0_future=2\n" ++
+        "[[ai.providers]]\nid=\"one\"\n[[ai.providers.models]]\nname=\"model\"\n";
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var details: ParseDetails = .{ .allow_unknown = true };
+    const parsed = try Config.parseWithDetails(arena.allocator(), source, &details);
+    var buffer: [8192]u8 = undefined;
+    const encoded = try parsed.format(&buffer);
+    try std.testing.expect(std.mem.indexOf(u8, encoded, "id = \"one\"").? < std.mem.indexOf(u8, encoded, "future=1").?);
+    try std.testing.expect(std.mem.indexOf(u8, encoded, "name = \"model\"").? < std.mem.indexOf(u8, encoded, "future=2").?);
+    const again = try Config.parseWithDetails(arena.allocator(), encoded, &details);
+    try std.testing.expectEqualStrings("one", again.unknown_fields[0].provider_name);
+    try std.testing.expectEqualStrings("model", again.unknown_fields[1].model_name);
+
+    // An unknown field can be the only data on a legacy placeholder slot.
+    const placeholder = try Config.parseWithDetails(arena.allocator(), "[ai]\nprovider_count=1\nprovider_0_future=true\n", &details);
+    try std.testing.expectEqual(@as(usize, 1), placeholder.ai.provider_count);
+    _ = try placeholder.format(&buffer);
+}
+
+test "configuration input safety rejects invalid counts and oversized indexes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const cases = [_]struct { source: []const u8, line: usize }{
+        .{ .source = "[[ai.providers]]\nid=\"p\"\n[ai]\nprovider_count=3\n[ai.providers.future]\nflag=true\n", .line = 5 },
+        .{ .source = "[[ai.providers]]\nid=\"p\"\n[ai]\nprovider_count=3\n[ai.providers.models.future]\nflag=true\n", .line = 5 },
+        .{ .source = "[[ai.providers]]\nid=\"p\"\n[ai]\nprovider_count=3\n[[ai.providers]]\n", .line = 5 },
+        .{ .source = "[[ai.providers]]\nid=\"p\"\nmodel_count=3\n[[ai.providers.models]]\n", .line = 4 },
+        .{ .source = "[[ai.providers]]\nid=\"p\"\n[[ai.providers.models]]\nname=\"m\"\n[ai]\nprovider_0_model_count=0\n[[ai.providers.models]]\n", .line = 7 },
+    };
+    for (cases) |case| {
+        var details: ParseDetails = .{ .allow_unknown = true };
+        try std.testing.expectError(error.OutOfRange, Config.parseWithDetails(arena.allocator(), case.source, &details));
+        try std.testing.expectEqual(@as(?usize, case.line), details.line);
+    }
+    var details: ParseDetails = .{ .allow_unknown = true };
+    try std.testing.expectError(error.OutOfRange, Config.parseWithDetails(arena.allocator(), "[ai]\nprovider_count=4\n", &details));
+    try std.testing.expectError(error.OutOfRange, Config.parseWithDetails(arena.allocator(), "[ai]\nprovider_0_model_count=1\n", &details));
+    const provider_overflow = try std.fmt.allocPrint(arena.allocator(), "[ai]\nprovider_{d}_name=\"p\"\n", .{std.math.maxInt(usize)});
+    const model_overflow = try std.fmt.allocPrint(arena.allocator(), "[ai]\nprovider_0_model_{d}_id=\"m\"\n", .{std.math.maxInt(usize)});
+    try std.testing.expectError(error.Overflow, Config.parseWithDetails(arena.allocator(), provider_overflow, &details));
+    try std.testing.expectError(error.Overflow, Config.parseWithDetails(arena.allocator(), model_overflow, &details));
+    var invalid: Config = .{};
+    invalid.ai.provider_count = invalid.ai.providers.len + 1;
+    var buffer: [8192]u8 = undefined;
+    try std.testing.expectError(error.OutOfRange, invalid.format(&buffer));
+}
+
+test "configuration input safety captures owners after placeholder removal" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var details: ParseDetails = .{ .allow_unknown = true };
+    const parsed = try Config.parseWithDetails(arena.allocator(), "[[ai.providers]]\nid=\"\"\n[[ai.providers]]\nid=\"\"\nfuture=true\n", &details);
+    try std.testing.expectEqual(@as(usize, 1), parsed.ai.provider_count);
+    var buffer: [8192]u8 = undefined;
+    try std.testing.expect(std.mem.indexOf(u8, try parsed.format(&buffer), "future=true") != null);
+}
+
+test "unknown fields do not hide malformed known settings or guess deleted owners" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var details: ParseDetails = .{ .allow_unknown = true };
+    try std.testing.expectError(error.InvalidAssignment, Config.parseWithDetails(allocator, "[ui]\nmissing_equals\n", &details));
+    try std.testing.expectError(error.InvalidAssignment, Config.parseWithDetails(allocator, "[ui]\nbad field = 3\n", &details));
+    try std.testing.expectError(error.InvalidValue, Config.parseWithDetails(allocator, "[ui]\nfont_size = false\n", &details));
+    try std.testing.expectError(error.InvalidValue, Config.parseWithDetails(allocator, "[ui]\nfuture = \n", &details));
+    const source = "[[ai.providers]]\nid=\"old\"\nfuture=true\n";
+    var parsed = try Config.parseWithDetails(allocator, source, &details);
+    parsed.ai.providers[0].name = "replacement";
+    var buffer: [8192]u8 = undefined;
+    try std.testing.expectError(error.MissingUnknownFieldOwner, parsed.format(&buffer));
+}
+
+test "unknown field clone owns assignment and entity identity" {
+    var source_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    const source_allocator = source_arena.allocator();
+    const text = try source_allocator.dupe(u8, "[[ai.providers]]\nid=\"provider\"\nfuture=\"value\"\n");
+    var details: ParseDetails = .{ .allow_unknown = true };
+    const parsed = try Config.parseWithDetails(source_allocator, text, &details);
+    var destination_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer destination_arena.deinit();
+    var destination: Config = .{};
+    try destination.cloneUnknownFields(destination_arena.allocator(), parsed.unknown_fields);
+    source_arena.deinit();
+    try std.testing.expectEqualStrings("future=\"value\"", destination.unknown_fields[0].assignment);
+    try std.testing.expectEqualStrings("provider", destination.unknown_fields[0].provider_name);
+}
+
+test "unknown fields in independent tables and multiline values round trip" {
+    const source =
+        "[future]\noptions = [\n  \"alpha#beta\", # comment\n  { tag = 'semi;#colon' },\n]\n" ++
+        "\"key=with=equals\" = 'a#b'\n" ++
+        "[[future.workers]]\nname=\"first\"\n[[future.workers]]\nname=\"second\"\n" ++
+        "[unknown]\nvalue = \"\"\"\n[keys]\nnot_a_shortcut = bad\n\"\"\"\n" ++
+        "[ui]\nfont_size=17\n";
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var details: ParseDetails = .{ .allow_unknown = true };
+    const parsed = try Config.parseWithDetails(arena.allocator(), source, &details);
+    try std.testing.expectEqual(@as(u8, 17), parsed.ui.font_size);
+    var buffer: [16384]u8 = undefined;
+    const encoded = try parsed.format(&buffer);
+    var again_details: ParseDetails = .{ .allow_unknown = true };
+    const again = try Config.parseWithDetails(arena.allocator(), encoded, &again_details);
+    try std.testing.expectEqual(parsed.unknown_fields.len, again.unknown_fields.len);
+    try std.testing.expect(std.mem.indexOf(u8, encoded, "[future]\noptions = [\n  \"alpha#beta\", # comment\n  { tag = 'semi;#colon' },\n]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, encoded, "[keys]\nnot_a_shortcut = bad\n\"\"\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, encoded, "\"key=with=equals\" = 'a#b'") != null);
+    try std.testing.expectError(error.InvalidValue, Config.parseWithDetails(arena.allocator(), "[ui]\nfuture = [1\n", &details));
+    try std.testing.expectError(error.InvalidSection, Config.parseWithDetails(arena.allocator(), "[future\nvalue=1\n", &details));
+}
+
+test "unknown fields allow unchanged duplicate and empty entity names" {
+    const source =
+        "[[ai.providers]]\nid=\"\"\nfirst_future=true\n" ++
+        "[[ai.providers]]\nid=\"\"\nsecond_future=true\n";
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var details: ParseDetails = .{ .allow_unknown = true };
+    var parsed = try Config.parseWithDetails(arena.allocator(), source, &details);
+    var buffer: [16384]u8 = undefined;
+    const encoded = try parsed.format(&buffer);
+    try std.testing.expect(std.mem.indexOf(u8, encoded, "first_future=true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, encoded, "second_future=true") != null);
+    parsed.ai.provider_count = 1;
+    try std.testing.expectError(error.AmbiguousUnknownFieldOwner, parsed.format(&buffer));
+}
+
+test "unknown fields preserve top-level keys and nested provider tables" {
+    const source =
+        "future_top=true\n" ++
+        "[[ai.providers]]\nid=\"one\"\n" ++
+        "[ai.providers.future]\nprovider_flag=1\n" ++
+        "[[ai.providers.future.extra]]\nentry=\"owned-by-one\"\n" ++
+        "[[ai.providers.models]]\nname=\"model-one\"\n" ++
+        "[ai.providers.models.future]\nmodel_flag=2\n" ++
+        "[standalone]\nflag=true\n" ++
+        "[ai.providers.models.more]\nmore_flag=3\n" ++
+        "[[ai.providers]]\nid=\"two\"\n" ++
+        "[ai.providers.future]\nprovider_flag=4\n" ++
+        "[[plugin_preferences]]\nplugin_id=\"plugin.id\"\nkey=\"option\"\nvalue=\"v\"\n" ++
+        "[plugin_preferences.future]\npreference_flag=5\n";
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var details: ParseDetails = .{ .allow_unknown = true };
+    var parsed = try Config.parseWithDetails(arena.allocator(), source, &details);
+    try std.testing.expectEqual(@as(usize, 2), parsed.ai.provider_count);
+    try std.testing.expectEqualStrings("one", parsed.ai.providers[0].name);
+    try std.testing.expectEqualStrings("two", parsed.ai.providers[1].name);
+    std.mem.reverse(AiProvider, parsed.ai.providers);
+    var buffer: [16384]u8 = undefined;
+    const encoded = try parsed.format(&buffer);
+    try std.testing.expect(std.mem.startsWith(u8, encoded, "future_top=true\n[meta]"));
+    var again_details: ParseDetails = .{ .allow_unknown = true };
+    const again = try Config.parseWithDetails(arena.allocator(), encoded, &again_details);
+    try std.testing.expectEqual(@as(usize, 2), again.ai.provider_count);
+    for (again.unknown_fields) |field| {
+        if (eq(field.assignment, "provider_flag=1") or eq(field.assignment, "entry=\"owned-by-one\"")) try std.testing.expectEqualStrings("one", field.provider_name);
+        if (eq(field.assignment, "provider_flag=4")) try std.testing.expectEqualStrings("two", field.provider_name);
+        if (eq(field.assignment, "model_flag=2") or eq(field.assignment, "more_flag=3")) {
+            try std.testing.expectEqualStrings("one", field.provider_name);
+            try std.testing.expectEqualStrings("model-one", field.model_name);
+        }
+        if (eq(field.assignment, "preference_flag=5")) try std.testing.expectEqualStrings("plugin.id", field.preference_plugin_id);
+    }
+    try std.testing.expectError(error.InvalidSection, Config.parseWithDetails(arena.allocator(), "[ai.providers.future]\nflag=true\n", &details));
+    try std.testing.expectError(error.MissingSection, Config.parse("future_top=true\n"));
 }

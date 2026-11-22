@@ -64,7 +64,7 @@ pub const Controller = struct {
     close_ready: bool = false,
     search_query: []const u8 = "",
     search_return_page: ?usize = null,
-    scroll_offsets: [9]f32 = @splat(0),
+    scroll_offsets: [13]f32 = @splat(0),
     role_template_editor: ?usize = null,
     folded_sections: u64 = std.math.maxInt(u64),
     plugin_page: plugins.State,
@@ -126,7 +126,7 @@ pub const Controller = struct {
         self.model.value = owned.value;
         self.refreshDirty();
     }
-        pub fn setPluginPreference(self: *Controller, plugin_id: []const u8, key: []const u8, value: []const u8) !void {
+    pub fn setPluginPreference(self: *Controller, plugin_id: []const u8, key: []const u8, value: []const u8) !void {
         try self.ensureEditable();
         const manifest = self.plugin_page.registry_source.find(plugin_id) orelse return error.UnknownPlugin;
         const section = manifest.settings_section orelse return error.UnknownKey;
@@ -253,28 +253,32 @@ pub const Controller = struct {
     }
 
     pub fn validationProblem(self: *const Controller) ?ValidationProblem {
+        const settings_pages = @import("settings_pages.zig");
         for (self.raw_fields, 0..) |field, index| if (field.problem != null and self.fieldApplicable(index)) {
             const entry = schema.fields[index];
             var page: usize = 0;
-            for (@import("settings_pages.zig").pages, 0..) |candidate, i| if (std.mem.eql(u8, entry.page, candidate.name)) {
+            for (settings_pages.pages, 0..) |candidate, i| if (std.mem.eql(u8, entry.page, candidate.name)) {
                 page = i;
                 break;
             };
             return .{ .page = page, .field_index = index, .message = if (std.mem.eql(u8, entry.key, "quiet_hours")) "勿扰时段：请输入 HH:MM-HH:MM，例如 22:00-08:00。" else "此项的格式或数值无效，请按字段说明修正。" };
         };
-        if (self.transferPolicyProblem() != null) return .{ .page = 3, .message = "传输窗口超过内存预算，请减小分块大小、滑动窗口或并发任务数。" };
-        for (self.ai_fields.fields.items) |raw| if (raw.problem) |err| return .{ .page = 4, .ai_address = raw.address, .message = ai_draft.problemText(err) };
+        if (self.transferPolicyProblem() != null) return .{ .page = settings_pages.transfer_index, .message = "传输窗口超过内存预算，请减小分块大小、滑动窗口或并发任务数。" };
+        for (self.ai_fields.fields.items) |raw| if (raw.problem) |err| return .{ .page = settings_pages.ai_models_index, .ai_address = raw.address, .message = ai_draft.problemText(err) };
         if (self.dirty_fields.isSet(schema.providers_index) or self.dirty_fields.isSet(schema.find("ai", "default_provider").?)) {
-            if (ai_draft.firstProblem(self.model.value.ai)) |problem| return .{ .page = 4, .ai_address = problem.address, .message = ai_draft.problemText(problem.err) };
+            if (ai_draft.firstProblem(self.model.value.ai)) |problem| {
+                if (problem.err == error.InvalidDefaultProvider) return .{ .page = settings_pages.ai_behavior_index, .field_index = schema.find("ai", "default_provider"), .message = ai_draft.problemText(problem.err) };
+                return .{ .page = settings_pages.ai_models_index, .ai_address = problem.address, .message = ai_draft.problemText(problem.err) };
+            }
         }
         if (self.ai_fields.new_provider) |i| {
-            if (i >= self.model.value.ai.provider_count) return .{ .page = 4, .message = "新增服务提供方尚未完成，请完成配置或取消新增。" };
-            if (ai_draft.connectionProblem(self.model.value.ai.providers[i], i)) |problem| return .{ .page = 4, .ai_address = problem.address, .message = ai_draft.problemText(problem.err) };
+            if (i >= self.model.value.ai.provider_count) return .{ .page = settings_pages.ai_models_index, .message = "新增服务提供方尚未完成，请完成配置或取消新增。" };
+            if (ai_draft.connectionProblem(self.model.value.ai.providers[i], i)) |problem| return .{ .page = settings_pages.ai_models_index, .ai_address = problem.address, .message = ai_draft.problemText(problem.err) };
         }
         if (self.ai_fields.new_model) |new| {
-            if (new.provider >= self.model.value.ai.provider_count) return .{ .page = 4, .message = "新增模型尚未完成，请完成配置或取消新增。" };
+            if (new.provider >= self.model.value.ai.provider_count) return .{ .page = settings_pages.ai_models_index, .message = "新增模型尚未完成，请完成配置或取消新增。" };
             const p = self.model.value.ai.providers[new.provider];
-            if (new.model >= p.model_count or !ai_draft.modelValid(p.models[new.model])) return .{ .page = 4, .ai_address = .{ .provider = new.provider, .model = new.model, .field = .model_id }, .message = "请补齐模型 ID、上下文窗口和推理等级，或取消新增。" };
+            if (new.model >= p.model_count or !ai_draft.modelValid(p.models[new.model])) return .{ .page = settings_pages.ai_models_index, .ai_address = .{ .provider = new.provider, .model = new.model, .field = .model_id }, .message = "请补齐模型 ID、上下文窗口和推理等级，或取消新增。" };
         }
         if (self.model.dirty and !self.background.canSave(self.model.value.ui.materials.background)) return .{ .page = 0, .message = if (self.background.state == .loading) "背景图片正在准备，请稍后保存。" else "背景图片未准备完成，请重新选择图片或关闭背景图片。" };
         return null;
@@ -1053,6 +1057,26 @@ test "provider draft owns keys and models across cancel save and restart" {
     try std.testing.expectEqualStrings("saved-model", reload.value.ai.providers[0].models[0].id);
 }
 
+test "settings validation routes model services and default providers to their own pages" {
+    var providers = [_]config.AiProvider{.{
+        .name = "fixture",
+        .kind = .ollama,
+        .endpoint = "http://127.0.0.1:11434",
+        .enabled = true,
+    }};
+    var saved: config.Config = .{};
+    saved.ai.providers = &providers;
+    saved.ai.provider_count = providers.len;
+    saved.ai.default_provider = "fixture";
+    var c = try Controller.init(std.testing.allocator, saved);
+    defer c.deinit();
+    try c.editRaw("ai", "default_provider", "missing");
+    try std.testing.expectEqual(@as(usize, 6), c.validationProblem().?.page);
+    c.discard();
+    try std.testing.expectError(error.InvalidEndpoint, c.editAiRaw(.{ .provider = 0, .field = .endpoint }, "invalid"));
+    try std.testing.expectEqual(@as(usize, 5), c.validationProblem().?.page);
+}
+
 test "invalid raw stays dirty with last valid preview and reverting becomes clean" {
     var c = try Controller.init(std.testing.allocator, .{});
     defer c.deinit();
@@ -1293,7 +1317,7 @@ test "plugin preview validation and loading never dirty or block a real draft" {
     try c.plugin_page.showPreview(.validation);
     try std.testing.expectEqual(State.clean, c.state());
     try c.editRaw("ui", "font_size", "18");
-    c.model.selectPage(5);
+    c.model.selectPage(9);
     try c.plugin_page.showPreview(.loading);
     try std.testing.expect(c.canSave());
     try c.save(std.testing.io, tmp.dir, &target);

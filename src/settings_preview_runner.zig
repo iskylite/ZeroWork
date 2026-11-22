@@ -78,7 +78,7 @@ fn mountPreview(cx: *ui.Cx, scope: *ui.Scope) !*ui.Node {
     errdefer if (!adopted) cx.allocator.destroy(state);
     state.* = .{ .cx = cx, .scope = scope, .root = root, .controller = try Controller.init(cx.allocator, .{}) };
     errdefer if (!adopted) state.controller.deinit();
-    state.controller.model.selectPage(5);
+    state.controller.model.selectPage(9);
     // The source planning row was expanded before entering its detail.
     state.controller.folded_sections &= ~(@as(u64, 1) << 41);
     state.controller.plugin_page.select(.{ .planned = .ftp_ftps });

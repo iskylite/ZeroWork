@@ -2,6 +2,7 @@
  * the production payload and queue without creating NSApplication, obtaining a
  * notification center, querying/requesting authorization, posting or ringing. */
 #import "macos_notifications.m"
+#import "macos_data_alert.m"
 #include <assert.h>
 #include <stdio.h>
 
@@ -65,9 +66,111 @@ static void borrowed_text_copy(void) {
     UNMutableNotificationContent *content = notification_content(7, target, @"test-instance", text, sizeof(text) - 1);
     assert(content);
     memset(text, 'x', sizeof(text) - 1);
-    assert([content.body isEqualToString:@"original"] && content.sound == nil);
+    assert([content.title isEqualToString:@"ZeroWork"] && [content.body isEqualToString:@"original"] && content.sound == nil);
     const uint8_t invalid[] = {0xff};
     assert(notification_content(8, target, @"test-instance", invalid, sizeof(invalid)) == nil);
+}
+
+@interface ZWTestNotificationSettings : NSObject
+@property(nonatomic) UNAuthorizationStatus authorizationStatus;
+@end
+@implementation ZWTestNotificationSettings
+@end
+
+@interface ZWTestNotificationCenter : NSObject
+@property(nonatomic, strong) ZWTestNotificationSettings *settings;
+@property(nonatomic, strong) UNNotificationRequest *request;
+- (void)getNotificationSettingsWithCompletionHandler:(void (^)(UNNotificationSettings *))completion;
+- (void)addNotificationRequest:(UNNotificationRequest *)request withCompletionHandler:(void (^)(NSError *))completion;
+@end
+@implementation ZWTestNotificationCenter
+- (void)getNotificationSettingsWithCompletionHandler:(void (^)(UNNotificationSettings *))completion {
+    completion((UNNotificationSettings *)self.settings);
+}
+- (void)addNotificationRequest:(UNNotificationRequest *)request withCompletionHandler:(void (^)(NSError *))completion {
+    self.request = request;
+    completion(nil);
+}
+@end
+
+@interface ZWTestNotification : NSObject
+@property(nonatomic, strong) UNNotificationRequest *request;
+@end
+@implementation ZWTestNotification
+@end
+
+static void startup_content_and_authorization(void) {
+    NSString *summary = @"config.toml 第 2 行包含无效值（InvalidValue）。";
+    NSString *reason = zw_startup_notification_reason([@"  " stringByAppendingString:summary], nil);
+    assert([reason isEqualToString:[@"启动失败：" stringByAppendingString:summary]]);
+    assert([zw_startup_notification_reason(nil, nil) isEqualToString:@"启动失败：无法完成启动。"]);
+    NSString *multiline = @"config.toml 第 2 行\n包含无效值（InvalidValue）。";
+    NSString *with_guidance = [multiline stringByAppendingString:@"\n\n请修正配置后重新打开。"];
+    assert([zw_startup_notification_summary(with_guidance, YES) isEqualToString:multiline]);
+    assert([zw_startup_notification_summary(with_guidance, NO) isEqualToString:with_guidance]);
+    ZWTestNotificationCenter *center = [ZWTestNotificationCenter new];
+    center.settings = [ZWTestNotificationSettings new];
+    const UNAuthorizationStatus allowed[] = {UNAuthorizationStatusAuthorized, UNAuthorizationStatusProvisional};
+    for (size_t i = 0; i < sizeof(allowed) / sizeof(allowed[0]); i++) {
+        center.settings.authorizationStatus = allowed[i];
+        center.request = nil;
+        dispatch_semaphore_t completed = zw_queue_startup_notification((UNUserNotificationCenter *)center, reason);
+        assert(dispatch_semaphore_wait(completed, DISPATCH_TIME_NOW) == 0);
+        assert([center.request.identifier isEqualToString:ZWStartupFailureNotification]);
+        assert([center.request.content.title isEqualToString:@"ZeroWork"]);
+        assert([center.request.content.body isEqualToString:reason] && center.request.content.sound == nil);
+    }
+    const UNAuthorizationStatus denied[] = {UNAuthorizationStatusNotDetermined, UNAuthorizationStatusDenied};
+    for (size_t i = 0; i < sizeof(denied) / sizeof(denied[0]); i++) {
+        center.settings.authorizationStatus = denied[i];
+        center.request = nil;
+        dispatch_semaphore_t completed = zw_queue_startup_notification((UNUserNotificationCenter *)center, reason);
+        assert(dispatch_semaphore_wait(completed, DISPATCH_TIME_NOW) == 0 && center.request == nil);
+    }
+}
+
+static void startup_foreground_delegates(void) {
+    ZWTestNotification *notification = [ZWTestNotification new];
+    UNUserNotificationCenter *center = (UNUserNotificationCenter *)[ZWTestNotificationCenter new];
+    notification.request = [UNNotificationRequest requestWithIdentifier:ZWStartupFailureNotification
+        content:zw_notification_content(@"启动失败") trigger:nil];
+    UNNotificationPresentationOptions expected = UNNotificationPresentationOptionBanner | UNNotificationPresentationOptionList;
+    __block UNNotificationPresentationOptions options = UNNotificationPresentationOptionNone;
+    ZWStartupNotificationDelegate *startup = [ZWStartupNotificationDelegate new];
+    [startup userNotificationCenter:center willPresentNotification:(UNNotification *)notification
+        withCompletionHandler:^(UNNotificationPresentationOptions value) { options = value; }];
+    assert(options == expected);
+    ZWNotificationBridge *bridge = [[ZWNotificationBridge alloc] initQueueOnly];
+    options = UNNotificationPresentationOptionNone;
+    [bridge userNotificationCenter:center willPresentNotification:(UNNotification *)notification
+        withCompletionHandler:^(UNNotificationPresentationOptions value) { options = value; }];
+    assert(options == expected);
+    notification.request = [UNNotificationRequest requestWithIdentifier:@"other.notification"
+        content:zw_notification_content(@"other") trigger:nil];
+    [startup userNotificationCenter:center willPresentNotification:(UNNotification *)notification
+        withCompletionHandler:^(UNNotificationPresentationOptions value) { options = value; }];
+    assert(options == UNNotificationPresentationOptionNone);
+    [bridge userNotificationCenter:center willPresentNotification:(UNNotification *)notification
+        withCompletionHandler:^(UNNotificationPresentationOptions value) { options = value; }];
+    assert(options == UNNotificationPresentationOptionNone);
+    ZW_NOTIFICATION_TARGET target = { .owner_kind = 1, .kind = 3, .owner_id = 21, .owner_revision = 4, .operation_id = 50 };
+    const uint8_t text[] = "normal";
+    notification.request = [UNNotificationRequest requestWithIdentifier:@"zerowork.notification.test-instance.7"
+        content:notification_content(7, target, @"test-instance", text, sizeof(text) - 1) trigger:nil];
+    [bridge userNotificationCenter:center willPresentNotification:(UNNotification *)notification
+        withCompletionHandler:^(UNNotificationPresentationOptions value) { options = value; }];
+    assert(options == expected);
+    notification.request = [UNNotificationRequest requestWithIdentifier:@"zerowork.notification.older-instance.7"
+        content:notification_content(7, target, @"older-instance", text, sizeof(text) - 1) trigger:nil];
+    [bridge userNotificationCenter:center willPresentNotification:(UNNotification *)notification
+        withCompletionHandler:^(UNNotificationPresentationOptions value) { options = value; }];
+    assert(options == UNNotificationPresentationOptionNone);
+    notification.request = [UNNotificationRequest requestWithIdentifier:ZWStartupFailureNotification
+        content:zw_notification_content(@"启动失败") trigger:nil];
+    [bridge close];
+    [bridge userNotificationCenter:center willPresentNotification:(UNNotification *)notification
+        withCompletionHandler:^(UNNotificationPresentationOptions value) { options = value; }];
+    assert(options == UNNotificationPresentationOptionNone);
 }
 
 static void queue_fifo_overflow_close(void) {
@@ -135,9 +238,11 @@ int main(void) {
     @autoreleasepool {
         payload_roundtrip();
         borrowed_text_copy();
+        startup_content_and_authorization();
+        startup_foreground_delegates();
         queue_fifo_overflow_close();
         close_before_async_receipt();
-        puts("4/4 production Objective-C payload/queue tests passed; no notification center, permission, send, Bell or window used");
+        puts("6/6 production Objective-C notification tests passed; no system notification center, permission, send, Bell or window used");
     }
     return 0;
 }

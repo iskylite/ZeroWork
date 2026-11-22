@@ -348,7 +348,7 @@ pub const Coordinator = struct {
     fn qualifies(self: *const Coordinator, event: NotificationEvent, definition: NotificationDefinition) bool {
         const facts = event.attention;
         if (facts.resolved) return false;
-        if (facts.kind == .operation_failed) return true;
+        if (facts.kind == .operation_failed or facts.kind == .advisory) return true;
         if (facts.kind == .completion) return event.phase == .succeeded and !facts.app_focused and event.system_enabled and
             if (definition.system_policy) |kind| self.policy.enabled(kind) else false;
         if (facts.kind == .local or !facts.requires_action or !facts.time_sensitive) return false;
@@ -805,7 +805,7 @@ const ConsumedNotification = struct {
 /// Facts originate in a business controller. Severity/text never grant a
 /// global channel. Incident IDs must identify a host-confirmed shared cause.
 pub const AttentionFacts = struct {
-    kind: enum { local, completion, task_blocked, connection_stopped, transfer_batch_stopped, outcome_unknown, application_risk, operation_failed } = .local,
+    kind: enum { local, completion, task_blocked, connection_stopped, transfer_batch_stopped, outcome_unknown, application_risk, operation_failed, advisory } = .local,
     requires_action: bool = false,
     time_sensitive: bool = false,
     resolved: bool = false,

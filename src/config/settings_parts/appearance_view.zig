@@ -196,6 +196,7 @@ fn rgba(value: u32) ui.Color {
     return ui.Color.rgba(@intCast(value >> 24), @intCast((value >> 16) & 255), @intCast((value >> 8) & 255), @intCast(value & 255));
 }
 
+/// 外观主题：应用图标、主题与背景。
 pub fn mountContent(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
     const root = try ui.boxStyled(cx, S.base.sectionColumn, .{});
     root.meta.ownership.meta.test_id = "settings.appearance";
@@ -203,6 +204,15 @@ pub fn mountContent(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
     if (query.len == 0 or binding.matches(query, "应用图标 透明背景 黑底 白底 Dock icon_background")) try root.appendChild(cx.allocator, try appIconSection(cx, bound));
     if (query.len == 0 or binding.matches(query, "外观 主题 theme 主题库")) try root.appendChild(cx.allocator, try themeSection(cx, bound));
     if (query.len == 0 or binding.matches(query, "背景 图片 目录 轮播 顺序 随机 间隔 source order interval_minutes 材质 模糊 透明度 fit 对齐 blur_px background enabled path alignment_x alignment_y transparency")) try root.appendChild(cx.allocator, try materialSection(cx, bound));
+    if (root.children.items.len == 0) try root.appendChild(cx.allocator, try ui.textStyled(cx, S.note, "没有匹配的设置"));
+    return root;
+}
+
+/// 终端配置：字体与排版、终端与工作区。
+pub fn mountTerminalContent(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
+    const root = try ui.boxStyled(cx, S.base.sectionColumn, .{});
+    root.meta.ownership.meta.test_id = "settings.terminal";
+    const query = bound.controller.search_query;
     if (query.len == 0 or binding.matches(query, "字体 字号 行高 光标 font cursor font_family font_size font_weight line_height cursor_style")) try root.appendChild(cx.allocator, try fontSection(cx, bound));
     if (query.len == 0 or binding.matches(query, "终端 工作区 最大显示行数 回滚 scrollback_limit 时间戳 侧栏 高亮 补全 timestamp_gutter sidebar_collapsed input_line_highlight command_info 命令信息 AI 返回码 耗时 completion enabled")) try root.appendChild(cx.allocator, try aidsSection(cx, bound));
     if (root.children.items.len == 0) try root.appendChild(cx.allocator, try ui.textStyled(cx, S.note, "没有匹配的设置"));

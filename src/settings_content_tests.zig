@@ -89,7 +89,7 @@ test "eight live settings contents mount with an owned draft" {
     var controller = try @import("config/settings_controller.zig").Controller.init(std.testing.allocator, .{});
     defer controller.deinit();
     var context: u8 = 0;
-    for (0..8) |page| {
+    for (0..13) |page| {
         controller.model.selectPage(page);
         const content = try view.mountContent(cx, scope, &controller, .{ .context = &context, .changed = changed, .request_edit = request, .action = action, .mount_providers = providers });
         try root.appendChild(cx.allocator, content);
@@ -123,7 +123,10 @@ test "appearance reads actual draft and theme click updates controller" {
     var appearance: @import("config/appearance_ui_context.zig").Context = .{ .registry = &registry, .runtime = &runtime, .context = &context, .request = appearanceRequest };
     const content = try view.mountContent(cx, scope, &controller, .{ .context = &context, .changed = changed, .request_edit = request, .action = action, .appearance = &appearance });
     try root.appendChild(cx.allocator, content);
-    const size = byId(content, "settings.field.font_size").?;
+    controller.model.selectPage(1);
+    const terminal = try view.mountPage(cx, scope, &controller, .{ .context = &context, .changed = changed, .request_edit = request, .action = action, .appearance = &appearance });
+    try root.appendChild(cx.allocator, terminal.root);
+    const size = byId(terminal.root, "settings.field.font_size").?;
     try std.testing.expect(textNode(size, "21") != null);
     const card = byId(content, "settings.theme.dracula").?;
     const click = card.behavior.events.on_click.?;
@@ -140,7 +143,7 @@ test "auto shell integration global toggle edits settings without affecting live
     var f: AppearanceFixture = undefined;
     try f.init();
     defer f.deinit();
-    f.controller.model.selectPage(2);
+    f.controller.model.selectPage(3);
     const mounted = try f.mount();
     const toggle = byId(mounted.root, "settings.field.auto_shell_integration").?;
     try std.testing.expect(f.controller.model.value.ssh.auto_shell_integration);
@@ -174,12 +177,12 @@ test "AI settings filtered fields retain body and footer without a missing Provi
             return node;
         }
     };
-    const cases = [_]struct { query: []const u8, section: []const u8, providers: bool }{
-        .{ .query = "permission_mode", .section = "settings.ai.permissions", .providers = false },
-        .{ .query = "redact_ip", .section = "settings.ai.context", .providers = false },
-        .{ .query = "error_hint", .section = "settings.ai.behavior", .providers = false },
-        .{ .query = "Provider", .section = "test.providers", .providers = true },
-        .{ .query = "", .section = "settings.ai.permissions", .providers = true },
+    const cases = [_]struct { query: []const u8, section: []const u8, providers: bool, page: usize }{
+        .{ .query = "permission_mode", .section = "settings.ai.permissions", .providers = false, .page = 6 },
+        .{ .query = "redact_ip", .section = "settings.ai.context", .providers = false, .page = 8 },
+        .{ .query = "error_hint", .section = "settings.ai.behavior", .providers = false, .page = 6 },
+        .{ .query = "Provider", .section = "test.providers", .providers = true, .page = 5 },
+        .{ .query = "", .section = "settings.ai.permissions", .providers = false, .page = 6 },
     };
     for (cases) |case| {
         const cx = try ui.Cx.init(std.testing.allocator, std.testing.io);
@@ -189,7 +192,7 @@ test "AI settings filtered fields retain body and footer without a missing Provi
         defer scope.dispose();
         var controller = try @import("config/settings_controller.zig").Controller.init(std.testing.allocator, .{});
         defer controller.deinit();
-        controller.model.selectPage(4);
+        controller.model.selectPage(case.page);
         controller.folded_sections = 0;
         try controller.setSearch(case.query);
         var context: ProviderHooks = .{};
@@ -204,7 +207,7 @@ test "AI settings filtered fields retain body and footer without a missing Provi
         try cx.root.?.appendChild(cx.allocator, mounted.root);
         try std.testing.expect(byId(mounted.scroll_content, case.section) != null);
         for ([_][]const u8{ "permission_mode", "redact_ip", "error_hint" }) |key| {
-            if (case.query.len != 0 and !std.mem.eql(u8, case.query, key)) continue;
+            if (!std.mem.eql(u8, case.query, key)) continue;
             var buffer: [80]u8 = undefined;
             const id = try std.fmt.bufPrint(&buffer, "settings.field.{s}", .{key});
             try std.testing.expect(byId(mounted.scroll_content, id) != null);
@@ -288,6 +291,7 @@ test "appearance font weight reconciles selected and custom family edits" {
     try f.controller.editKey("ui", "font_family", .{ .text = "Monaco" });
     try std.testing.expectEqualStrings("regular", f.controller.model.value.ui.font_weight);
     try std.testing.expect(f.controller.raw_fields[@import("config/settings_schema.zig").find("ui", "font_weight").?].input == null);
+    f.controller.model.selectPage(1);
     const monaco = try f.mount();
     try std.testing.expect(textNode(byId(monaco.root, "settings.field.font_weight").?, "Regular") != null);
 
@@ -307,6 +311,7 @@ test "appearance variable font weight input slider and preview stay synchronized
     defer f.deinit();
     f.controller.folded_sections = 0;
     try f.controller.editKey("ui", "font_family", .{ .text = "Skia" });
+    f.controller.model.selectPage(1);
     const mounted = try f.mount();
     const input = inputFor(mounted, "settings.field.font_weight");
     try std.testing.expectEqualStrings("400", input.getText());
@@ -345,6 +350,7 @@ test "appearance font chooser retains its family while another input replaces th
         defer f.deinit();
         f.controller.folded_sections = 0;
         try f.controller.editKey("ui", "font_family", .{ .text = family });
+        f.controller.model.selectPage(1);
         const mounted = try f.mount();
         const trigger = byId(mounted.root, "settings.field.font_family").?;
         const select: *ui.widgets.select.SelectState = @ptrCast(@alignCast(trigger.behavior.events.event_context.?));
@@ -398,6 +404,7 @@ test "appearance font chooser lists available families and retains only the save
         defer f.deinit();
         f.controller.folded_sections = 0;
         try f.controller.editKey("ui", "font_family", .{ .text = selected });
+        f.controller.model.selectPage(1);
         const mounted = try f.mount();
         const trigger = byId(mounted.root, "settings.field.font_family").?;
         const select: *ui.widgets.select.SelectState = @ptrCast(@alignCast(trigger.behavior.events.event_context.?));
@@ -440,6 +447,7 @@ test "appearance font chooser keeps the overlay surface through theme and materi
     const publication = try f.cx.bindState(@import("ui/shell_styles.zig").ThemePublication, .{});
     publication.publish(f.cx, theme.widgetTheme(.dark));
     f.controller.folded_sections = 0;
+    f.controller.model.selectPage(1);
     const mounted = try f.mount();
     const trigger = byId(mounted.root, "settings.field.font_family").?;
     const select: *ui.widgets.select.SelectState = @ptrCast(@alignCast(trigger.behavior.events.event_context.?));
@@ -473,6 +481,7 @@ test "settings material remount restores the same input focus cursor and reverse
     publication.publish(f.cx, theme.widgetTheme(.dark));
     const old_scope = try f.scope.childScope();
     const hooks: view.Hooks = .{ .context = &f, .changed = AppearanceFixture.rebuild, .request_edit = request, .action = action, .appearance = &f.context };
+    f.controller.model.selectPage(1);
     const old = try view.mountPage(f.cx, old_scope, &f.controller, hooks);
     try f.cx.root.?.appendChild(f.cx.allocator, old.root);
     f.cx.layout();
@@ -519,6 +528,7 @@ test "settings material focus restore leaves other focus and unavailable fields 
     try f.init();
     defer f.deinit();
     f.controller.folded_sections = 0;
+    f.controller.model.selectPage(1);
     const mounted = try f.mount();
     const size = inputFor(mounted, "settings.field.font_size");
     const height = inputFor(mounted, "settings.field.line_height");
@@ -541,7 +551,7 @@ test "settings material focus restore leaves other focus and unavailable fields 
     try std.testing.expect((try mounted.captureFocus(std.testing.allocator)) == null);
 
     f.cx.setFocus(null);
-    f.controller.model.selectPage(5);
+    f.controller.model.selectPage(9);
     const plugins = try f.mount();
     try std.testing.expect(!plugins.restoreFocus(focus));
     try std.testing.expect(f.cx.focus_manager.getFocused() == null);
@@ -554,8 +564,12 @@ test "appearance geometry uses V3 card padding and 32 pixel field controls" {
     f.controller.folded_sections = 0;
     const mounted = try f.mount();
     _ = f.cx.render(); // Settle the responsive pair after-layout hook before measuring.
-    const font = byId(mounted.root, "settings.appearance.font").?.globalRect();
-    const family = byId(mounted.root, "settings.field.font_family").?.globalRect();
+    // 字体与排版位于独立的「终端配置」页。
+    f.controller.model.selectPage(1);
+    const terminal = try f.mount();
+    _ = f.cx.render();
+    const font = byId(terminal.root, "settings.appearance.font").?.globalRect();
+    const family = byId(terminal.root, "settings.field.font_family").?.globalRect();
     try std.testing.expectApproxEqAbs(@as(f32, 626), font.w, 0.1);
     try std.testing.expectApproxEqAbs(@as(f32, 330), family.x - font.x, 0.1);
     try std.testing.expectApproxEqAbs(@as(f32, 58), family.y - font.y, 0.1);
@@ -632,7 +646,9 @@ test "appearance V3 inline preview and theme import expose real capability" {
     try std.testing.expect(remove.behavior.interaction.a11y.?.disabled);
     try std.testing.expectEqual(@as(f32, 1), remove.getOpacity());
     try std.testing.expect(byId(mounted.root, "settings.theme.import") != null);
-    try std.testing.expect(byId(mounted.root, "settings.font.preview.caret") != null);
+    f.controller.model.selectPage(1);
+    const terminal = try f.mount();
+    try std.testing.expect(byId(terminal.root, "settings.font.preview.caret") != null);
 }
 
 test "appearance removed thumbnail clears while failed replacement retains last good" {
@@ -739,6 +755,7 @@ test "appearance numeric input keeps invalid raw and composition while footer tr
     try f.init();
     defer f.deinit();
     f.controller.folded_sections = 0;
+    f.controller.model.selectPage(1);
     const mounted = try f.mount();
     const size = inputFor(mounted, "settings.field.font_size");
     inputEvent(size, .{ .key_down = .{ .key = .a, .modifiers = .{ .super = true } } });
@@ -782,7 +799,7 @@ test "settings fixed footer stays outside the scrolling viewport at canonical si
         defer scope.dispose();
         var controller = try @import("config/settings_controller.zig").Controller.init(std.testing.allocator, .{});
         defer controller.deinit();
-        controller.model.selectPage(4);
+        controller.model.selectPage(5);
         var context: u8 = 0;
         const page = try view.mountPage(cx, scope, &controller, .{ .context = &context, .changed = changed, .request_edit = request, .action = action, .mount_providers = tallProviders });
         try root.appendChild(cx.allocator, page.root);
@@ -821,7 +838,7 @@ test "enabled settings save label stays visible within its button in every theme
         defer scope.dispose();
         var controller = try @import("config/settings_controller.zig").Controller.init(std.testing.allocator, .{});
         defer controller.deinit();
-        controller.model.selectPage(5);
+        controller.model.selectPage(9);
         try controller.editKey("ui", "font_size", .{ .unsigned = 15 });
         var context: u8 = 0;
         const page = try view.mountPage(cx, scope, &controller, .{ .context = &context, .changed = changed, .request_edit = request, .action = action });
@@ -976,7 +993,7 @@ test "plugin design previews never become production settings" {
     var f: AppearanceFixture = undefined;
     try f.init();
     defer f.deinit();
-    f.controller.model.selectPage(5);
+    f.controller.model.selectPage(9);
     // Even a retained prototype selection must return the real plugin list.
     for (std.enums.values(@import("config/plugin_page.zig").PreviewKind)) |kind| {
         f.controller.plugin_page.select(.{ .planned = .ftp_ftps });
@@ -1034,7 +1051,7 @@ test "native settings SSH uses precise accordion and inline control geometry" {
     var f: AppearanceFixture = undefined;
     try f.init();
     defer f.deinit();
-    f.controller.model.selectPage(2);
+    f.controller.model.selectPage(3);
     f.controller.folded_sections &= ~(@as(u64, 1) << 8);
     const mounted = try f.mount();
     const connection = byId(mounted.root, "settings.ssh.connection").?;
@@ -1056,7 +1073,7 @@ test "native settings invalid inline raw and IME survive without remount and Esc
     var f: AppearanceFixture = undefined;
     try f.init();
     defer f.deinit();
-    f.controller.model.selectPage(2);
+    f.controller.model.selectPage(3);
     const mounted = try f.mount();
     const input = inputFor(mounted, "settings.field.keepalive_sec");
     replaceInput(input, "0");
@@ -1083,7 +1100,7 @@ test "native settings reconnect off and zero disable dependencies while retainin
     var f: AppearanceFixture = undefined;
     try f.init();
     defer f.deinit();
-    f.controller.model.selectPage(2);
+    f.controller.model.selectPage(3);
     f.controller.folded_sections = 0;
     const mounted = try f.mount();
     const max = inputFor(mounted, "settings.field.reconnect_max");
@@ -1116,7 +1133,7 @@ test "native settings save operation locks controls already mounted" {
     var f: AppearanceFixture = undefined;
     try f.init();
     defer f.deinit();
-    f.controller.model.selectPage(2);
+    f.controller.model.selectPage(3);
     f.controller.folded_sections = 0;
     const mounted = try f.mount();
     const input = inputFor(mounted, "settings.field.keepalive_sec");
@@ -1140,7 +1157,7 @@ test "native settings shortcut chips show every action and request a single edit
     defer f.deinit();
     f.controller.folded_sections = 0;
     var probe: SettingsProbe = .{};
-    const mounted = try probe.mount(&f, 1);
+    const mounted = try probe.mount(&f, 2);
     const keys = @import("config/keybindings.zig");
     const actions = std.enums.values(keys.Action);
     for (actions) |action_id| {
@@ -1171,7 +1188,7 @@ test "native settings shortcut hover hint closes when its retained page is hidde
     try f.cx.setTestFrameStep(100);
     f.controller.folded_sections = 0;
     var probe: SettingsProbe = .{};
-    const mounted = try probe.mount(&f, 1);
+    const mounted = try probe.mount(&f, 2);
     const button = byId(mounted.root, "settings.key.new_tab").?;
     const rect = button.globalRect();
     f.cx.handleMouseMove(rect.x + rect.w / 2, rect.y + rect.h / 2);
@@ -1225,7 +1242,7 @@ test "native settings data actions use host availability and leave the draft int
     f.controller.folded_sections = 0;
     try f.controller.editKey("ui", "font_size", .{ .unsigned = 18 });
     var probe: SettingsProbe = .{};
-    const blocked = try probe.mount(&f, 7);
+    const blocked = try probe.mount(&f, 11);
     const clear = byId(blocked.root, "settings.data.clear_logs").?;
     const clear_all = byId(blocked.root, "settings.data.clear_all").?;
     try std.testing.expect(clear_all.behavior.interaction.a11y.?.disabled);
@@ -1237,7 +1254,7 @@ test "native settings data actions use host availability and leave the draft int
     clickButton(clear);
     try std.testing.expectEqual(@as(usize, 0), probe.action_count);
     probe.allow_clear = true;
-    const ready = try probe.mount(&f, 7);
+    const ready = try probe.mount(&f, 11);
     clickButton(byId(ready.root, "settings.data.clear_logs").?);
     try std.testing.expectEqual(view.Action.clear_logs, probe.action_value.?);
     try std.testing.expectEqual(@as(usize, 1), probe.action_count);
@@ -1252,7 +1269,7 @@ test "native settings explanations use focusable hints without changing the draf
     var f: AppearanceFixture = undefined;
     try f.init();
     defer f.deinit();
-    f.controller.model.selectPage(2);
+    f.controller.model.selectPage(3);
     f.controller.folded_sections = 0;
     const mounted = try f.mount();
     const marker = byId(mounted.root, "settings.help.totp_autofill").?;
@@ -1302,7 +1319,7 @@ fn expectCleanSectionHeaders(node: *ui.Node) !void {
 }
 
 test "native settings expanded headers hide repeated summaries while fields remain editable" {
-    for (0..8) |index| {
+    for (0..13) |index| {
         var f: AppearanceFixture = undefined;
         try f.init();
         defer f.deinit();
@@ -1312,12 +1329,12 @@ test "native settings expanded headers hide repeated summaries while fields rema
         try f.cx.root.?.appendChild(f.cx.allocator, mounted.root);
         f.cx.layout();
         try expectCleanSectionHeaders(mounted.root);
-        if (index == 2) {
+        if (index == 3) {
             const keepalive = inputFor(mounted, "settings.field.keepalive_sec");
             replaceInput(keepalive, "44");
             try std.testing.expectEqual(@as(u16, 44), f.controller.model.value.ssh.keepalive_sec);
         }
-        if (index == 4) {
+        if (index == 6) {
             const permissions = byId(mounted.root, "settings.ai.permissions.header").?;
             try std.testing.expect(textNode(permissions, "确认后执行") == null);
             try std.testing.expect(textNode(byId(mounted.root, "settings.field.permission_mode").?, "确认后执行") != null);
@@ -1334,12 +1351,19 @@ test "native settings appearance icon and workspace folds remain independent aft
     _ = icon.behavior.events.on_event.?(.{ .key_down = .{ .key = .space } }, icon.behavior.events.event_context);
     const remounted = try f.mount();
     try std.testing.expect(byId(remounted.root, "settings.appearance.app_icon.header").?.behavior.interaction.a11y.?.expanded.?);
-    try std.testing.expect(!byId(remounted.root, "settings.appearance.aids.header").?.behavior.interaction.a11y.?.expanded.?);
+    // 终端与工作区折叠在独立的「终端配置」页保持自身状态。
+    f.controller.model.selectPage(1);
+    const terminal = try f.mount();
+    const aids = byId(terminal.root, "settings.appearance.aids.header").?;
+    const aids_expanded = aids.behavior.interaction.a11y.?.expanded.?;
+    _ = aids.behavior.events.on_event.?(.{ .key_down = .{ .key = .space } }, aids.behavior.events.event_context);
+    const terminal_remounted = try f.mount();
+    try std.testing.expectEqual(!aids_expanded, byId(terminal_remounted.root, "settings.appearance.aids.header").?.behavior.interaction.a11y.?.expanded.?);
     try std.testing.expect(!f.controller.model.dirty);
 }
 
 test "native settings section headers retain readable collapsed summaries across all pages" {
-    for (0..8) |index| {
+    for (0..13) |index| {
         var f: AppearanceFixture = undefined;
         try f.init();
         defer f.deinit();
@@ -1352,9 +1376,11 @@ test "native settings section headers retain readable collapsed summaries across
         if (index == 0) {
             const selected = f.registry.get(f.controller.model.value.ui.theme).?.theme.name;
             try std.testing.expectEqualStrings(selected, byId(mounted.root, "settings.appearance.themes.summary").?.getText().?.content);
+        }
+        if (index == 1) {
             try std.testing.expectEqualStrings("辅助显示、回滚缓冲与侧栏", byId(mounted.root, "settings.appearance.aids.summary").?.getText().?.content);
         }
-        if (index == 7) {
+        if (index == 11) {
             const value = byId(mounted.root, "settings.data.history.summary").?;
             try std.testing.expectEqualStrings("缓冲、快照与保留策略", value.getText().?.content);
         }
@@ -1365,7 +1391,7 @@ test "native settings unit suffixes stay outside editable numeric values" {
     var f: AppearanceFixture = undefined;
     try f.init();
     defer f.deinit();
-    f.controller.model.selectPage(7);
+    f.controller.model.selectPage(11);
     f.controller.folded_sections = 0;
     const mounted = try f.mount();
     for ([_][]const u8{ "ring_mb", "checkpoint_sec", "retention_days" }, [_][]const u8{ "MiB", "秒", "天" }) |name, unit| {
@@ -1387,6 +1413,7 @@ test "settings line height display preserves precise value when submitted unchan
     try f.init();
     defer f.deinit();
     f.controller.folded_sections = 0;
+    f.controller.model.selectPage(1);
     f.controller.model.value.ui.line_height = 1.5714285;
     const expected = f.controller.model.value.ui.line_height;
     const mounted = try f.mount();
@@ -1406,7 +1433,7 @@ test "settings section cards explicitly suppress inherited outline on every edge
     defer scope.dispose();
     var controller = try @import("config/settings_controller.zig").Controller.init(std.testing.allocator, .{});
     defer controller.deinit();
-    controller.model.selectPage(2);
+    controller.model.selectPage(3);
     var context: u8 = 0;
     const content = try view.mountContent(cx, scope, &controller, .{ .context = &context, .changed = changed, .request_edit = request, .action = action, .mount_providers = providers });
     try root.appendChild(cx.allocator, content);
@@ -1438,6 +1465,7 @@ test "command info global toggle participates in the saved appearance draft" {
     try f.init();
     defer f.deinit();
     f.controller.folded_sections = 0;
+    f.controller.model.selectPage(1);
     const mounted = try f.mount();
     const toggle = byId(mounted.root, "settings.toggle.command_info").?;
     try std.testing.expect(f.controller.model.value.ui.command_info);
@@ -1461,7 +1489,7 @@ fn foldHeader(header: *ui.Node) void {
 }
 
 test "settings folds animate locally and keep fields summaries and accessory alignment" {
-    const pages = [_]usize{ 0, 2, 5 };
+    const pages = [_]usize{ 0, 3, 9 };
     const headers = [_][]const u8{ "settings.materials.header", "settings.ssh.connection.header", "已内置" };
     const summaries = [_][]const u8{ "settings.appearance.materials.summary", "settings.ssh.connection.summary", "已内置.summary" };
     for (pages, headers, summaries) |page, header_id, summary_id| {
@@ -1474,7 +1502,7 @@ test "settings folds animate locally and keep fields summaries and accessory ali
         const plugins = [_]@import("host/plugin_registry.zig").PluginManifest{
             .{ .id = "ssh", .display_name = "SSH", .plugin_version = "1.0", .origin = .builtin, .workspace_kind = "terminal", .content_renderer = "terminal" },
         };
-        if (page == 5) f.controller.plugin_page.registry_source = .{ .published = .{ .entries = &plugins, .renderers = &.{} } };
+        if (page == 9) f.controller.plugin_page.registry_source = .{ .published = .{ .entries = &plugins, .renderers = &.{} } };
         const mounted = try f.mount();
         foldFrame(f.cx);
         const header = byId(mounted.root, header_id) orelse {
@@ -1490,7 +1518,7 @@ test "settings folds animate locally and keep fields summaries and accessory ali
         const content = byId(item, "accordion.content").?;
         const open_height = content.globalRect().h;
         try std.testing.expect(open_height > 0);
-        const field = if (page == 2) byId(mounted.root, "settings.field.keepalive_sec") else null;
+        const field = if (page == 3) byId(mounted.root, "settings.field.keepalive_sec") else null;
         if (field) |node| replaceInput(@ptrCast(@alignCast(node.behavior.events.event_context.?)), "47");
         const changes_before = f.rebuilds;
         foldHeader(header);
@@ -1530,7 +1558,7 @@ test "settings folds respect reduced motion without remounting" {
     var f: AppearanceFixture = undefined;
     try f.init();
     defer f.deinit();
-    f.controller.model.selectPage(2);
+    f.controller.model.selectPage(3);
     f.controller.folded_sections = 0;
     f.cx.reduced_motion = true;
     const mounted = try f.mount();

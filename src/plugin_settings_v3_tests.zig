@@ -29,7 +29,7 @@ test "plugin V3 reads registered metadata and detail actions preserve draft" {
         .{ .id = "bmc_ikvm", .display_name = "BMC · iKVM", .plugin_version = "0.3.2", .origin = .bundled, .workspace_kind = "console", .content_renderer = "console" },
     };
     controller.plugin_page.registry_source = .{ .published = .{ .entries = &entries, .renderers = &.{} } };
-    controller.model.selectPage(5);
+    controller.model.selectPage(9);
     try controller.editKey("ui", "font_size", .{ .unsigned = 19 });
     var context: u8 = 0;
     const content = try view.mountContent(cx, scope, &controller, .{ .context = &context, .changed = changed, .request_edit = request, .action = action });

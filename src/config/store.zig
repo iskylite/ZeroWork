@@ -72,7 +72,10 @@ pub fn saveWithCredentialRefsWithOptions(io: std.Io, dir: std.Io.Dir, sub_path: 
     if (options.expected_config) |expected| {
         if (!std.meta.eql(expected, ConfigBaseline.fromSource(baseline_source))) return error.ConfigFileConflict;
     }
-    const baseline = if (baseline_source) |source| try config.Config.parseWithAllocator(a, source) else null;
+    const baseline = if (baseline_source) |source| try parseConfig(a, source, null) else null;
+    // Preserve unsupported assignments from the exact on-disk revision being
+    // replaced, including for direct store callers without a loaded snapshot.
+    if (baseline) |old| try disk.cloneUnknownFields(allocator, old.unknown_fields);
     var tx = try credentials.Transaction.init();
     defer tx.deinit();
     for (disk.ai.providers[0..disk.ai.provider_count], 0..) |*provider, index| {
@@ -157,6 +160,69 @@ pub fn readConfigSource(io: std.Io, dir: std.Io.Dir, allocator: std.mem.Allocato
     };
 }
 
+/// Check the current format before opening a window. Resolving credentials
+/// remains the responsibility of the normal runtime load.
+pub fn validateStartupConfig(io: std.Io, dir: std.Io.Dir, config_path: []const u8, config_line: *?usize) !void {
+    config_line.* = null;
+    const a = std.heap.page_allocator;
+    const source = (try readConfigSource(io, dir, a, config_path)) orelse return;
+    errdefer a.free(source);
+    var details: config.ParseDetails = .{};
+    var loaded = decodeWithDetails(a, source, false, &details) catch |err| {
+        config_line.* = details.line;
+        return err;
+    };
+    loaded.deinit(a);
+}
+
+test "unknown configuration fields warn at startup and survive ordinary saves" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.testing.io;
+    const source = "[ui]\nfont_size=17\nfuture_width = 480\n[notify]\nfuture_alert = true\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.toml", .data = source });
+    var line: ?usize = null;
+    try validateStartupConfig(io, tmp.dir, "config.toml", &line);
+    try std.testing.expectEqual(@as(?usize, null), line);
+    var loaded = try loadWithOptions(io, tmp.dir, std.testing.allocator, "config.toml", .{ .defer_credentials = true });
+    defer loaded.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u8, 17), loaded.value.ui.font_size);
+    try std.testing.expectEqual(@as(usize, 2), loaded.value.unknown_fields.len);
+    try std.testing.expectEqual(@as(usize, 3), loaded.value.unknown_fields[0].line);
+    // A direct save should also retain assignments from the on-disk revision.
+    var candidate: config.Config = .{};
+    candidate.ui.font_size = 18;
+    try save(io, tmp.dir, "config.toml", candidate);
+    var reopened = try loadWithOptions(io, tmp.dir, std.testing.allocator, "config.toml", .{ .defer_credentials = true });
+    defer reopened.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u8, 18), reopened.value.ui.font_size);
+    try std.testing.expectEqual(@as(usize, 2), reopened.value.unknown_fields.len);
+    try std.testing.expect(std.mem.indexOf(u8, reopened.source, "future_width = 480") != null);
+    try std.testing.expect(std.mem.indexOf(u8, reopened.source, "future_alert = true") != null);
+    var refs = plugin_credential_references.References.init(std.testing.allocator);
+    defer refs.deinit();
+    try addConfigReferences(&refs, reopened.value);
+    try std.testing.expectEqual(CleanupStatus.deferred, refs.status);
+}
+
+test "startup validation still reports malformed or invalid known fields" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.testing.io;
+    var line: ?usize = null;
+    const bad = "[ui]\nfuture_width = 480\nfont_size = \"wrong\"\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.toml", .data = bad });
+    try std.testing.expectError(error.InvalidValue, validateStartupConfig(io, tmp.dir, "config.toml", &line));
+    try std.testing.expectEqual(@as(?usize, 3), line);
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.toml", .data = "[ui]\nfuture_width\n" });
+    try std.testing.expectError(error.InvalidAssignment, validateStartupConfig(io, tmp.dir, "config.toml", &line));
+    try std.testing.expectEqual(@as(?usize, 2), line);
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.toml", .data = "[[ai.providers]]\nid = \"fixture\"\napi_key_ref = \"invalid\"\n" });
+    try std.testing.expectError(error.InvalidCredentialReference, validateStartupConfig(io, tmp.dir, "config.toml", &line));
+    try validateStartupConfig(io, tmp.dir, "missing.toml", &line);
+    try std.testing.expectEqual(@as(?usize, null), line);
+}
+
 /// Decode owned file bytes without rewriting the file or migrating credentials.
 /// On success the returned snapshot owns the bytes; on failure the caller does.
 pub fn decodeConfig(allocator: std.mem.Allocator, source: []u8) !LoadedConfig {
@@ -164,11 +230,23 @@ pub fn decodeConfig(allocator: std.mem.Allocator, source: []u8) !LoadedConfig {
 }
 
 pub fn decodeConfigWithCredentials(allocator: std.mem.Allocator, source: []u8, resolve: bool) !LoadedConfig {
+    return decodeWithDetails(allocator, source, resolve, null);
+}
+
+fn parseConfig(allocator: std.mem.Allocator, source: []const u8, details: ?*config.ParseDetails) !config.Config {
+    var local: config.ParseDetails = .{};
+    const diagnostic = details orelse &local;
+    diagnostic.allow_unknown = true;
+    return config.Config.parseWithDetails(allocator, source, diagnostic);
+}
+
+fn decodeWithDetails(allocator: std.mem.Allocator, source: []u8, resolve: bool, details: ?*config.ParseDetails) !LoadedConfig {
     var arena: std.heap.ArenaAllocator = .init(allocator);
     errdefer arena.deinit();
-    var value = try config.Config.parseWithAllocator(arena.allocator(), source);
+    var value = try parseConfig(arena.allocator(), source, details);
     for (value.ai.providers[0..value.ai.provider_count]) |*provider| {
         if (provider.api_key_ref) |reference| {
+            if (!credentials.validReference(reference)) return error.InvalidCredentialReference;
             if (provider.api_key.len != 0) return error.AmbiguousCredential;
             if (resolve) provider.api_key = (try credentials.getIfPresent(arena.allocator(), reference)) orelse "";
         }
@@ -427,7 +505,7 @@ pub fn prepareCredentialsWithOptions(io: std.Io, dir: std.Io.Dir, allocator: std
             error.FileNotFound => null,
             else => return err,
         };
-        const raw_config: config.Config = if (source) |text| try config.Config.parseWithAllocator(a, text) else .{};
+        const raw_config: config.Config = if (source) |text| try parseConfig(a, text, null) else .{};
         const host_source = try readHostBaseline(io, dir, hosts_path);
         sources_complete = source != null and host_source != null;
         var raw_hosts = host_source orelse try config.hosts.Registry.parse(allocator, "");
@@ -466,6 +544,9 @@ fn siblingPath(allocator: std.mem.Allocator, path: []const u8, sibling: []const 
 }
 
 fn addConfigReferences(references: *plugin_credential_references.References, value: config.Config) !void {
+    // Unsupported assignments may reference credentials understood by a
+    // newer build. Preserve them and defer collection until we know the full scope.
+    if (value.unknown_fields.len != 0) references.deferCleanup();
     for (value.ai.providers[0..value.ai.provider_count]) |provider| if (provider.api_key_ref) |reference| try references.add(reference);
     for (value.ai.extensions.servers) |server| inline for (.{ "environment", "headers" }) |key| for (@field(server, key)) |entry| if (entry.secret_ref) |reference| try references.add(reference);
 }
@@ -495,7 +576,7 @@ fn addConfigFileReferences(io: std.Io, dir: std.Io.Dir, path: []const u8, refere
     defer allocator.free(source);
     var arena: std.heap.ArenaAllocator = .init(allocator);
     defer arena.deinit();
-    const value = config.Config.parseWithAllocator(arena.allocator(), source) catch |err| switch (err) {
+    const value = parseConfig(arena.allocator(), source, null) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => {
             references.deferCleanup();

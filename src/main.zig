@@ -6088,12 +6088,12 @@ const AiHost = struct {
         if (!settings.open) settings.toggle();
         if (!settings.open) return;
         if (self.composer_controls) |controls| controls.dismiss();
-        settings.selectPage(4);
+        settings.selectPage(@import("config/settings_pages.zig").ai_models_index);
         if (ollama) for (settings.controller.model.value.ai.providers[0..settings.controller.model.value.ai.provider_count], 0..) |provider, index| {
             if (provider.kind != .ollama) continue;
             settings.controller.ai_fields.provider_open.put(self.allocator, index, true) catch return;
             settings.controller.ai_fields.connection_open.put(self.allocator, index, true) catch return;
-            settings.controller.scroll_offsets[4] = 0;
+            settings.controller.scroll_offsets[5] = 0;
             break;
         };
         self.cx.requestRedraw();
@@ -13025,7 +13025,7 @@ const SettingsHost = struct {
     mounted_filtered: bool = false,
     mounted_theme_library_open: bool = false,
     mounted_plugin_preview: ?@import("config/plugin_page.zig").PreviewKind = null,
-    search_scroll_offsets: [9]f32 = @splat(0),
+    search_scroll_offsets: [13]f32 = @splat(0),
     plugin_preview_scroll_offsets: [2][7]f32 = @splat(@splat(0)),
     focus_return: ?*ui.Node = null,
     decision_open: ?*ui.Signal(bool) = null,
@@ -13587,7 +13587,7 @@ const SettingsHost = struct {
         self.cancelDecision();
         self.dismissPicker();
         self.pending_ai_problem = problem.ai_address;
-        if (problem.page != 4) self.controller.folded_sections = 0;
+        if (problem.page != @import("config/settings_pages.zig").ai_models_index) self.controller.folded_sections = 0;
         self.selectPage(problem.page);
         self.controller.scroll_offsets[problem.page] = 0;
         self.cx.requestRedraw();
@@ -14067,7 +14067,7 @@ const SettingsHost = struct {
         const c = app_theme.current();
         const current = self.controller.model.page_index;
         const settings_styles = @import("config/settings_styles.zig");
-        const icons = [_]ui.SvgAsset{ ui.icons.palette, ui.icons.keyboard, ui.icons.network, ui.icons.arrow_down_up, ui.icons.sparkles, ui.icons.plug, ui.icons.bell, ui.icons.database, ui.icons.refresh_cw };
+        const icons = [_]ui.SvgAsset{ ui.icons.palette, ui.icons.terminal, ui.icons.keyboard, ui.icons.network, ui.icons.arrow_down_up, ui.icons.sparkles, ui.icons.get("messages-square").?, ui.icons.get("users").?, ui.icons.get("layers").?, ui.icons.plug, ui.icons.bell, ui.icons.database, ui.icons.refresh_cw };
         for (settings_pages_mod.pages, 0..) |page, index| {
             const selected = index == current;
             const click = try self.cx.allocator.create(SettingsNavClick);
@@ -14077,7 +14077,7 @@ const SettingsHost = struct {
             btn.setStyleInline(self.cx.allocator, .{ .width = .fill(), .height = .{ .px = 36 }, .flex_shrink = 0, .direction = .row, .align_items = .center, .justify = .start, .gap = 8, .padding = .{ .left = 6, .right = 6 }, .border = .{ .width = 0, .color = c.border, .radius = 7 } });
             try btn.appendChild(self.cx.allocator, try ui.iconTint(self.cx, icons[index], if (selected) c.accent else settings_styles.secondaryInk(), .{ .width = .{ .px = 16 }, .height = .{ .px = 16 }, .flex_shrink = 0 }));
             try btn.appendChild(self.cx.allocator, try ui.text(self.cx, page.name, .{ .font_size = 12, .font_weight = if (selected) @as(u16, 600) else 400, .color = if (selected) c.fg_1 else settings_styles.secondaryInk() }));
-            const test_ids = [_][]const u8{ "settings.nav.appearance", "settings.nav.keys", "settings.nav.ssh", "settings.nav.transfer", "settings.nav.ai", "settings.nav.plugins", "settings.nav.notifications", "settings.nav.data", "settings.nav.updates" };
+            const test_ids = [_][]const u8{ "settings.nav.appearance", "settings.nav.terminal", "settings.nav.keys", "settings.nav.ssh", "settings.nav.transfer", "settings.nav.ai.models", "settings.nav.ai", "settings.nav.ai.children", "settings.nav.ai.context", "settings.nav.plugins", "settings.nav.notifications", "settings.nav.data", "settings.nav.updates" };
             btn.meta.ownership.meta.test_id = test_ids[index];
             try self.nav_list.appendChild(self.cx.allocator, btn);
         }
@@ -14161,7 +14161,7 @@ const SettingsHost = struct {
         self.mounted_page_index = self.controller.model.page_index;
         self.mounted_filtered = self.controller.search_query.len != 0;
         self.mounted_theme_library_open = self.mounted_page_index == 0 and self.controller.theme_library.open;
-        self.mounted_plugin_preview = if (self.mounted_page_index == 5) self.controller.plugin_page.preview_kind else null;
+        self.mounted_plugin_preview = if (self.mounted_page_index == 9) self.controller.plugin_page.preview_kind else null;
         self.restore_scroll = true;
         try self.content.appendChild(self.allocator, view.root);
         if (focus) |snapshot| _ = view.restoreFocus(snapshot);
@@ -19386,7 +19386,7 @@ const NotificationWindowHook = struct {
     fn feedback(raw: *anyopaque, message: []const u8) void {
         const self: *NotificationWindowHook = @ptrCast(@alignCast(raw));
         if (self.workspace.shutting_down) return;
-        if (self.settings.open and self.settings.controller.model.page_index == 6) self.settings.refresh(message) else self.workspace.status(message);
+        if (self.settings.open and self.settings.controller.model.page_index == 10) self.settings.refresh(message) else self.workspace.status(message);
         self.cx.requestRedraw();
     }
     fn observeReconnect(self: *NotificationWindowHook, tab: *ws.SessionTab) void {
@@ -19414,7 +19414,7 @@ const NotificationWindowHook = struct {
     fn maintain(raw: *anyopaque, settings_changed: bool) void {
         const self: *NotificationWindowHook = @ptrCast(@alignCast(raw));
         if (self.workspace.shutting_down) return;
-        if (settings_changed and self.settings.open and self.settings.controller.model.page_index == 6) {
+        if (settings_changed and self.settings.open and self.settings.controller.model.page_index == 10) {
             self.settings.pending_rebuild = true;
             self.cx.requestRedraw();
         }
@@ -21520,17 +21520,16 @@ fn wallClockMsTransfer() u64 {
     return @as(u64, @intCast(ts.sec)) * std.time.ms_per_s + @as(u64, @intCast(ts.nsec)) / std.time.ns_per_ms;
 }
 
-fn dataStartupAlert(err: anyerror, reset_pending: bool) bool {
-    const Native = struct {
-        extern fn zw_data_startup_alert([*:0]const u8, [*]const u8, usize, c_int, [*]const u8, usize) c_int;
+pub fn main() !void {
+    const StartupAlert = @import("platform/startup_alert.zig").StartupAlert;
+    var startup: StartupAlert = .{};
+    runApplication(&startup) catch |err| {
+        startup.reportUnhandled(err);
+        return err;
     };
-    std.log.err("opening application data: {s}", .{@errorName(err)});
-    const message = @import("ui/feedback_message.zig").knownMessage(@errorName(err)) orelse "无法加载配置。请检查应用数据目录的权限和配置文件是否有效，再重新打开 ZeroWork。原有数据会保留。";
-    const icon = @import("app_icon_assets").transparent;
-    return Native.zw_data_startup_alert(@errorName(err), message.ptr, message.len, if (reset_pending) 1 else 0, icon.ptr, icon.len) != 0;
 }
 
-pub fn main() !void {
+fn runApplication(startup: *@import("platform/startup_alert.zig").StartupAlert) !void {
     const started_at = wallClockMsTransfer();
     @import("vt/input_timing.zig").configure();
     @import("vt/output_timing.zig").configure();
@@ -21550,7 +21549,7 @@ pub fn main() !void {
     if (@import("update/client.zig").zw_update_startup_gate(update_data.ptr) == 0) return;
     const update_at = wallClockMsTransfer();
     var scope_lock = @import("platform/data_scope_lock.zig").Lock.acquire(std.heap.c_allocator, data_paths.directory, data_paths.is_override) catch |err| {
-        _ = dataStartupAlert(err, false);
+        _ = startup.dataFailure(err, false);
         return err;
     };
     defer scope_lock.release();
@@ -21562,19 +21561,19 @@ pub fn main() !void {
     try credentials.configureLocal(io_threaded.io(), data_paths.directory);
     const scope_at = wallClockMsTransfer();
     const preparation = lifecycle.prepare(io_threaded.io(), &data_paths) catch |err| {
-        if (err == error.ResetIncomplete and dataStartupAlert(err, true)) {
+        if (err == error.ResetIncomplete and startup.dataFailure(err, true)) {
             credentials.eraseScope() catch |failure| {
-                _ = dataStartupAlert(failure, false);
+                _ = startup.dataFailure(failure, false);
                 return failure;
             };
             const report = try lifecycle.eraseOwned(io_threaded.io(), &data_paths);
             for (report.items[0..report.count]) |item| if (item.failure) |failure| {
-                _ = dataStartupAlert(failure, false);
+                _ = startup.dataFailure(failure, false);
                 return failure;
             };
             return;
         }
-        if (err != error.ResetIncomplete) _ = dataStartupAlert(err, false);
+        if (err != error.ResetIncomplete) _ = startup.dataFailure(err, false);
         return err;
     };
     const data_at = wallClockMsTransfer();
@@ -21582,6 +21581,11 @@ pub fn main() !void {
     defer applog.shutdown();
     applog.info(.app, "ZeroWork starting", .{});
     applog.info(.app, "startup ms fonts={d} paths_and_update={d} scope={d} data={d} logging={d} secured_files={d}", .{ fonts_at - started_at, update_at - fonts_at, scope_at - update_at, data_at - scope_at, wallClockMsTransfer() - data_at, preparation.secured_files });
+    var config_line: ?usize = null;
+    @import("config/store.zig").validateStartupConfig(io_threaded.io(), .cwd(), data_paths.config, &config_line) catch |err| {
+        startup.configFailure(io_threaded.io(), err, config_line);
+        return err;
+    };
     const notifications = try NotificationHost.create(std.heap.c_allocator, .{});
     defer notifications.destroy();
     process_notifications = notifications;
@@ -21727,6 +21731,18 @@ pub fn main() !void {
         if (!interactive_reported and (nav.startup_view == null or nav.startup_view.?.transition.finished)) {
             interactive_reported = true;
             applog.info(.app, "startup interactive ms total={d}", .{wallClockMsTransfer() - started_at});
+            const unsupported_fields = process.runtime_config.?.value.unknown_fields;
+            if (unsupported_fields.len != 0) {
+                const line = unsupported_fields[0].line;
+                applog.warn(.config, "config.toml ignored {d} unsupported settings, first line {d}", .{ unsupported_fields.len, line });
+                if (nav.settings) |settings| if (settings.notification_window) |window| {
+                    var title_buffer: [96]u8 = undefined;
+                    var detail_buffer: [192]u8 = undefined;
+                    const title = std.fmt.bufPrint(&title_buffer, "已跳过 {d} 处未识别的配置", .{unsupported_fields.len}) catch "已跳过未识别的配置";
+                    const detail = std.fmt.bufPrint(&detail_buffer, "第一处位于 config.toml 第 {d} 行。", .{line}) catch "请检查 config.toml。";
+                    notifications.publishWindowAdvisory(window, title, detail) catch |err| applog.warn(.ui, "config warning presentation: {s}", .{@errorName(err)});
+                };
+            }
             if (unlock_credentials) {
                 credential_unlock_started = wallClockMsTransfer();
                 if (std.Thread.spawn(.{}, credentials.unlockAtStartup, .{})) |worker| {
@@ -21743,6 +21759,7 @@ pub fn main() !void {
         }
         if (!startup_reported) {
             startup_reported = true;
+            startup.complete = true;
             const ready_at = wallClockMsTransfer();
             applog.info(.app, "startup first tick ms window_setup={d} mount={d} post_mount={d} total={d}", .{ window_at - data_at, mounted_at - window_at, ready_at - mounted_at, ready_at - started_at });
         }

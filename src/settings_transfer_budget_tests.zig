@@ -24,6 +24,7 @@ test "settings transfer budget rejects edited per-job excess preserving raw draf
     try std.testing.expectEqual(error.TransferWindowBudgetExceeded, c.fieldProblem(window).?);
     try std.testing.expectEqual(settings.State.dirty_invalid, c.state());
     try std.testing.expect(!c.canSave());
+    try std.testing.expectEqual(@as(usize, 4), c.validationProblem().?.page);
     try std.testing.expectError(error.InvalidDraft, c.save(io, tmp.dir, &target));
     try std.testing.expectEqual(revision, target.value.config_revision);
     try std.testing.expectEqual(@as(u8, 16), target.value.transfer.window_chunks);
@@ -138,7 +139,7 @@ test "settings transfer budget actual Cx inputs show field issue and clear it wh
     cx.root = try ui.box(cx, .{ .width = .{ .px = 636 }, .height = .{ .px = 628 } }, .{});
     var c = try settings.Controller.init(a, .{});
     defer c.deinit();
-    c.model.selectPage(3);
+    c.model.selectPage(4);
     c.folded_sections = 0;
     var context: u8 = 0;
     const page = try view.mountPage(cx, scope, &c, .{ .context = &context, .changed = changed, .request_edit = request, .action = action });

@@ -82,7 +82,7 @@ test "settings scalar lifecycle covers every schema field through cancel save re
                 return err;
             };
             try std.testing.expect(c.dirty_fields.isSet(index));
-            c.model.selectPage(7);
+            c.model.selectPage(11);
             c.model.selectPage(0);
             c.discard();
             try std.testing.expect(schema.fieldEqual(c.model.value, original, index));
