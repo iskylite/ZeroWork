@@ -13,8 +13,7 @@ pub fn mountContent(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
         try section.toggle(.{ .section = "notify", .key = "reconnect" }, "持续连接故障", "断线后自动重连停止并影响工作时提醒。", null);
         try section.toggle(.{ .section = "notify", .key = "ai_ready" }, "后台 AI 任务完成", "默认关闭；仅最终答复完成且离开应用时提醒。", null);
         try section.toggle(.{ .section = "notify", .key = "bell" }, "终端 Bell 声音", "", null);
-        const permission_panel = try ui.box(cx, .{ .width = .fill(), .direction = .column, .padding = .{ .left = 10, .right = 10, .bottom = 8 }, .margin = .{ .top = 8, .bottom = 8 }, .background = controls.S.theme.current().well, .border = .{ .radius = 8 } }, .{});
-        const row = try ui.boxStyled(cx, controls.S.fieldRow, .{});
+        const row = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 50 }, .direction = .row, .align_items = .center, .gap = 12, .padding = .{ .left = 12, .right = 12 }, .background = controls.S.theme.current().well, .border = .{ .radius = 8 }, .flex_shrink = 0 }, .{});
         row.meta.ownership.meta.test_id = "settings.notifications.permission";
         const labels = try ui.boxStyled(cx, controls.S.fieldLabel, .{});
         try labels.appendChild(cx.allocator, try ui.textStyled(cx, controls.S.label, "系统通知权限"));
@@ -36,11 +35,11 @@ pub fn mountContent(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
             } else {
                 const label = if (std.mem.eql(u8, status, "未授权")) "允许通知" else "打开系统设置";
                 const action = try bound.actionButton(cx, .notification_permission, ui.icons.external_link, label, "settings.notifications.permission.open", false);
+                action.button.setStyleInline(cx.allocator, .{ .height = .{ .px = 30 }, .padding = .{ .left = 12, .right = 12 }, .background = controls.S.theme.current().surface_1, .border = .{ .radius = 8 } });
                 try row.appendChild(cx.allocator, action.wrapper);
             }
         }
-        try permission_panel.appendChild(cx.allocator, row);
-        try section.body.appendChild(cx.allocator, permission_panel);
+        try section.body.appendChild(cx.allocator, row);
     }
     if (binding.matches(query, "注意标记 勿扰 非活跃 后台 标签 图标 跳动 圆点 时段 tab_dot quiet_hours")) {
         const section = try page.section("注意标记与勿扰", "标签跳动与勿扰时段", ui.icons.moon, 49, "settings.notifications.attention", null);

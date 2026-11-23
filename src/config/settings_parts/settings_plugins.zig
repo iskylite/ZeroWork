@@ -27,7 +27,7 @@ fn card(cx: *ui.Cx, bound: *binding.Binding, title: []const u8, summary: []const
         header.behavior.events.on_event = null;
         header.behavior.interaction.focusable = false;
     }
-    result.body.style.padding = .{ .left = 16, .right = 16, .bottom = 8 };
+    result.body.style.padding = .{ .left = 16, .right = 16, .bottom = 16 };
     result.body.style.width = .fill();
     result.body.style.direction = .column;
     result.body.style.gap = 0;
@@ -98,24 +98,24 @@ fn pluginId(scope: *ui.Scope, plugin_id: []const u8, suffix: []const u8) ![]cons
     return controls.owned(scope, value);
 }
 fn pluginRow(cx: *ui.Cx, bound: *binding.Binding, details: *Info, entry: registry.PluginManifest) !*ui.Node {
-    const row = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 66 }, .direction = .row, .align_items = .center, .gap = 10, .flex_shrink = 0, .min_width = 0 }, .{});
+    const row = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 57 }, .direction = .row, .align_items = .center, .gap = 12, .flex_shrink = 0, .min_width = 0 }, .{});
     row.meta.ownership.meta.test_id = try pluginId(bound.scope, entry.id, "row");
     const icon = @import("../../ui/session_icon.zig").asset(entry.icons.settings);
     try row.appendChild(cx.allocator, try ui.iconTint(cx, icon, S.theme.current().accent, .{ .width = .{ .px = 16 }, .height = .{ .px = 16 }, .flex_shrink = 0 }));
-    const labels = try ui.box(cx, .{ .width = .fill(), .flex = 1, .min_width = 0, .direction = .column, .gap = 3 }, .{});
-    const name = try ui.text(cx, entry.display_name, .{ .font_size = 12, .font_weight = 500, .line_height = 1.5, .color = S.theme.current().fg_1 });
+    const labels = try ui.box(cx, .{ .width = .fill(), .flex = 1, .min_width = 0, .direction = .column, .gap = 2 }, .{});
+    const name = try ui.text(cx, entry.display_name, .{ .font_size = 12, .font_weight = 500, .line_height = 17.0 / 12.0, .color = S.theme.current().fg_1 });
     name.meta.ownership.meta.test_id = try pluginId(bound.scope, entry.id, "name");
     try labels.appendChild(cx.allocator, name);
-    const detail = try ui.text(cx, description(entry), .{ .font_size = 11, .line_height = 18.0 / 11.0, .color = S.theme.current().fg_2, .wrap = .word });
+    const detail = try ui.text(cx, description(entry), .{ .font_size = 11, .line_height = 16.0 / 11.0, .color = S.theme.current().fg_2, .wrap = .word });
     detail.style.width = .fill();
     detail.meta.ownership.meta.test_id = try pluginId(bound.scope, entry.id, "description");
     try labels.appendChild(cx.allocator, detail);
     try row.appendChild(cx.allocator, labels);
     const tag = try ui.widgets.Tag(.{ .label = if (entry.origin == .builtin) @as([]const u8, "内置") else "随应用提供", .color = .neutral, .size = .sm }).mount(bound.scope, cx);
-    tag.setStyleInline(cx.allocator, .{ .height = .{ .px = 22 }, .padding = .{ .left = 6, .right = 6, .top = 3, .bottom = 3 }, .background = S.theme.states().tag, .border = .{ .radius = 5 }, .flex_shrink = 0 });
+    tag.setStyleInline(cx.allocator, .{ .height = .{ .px = 22 }, .padding = .{ .left = 8, .right = 8, .top = 3, .bottom = 3 }, .background = S.theme.states().tag, .border = .{ .radius = 5 }, .flex_shrink = 0 });
     for (tag.children.items) |child| if (child.getText()) |old| {
         var text = old;
-        text.font_size = 10;
+        text.font_size = 10.5;
         text.color = S.theme.current().fg_2;
         child.setText(text);
     };
@@ -300,11 +300,12 @@ fn infoButton(cx: *ui.Cx, bound: *binding.Binding, details: *Info, entry: regist
         var buffer: [80]u8 = undefined;
         state.ids[i] = try pluginId(bound.scope, entry.id, try std.fmt.bufPrint(&buffer, "{s}.{s}", .{ suffix, part }));
     }
-    var style = if (icon_only) S.button(30, false) else S.textButton();
+    var style = if (icon_only) S.button(24, false) else S.textButton();
     style.background = ui.Color.TRANSPARENT;
-    style.text_color = if (icon_only) S.theme.current().fg_2 else S.theme.current().accent_ink;
-    style.font_size = 11;
-    const button = try ui.widgets.Button(.{ .label = label, .icon_asset = if (icon_only) ui.icons.info else null, .icon_only = icon_only, .icon_size = @as(f32, 16), .variant = .ghost, .a11y_label = title, .base_style = style, .hover_style = S.buttonHover(), .on_click = cx.on(InfoAction, state, InfoAction.show) }).mount(bound.scope, cx);
+    style.text_color = S.theme.current().fg_2;
+    style.font_size = 11.5;
+    if (!icon_only) style.padding = .ZERO;
+    const button = try ui.widgets.Button(.{ .label = label, .icon_asset = if (icon_only) ui.icons.info else null, .icon_only = icon_only, .icon_size = @as(f32, 15), .variant = .ghost, .a11y_label = title, .base_style = style, .hover_style = S.buttonHover(), .on_click = cx.on(InfoAction, state, InfoAction.show) }).mount(bound.scope, cx);
     button.meta.ownership.meta.test_id = try pluginId(bound.scope, entry.id, suffix);
     return button;
 }

@@ -178,14 +178,15 @@ pub fn mount(section: *controls.Section) !void {
     error_label.setDisplay(.none);
     try section.body.appendChild(cx.allocator, error_label);
     const actions = try row(cx);
+    actions.setStyleInline(cx.allocator, .{ .height = .{ .px = 40 }, .padding = ui.Padding.ZERO });
     var buffer: [96]u8 = undefined;
     const summary = try std.fmt.bufPrint(&buffer, "{d} 个模板 · {d} 个启用", .{ current.len, @intFromBool(active != null) });
-    const count = try ui.textStyled(cx, controls.S.note, "");
+    const count = try ui.text(cx, "", .{ .font_size = 11.5, .line_height = 17.0 / 11.5, .color = controls.S.secondaryInk() });
     try count.setTextContent(cx.allocator, summary);
     try actions.appendChild(cx.allocator, count);
     try actions.appendChild(cx.allocator, try ui.spacer(cx));
     const create = try bound.scope.createState(RowAction, .{ .bound = bound, .index = null, .kind = .create, .error_label = error_label });
-    const add = try ui.widgets.Button(.{ .variant = .secondary, .icon_only = true, .icon_asset = ui.icons.plus, .icon_size = @as(f32, 16), .a11y_label = "新建模板", .on_click = cx.on(RowAction, create, RowAction.run) }).mount(bound.scope, cx);
+    const add = try ui.widgets.Button(.{ .variant = .secondary, .icon_only = true, .icon_asset = ui.icons.plus, .icon_size = @as(f32, 14), .a11y_label = "新建模板", .base_style = .{ .width = .{ .px = 28 }, .height = .{ .px = 28 }, .padding = ui.Padding.ZERO, .background = controls.S.theme.states().control, .text_color = controls.S.theme.current().fg_1, .corner_radius = 7, .border_width = 0, .flex_shrink = 0 }, .hover_style = controls.S.buttonHover(), .on_click = cx.on(RowAction, create, RowAction.run) }).mount(bound.scope, cx);
     add.meta.ownership.meta.test_id = "settings.template.create";
     try actions.appendChild(cx.allocator, add);
     try section.body.appendChild(cx.allocator, actions);

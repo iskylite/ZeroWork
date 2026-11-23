@@ -8,9 +8,9 @@ pub const ButtonStyle = @FieldType(ui.widgets.ControlShellConfig, "style");
 pub fn paintSearch(cx: *ui.Cx, input: *const ui.widgets.input.InputResult) void {
     const c = theme.current();
     input.state.tokens = cx.tokens;
-    input.state.placeholder_color = c.fg_2;
+    input.state.placeholder_color = c.fg_3;
     input.state.dirty = true;
-    input.input_container.setBackground(theme.popupInset());
+    input.input_container.setBackground(quietControl());
     input.input_container.setBorderColor(if (input.state.focused) c.accent else input.state.restingBorderColor());
     input.input_container.markRenderDirty();
 }
@@ -20,21 +20,18 @@ pub const geometry = struct {
     pub const panel_height = @import("../ui/v3_geometry.zig").settings_height;
     pub const compact_height: f32 = 432;
     pub const card_padding: f32 = 10;
-    pub const header_height: f32 = 62;
-    pub const footer_height: f32 = 58;
-    pub const header_gap: f32 = 6;
-    // Frozen V3 settings owns a fixed page heading and footer around its scroll area.
-    pub const viewport_gap: f32 = 0;
-    pub const footer_gap: f32 = 0;
-    pub const scrollbar_gutter: f32 = 16;
+    pub const header_height: f32 = 65;
+    pub const footer_height: f32 = 56;
+    pub const content_inset: f32 = 24;
+    pub const header_gap: f32 = 10;
+    pub const nav_row_height: f32 = 34;
     pub const section_gap: f32 = 6;
-    // Frozen V3 cards keep the description below their title in both fold states.
-    pub const section_spacing: f32 = 10;
+    pub const section_spacing: f32 = 12;
     pub const section_padding_x: f32 = 0;
     pub const section_padding_y: f32 = 0;
-    pub const section_summary_header: f32 = 62;
-    pub const section_title_line: f32 = 20;
-    pub const section_icon: f32 = 18;
+    pub const section_summary_header: f32 = 64;
+    pub const section_title_line: f32 = 19;
+    pub const section_icon: f32 = 16;
     pub const section_chevron: f32 = 14;
     pub const card_radius: f32 = 11;
     pub const section_radius: f32 = 11;
@@ -50,11 +47,10 @@ pub const geometry = struct {
     pub const plugin_notice_icon: f32 = 16;
     pub const control_width: f32 = 220;
     pub const control_height: f32 = 32;
-    pub const field_gap: f32 = 20;
+    pub const field_gap: f32 = 16;
     pub const help_button: f32 = 22;
     pub const switch_width: f32 = 30;
     pub const switch_height: f32 = 18;
-    pub const switch_thumb: f32 = 14;
     pub const help_width: f32 = 292;
 };
 
@@ -62,16 +58,18 @@ pub fn content(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .fill(), .direction = .column, .padding = .{}, .background = ui.Color.TRANSPARENT, .border = .{ .radius = geometry.card_radius }, .min_width = 0 };
 }
 pub fn header(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = geometry.header_height }, .direction = .row, .gap = geometry.header_gap, .align_items = .start, .padding = .{ .left = 5, .right = 5, .top = 4, .bottom = 16 }, .flex_shrink = 0 };
+    return .{ .width = .fill(), .height = .{ .px = geometry.header_height }, .direction = .row, .gap = geometry.header_gap, .align_items = .start, .padding = .{ .left = geometry.content_inset, .right = geometry.content_inset, .top = 16, .bottom = 10 }, .flex_shrink = 0 };
 }
 pub fn footer(_: *const ui.ThemeTokens) ui.BoxStyle {
     var style = header(undefined);
     style.height = .{ .px = geometry.footer_height };
     style.gap = 8;
     style.align_items = .center;
-    style.padding = .{ .left = 5, .right = 5, .top = 12 };
-    style.margin = .{ .top = geometry.footer_gap };
+    style.padding = .{ .left = geometry.content_inset, .right = geometry.content_inset };
     return style;
+}
+pub fn navigationItem(selected: bool) ui.BoxStyle {
+    return .{ .width = .fill(), .height = .{ .px = geometry.nav_row_height }, .flex_shrink = 0, .direction = .row, .align_items = .center, .justify = .start, .gap = 10, .padding = .{ .left = 10, .right = 10 }, .background = if (selected) selectionBackground(false) else ui.Color.TRANSPARENT, .border = .{ .radius = 8 } };
 }
 pub fn title(_: *const ui.ThemeTokens) ui.TextStyle {
     return .{ .font_size = 14, .font_weight = 700, .line_height = 20.0 / 14.0, .color = theme.current().fg_1 };
@@ -127,7 +125,7 @@ fn tuneSelectText(node: *ui.Node) void {
     }
     for (node.children.items) |child| tuneSelectText(child);
 }
-pub fn tuneInput(input: *ui.widgets.input.InputResult) void {
+pub fn tuneInput(input: *const ui.widgets.input.InputResult) void {
     input.state.font_size = 12;
     input.state.line_height = 18;
     input.state.dirty = true;
@@ -183,13 +181,32 @@ pub fn providerSelect() ButtonStyle {
     return style;
 }
 pub fn paintSwitch(cx: *ui.Cx, node: *ui.Node, enabled: bool) void {
-    node.setStyleInline(cx.allocator, .{ .width = .{ .px = geometry.switch_width }, .height = .{ .px = geometry.switch_height }, .gap = 0, .padding = .ZERO, .flex_shrink = 0 });
+    const disabled = switchDisabled(node);
+    paintSwitchSize(cx, node, enabled, geometry.switch_width, geometry.switch_height, theme.choiceBackground(enabled, disabled), theme.choiceThumb(enabled, disabled));
+}
+pub fn paintSettingsSwitch(cx: *ui.Cx, node: *ui.Node, enabled: bool) void {
+    const disabled = switchDisabled(node);
+    paintSwitchSize(cx, node, enabled, 40, 22, settingsSwitchFill(enabled, disabled), settingsSwitchThumb(enabled, disabled));
+}
+pub fn settingsSwitchFill(enabled: bool, disabled: bool) ui.Color {
+    if (disabled or theme.currentName() == .dark) return theme.choiceBackground(enabled, disabled);
+    const c = theme.current();
+    return if (enabled) c.action_accent else ui.Color.lerp(c.fg_2, c.overlay, 0.62);
+}
+pub fn settingsSwitchThumb(enabled: bool, disabled: bool) ui.Color {
+    return if (disabled or theme.currentName() == .dark) theme.choiceThumb(enabled, disabled) else ui.Color.WHITE;
+}
+fn switchDisabled(node: *ui.Node) bool {
+    return if (node.behavior.interaction.a11y) |a| a.disabled else false;
+}
+fn paintSwitchSize(cx: *ui.Cx, node: *ui.Node, enabled: bool, width: f32, height: f32, fill: ui.Color, thumb: ui.Color) void {
+    node.setStyleInline(cx.allocator, .{ .width = .{ .px = width }, .height = .{ .px = height }, .gap = 0, .padding = ui.Padding.ZERO, .flex_shrink = 0 });
     const track = node.children.items[0];
-    const disabled = if (node.behavior.interaction.a11y) |a| a.disabled else false;
-    track.setStyleInline(cx.allocator, .{ .width = .{ .px = geometry.switch_width }, .height = .{ .px = geometry.switch_height }, .background = theme.choiceBackground(enabled, disabled), .border = .{ .width = 0, .radius = 9 } });
+    const thumb_size = height - 4;
+    track.setStyleInline(cx.allocator, .{ .width = .{ .px = width }, .height = .{ .px = height }, .background = fill, .border = .{ .width = 0, .radius = height / 2 } });
     // Pin the thumb to the track's layout coordinates. A translated absolute
     // child can retain its old composite position inside a material overlay.
-    track.children.items[0].setStyleInline(cx.allocator, .{ .width = .{ .px = geometry.switch_thumb }, .height = .{ .px = geometry.switch_thumb }, .inset = .{ .left = .{ .px = if (enabled) 14 else 2 }, .top = .{ .px = 2 } }, .translate_x = 0, .translate_y = 0, .background = theme.choiceThumb(enabled, disabled), .border = .{ .radius = 7 } });
+    track.children.items[0].setStyleInline(cx.allocator, .{ .width = .{ .px = thumb_size }, .height = .{ .px = thumb_size }, .inset = .{ .left = .{ .px = if (enabled) width - thumb_size - 2 else 2 }, .top = .{ .px = 2 } }, .translate_x = 0, .translate_y = 0, .background = thumb, .border = .{ .radius = thumb_size / 2 } });
 }
 pub fn shortcutGroup(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .height = .{ .px = 32 }, .direction = .row, .align_items = .center, .gap = 4, .flex_shrink = 0 };
@@ -239,15 +256,15 @@ pub fn sectionHeading(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .flex = 1, .min_width = 0, .height = .{ .fit = .{} }, .direction = .column, .gap = 2 };
 }
 pub fn sectionTitle(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .fill(), .min_width = 0, .height = .{ .px = geometry.section_title_line }, .flex_shrink = 0, .font_size = 14, .font_weight = 700 };
+    return .{ .width = .fill(), .min_width = 0, .height = .{ .px = geometry.section_title_line }, .flex_shrink = 0, .font_size = 13, .font_weight = 600 };
 }
-pub fn summaryHeader(expanded: bool, has_summary: bool) ui.BoxStyle {
+pub fn summaryHeader(has_summary: bool) ui.BoxStyle {
     var style = sectionHeader(undefined);
     style.border = .{ .width = 0, .color = ui.Color.TRANSPARENT, .radius = 0 };
     style.overflow_hidden = true;
     style.height = .{ .fit = .{} };
-    style.min_height = if (!expanded and has_summary) geometry.section_summary_header else 48;
-    style.padding = .{ .left = 15, .right = 15, .top = 12, .bottom = 12 };
+    style.min_height = if (has_summary) geometry.section_summary_header else 45;
+    style.padding = .{ .left = 16, .right = 16, .top = 16, .bottom = 10 };
     style.gap = 10;
     return style;
 }
@@ -278,14 +295,19 @@ pub fn textButton() ButtonStyle {
 pub fn footerButton() ButtonStyle {
     var style = textButton();
     style.height = .{ .px = 32 };
-    style.min_width = 92;
+    style.min_width = 72;
     style.padding = .{ .left = 12, .right = 12 };
     style.font_size = 12;
     style.font_weight = 500;
     style.gap = 6;
-    style.background = theme.states().control;
-    style.text_color = theme.current().fg_1;
+    style.background = quietControl();
+    style.text_color = theme.current().fg_3;
     return style;
+}
+
+fn quietControl() ui.Color {
+    const c = theme.current();
+    return if (theme.currentName() == .dark) theme.states().control else ui.Color.lerp(c.overlay, c.fg_2, 0.066).withAlpha(c.overlay.a);
 }
 
 pub fn buttonHover() ButtonStyle {
@@ -304,10 +326,8 @@ pub fn cardHover() ui.Color {
 }
 pub fn selectionBackground(hovered: bool) ui.Color {
     const c = theme.current();
-    // Light palettes may use a pale decorative accent. The existing action
-    // accent retains selection contrast through the translucent material.
-    const accent = if (theme.currentName() == .dark) c.accent else c.action_accent;
-    return ui.Color.lerp(c.overlay.withAlpha(255), accent.withAlpha(255), if (hovered) 0.9 else 0.7).withAlpha(c.tab_on.a);
+    if (theme.currentName() == .dark) return ui.Color.lerp(c.overlay.withAlpha(255), c.accent, if (hovered) 0.9 else 0.7).withAlpha(c.tab_on.a);
+    return ui.Color.lerp(c.overlay, c.action_accent, if (hovered) 0.20 else 0.12).withAlpha(c.overlay.a);
 }
 pub fn selectionHover(selected: bool) ui.BoxStyle {
     return .{ .background = if (selected) selectionBackground(true) else interactionHover() };
@@ -389,7 +409,7 @@ pub fn pluginNoticeText(tone: PluginNoticeTone) ui.TextStyle {
 }
 
 pub fn sectionSummary(_: *const ui.ThemeTokens) ui.TextStyle {
-    return .{ .font_size = 11, .font_weight = 400, .line_height = 16.0 / 11.0, .color = secondaryInk(), .wrap = .word };
+    return .{ .font_size = 11.5, .font_weight = 400, .line_height = 17.0 / 11.5, .color = secondaryInk(), .wrap = .word };
 }
 
 // Frozen V3 model row and native dialog layout.

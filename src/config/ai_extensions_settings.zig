@@ -189,19 +189,7 @@ pub const View = struct {
         const fold = try scope.createState(Fold, .{ .view = self, .bit = bit });
         const expanded = self.controller.search_query.len != 0 or self.controller.folded_sections & (@as(u64, 1) << bit) == 0;
         const result = try @import("settings_accordion.zig").item(.{ .title = title, .expanded = expanded, .on_change = self.cx.on(Fold, fold, Fold.change), .variant = .ghost }).mount(scope, self.cx);
-        const is_mcp = std.mem.eql(u8, id, "settings.ai.mcp");
-        _ = try controls.sectionHeader(self.cx, scope, result, icon, expanded, if (is_mcp) "" else hint, id);
-        if (is_mcp and !self.editing) {
-            result.header.removeChild(result.chevron);
-            const space = try ui.box(self.cx, .{ .width = .{ .px = 86 }, .height = .{ .px = 28 }, .flex_shrink = 0 }, .{});
-            try result.header.appendChild(self.cx.allocator, space);
-            try result.header.appendChild(self.cx.allocator, result.chevron);
-            const state = try scope.createState(Button, .{ .view = self, .action = .new_server, .index = 0 });
-            const add = try ui.widgets.Button(.{ .label = "添加", .a11y_label = "添加 MCP 服务", .icon_asset = ui.icons.plus, .icon_size = @as(f32, 14), .variant = .ghost, .disabled = self.job != null or self.controller.state() == .saving, .base_style = M.testAction(), .on_click = self.cx.on(Button, state, Button.click) }).mount(scope, self.cx);
-            add.setStyleInline(self.cx.allocator, .{ .position = .absolute, .inset = .{ .right = .{ .px = 34 }, .top = .{ .px = 12 } } });
-            add.meta.ownership.meta.test_id = "settings.mcp.add";
-            try result.item.appendChild(self.cx.allocator, add);
-        }
+        _ = try controls.sectionHeader(self.cx, scope, result, icon, expanded, hint, id);
         result.item.meta.ownership.meta.test_id = id;
         result.header.meta.ownership.meta.test_id = try controls.stableId(scope, id, ".header");
         if (self.controller.state() == .saving or self.controller.search_query.len != 0) {
@@ -209,7 +197,7 @@ pub const View = struct {
             result.header.setFocusable(false);
         }
         result.body.setStyleInline(self.cx.allocator, S.column(undefined));
-        result.body.setStyleInline(self.cx.allocator, .{ .padding = .{ .left = 16, .right = 16, .bottom = 8 }, .gap = 10 });
+        result.body.setStyleInline(self.cx.allocator, .{ .padding = .{ .left = 16, .right = 16, .bottom = 16 }, .gap = 10 });
         try self.root.appendChild(self.cx.allocator, result.item);
         if (!std.mem.eql(u8, id, "settings.ai.mcp") and !std.mem.eql(u8, id, "settings.ai.skills")) try self.text(result.body, hint, false);
         return result.body;
@@ -277,7 +265,7 @@ pub const View = struct {
         }
         self.render_scope = try self.scope.childScope();
         self.fields = @splat(null);
-        const skills_card = try self.card("本地技能", "导入 SKILL.md 或技能文件夹，保存后供助手使用。", "settings.ai.skills", ui.icons.sparkles, 31);
+        const skills_card = try self.card("本地技能", "导入 SKILL.md 或技能文件夹，保存后供助手使用。", "settings.ai.skills", ui.icons.sparkles, 33);
         skills_card.meta.ownership.meta.test_id = "settings.skills.drop";
         skills_card.behavior.events.on_event = dropEvent;
         skills_card.behavior.events.event_context = self;
@@ -288,7 +276,7 @@ pub const View = struct {
         for (skills) |skill| if (skill.enabled) {
             enabled += 1;
         };
-        const summary = try ui.textStyled(self.cx, M.metadata, try std.fmt.allocPrint(self.render_scope.?.allocator, "{d} 个技能 · {d} 个启用", .{ skills.len, enabled }));
+        const summary = try ui.text(self.cx, try std.fmt.allocPrint(self.render_scope.?.allocator, "{d} 个技能 · {d} 个启用", .{ skills.len, enabled }), .{ .font_size = 11.5, .line_height = 17.0 / 11.5, .color = S.secondaryInk() });
         summary.setStyleInline(self.cx.allocator, .{ .width = .fill(), .min_width = 0, .flex = 1 });
         summary.meta.ownership.meta.test_id = "settings.skills.summary";
         try toolbar.appendChild(self.cx.allocator, summary);
@@ -296,7 +284,20 @@ pub const View = struct {
         try skills_card.appendChild(self.cx.allocator, toolbar);
         for (self.controller.model.value.ai.extensions.skills, 0..) |skill, i| try self.skillRow(skills_card, skill, i);
         if (self.status_area == .skills) try self.statusText(skills_card);
-        const mcp_card = try self.card("MCP 服务", "连接外部工具与资源，供助手在对话中使用。", "settings.ai.mcp", ui.icons.plug, 32);
+        const mcp_card = try self.card("MCP 服务", "连接外部工具与资源，供助手在对话中使用。", "settings.ai.mcp", ui.icons.plug, 34);
+        if (!self.editing) {
+            const mcp_toolbar = try ui.boxStyled(self.cx, M.skillsToolbar, .{});
+            if (self.controller.model.value.ai.extensions.servers.len == 0) {
+                const empty = try ui.text(self.cx, "暂未配置 MCP 服务", .{ .font_size = 11.5, .line_height = 17.0 / 11.5, .color = S.theme.current().fg_3 });
+                empty.setStyleInline(self.cx.allocator, .{ .width = .fill(), .min_width = 0, .flex = 1 });
+                try mcp_toolbar.appendChild(self.cx.allocator, empty);
+            } else try mcp_toolbar.appendChild(self.cx.allocator, try ui.spacer(self.cx));
+            const add_state = try self.render_scope.?.createState(Button, .{ .view = self, .action = .new_server, .index = 0 });
+            const add = try ui.widgets.Button(.{ .label = "添加", .a11y_label = "添加 MCP 服务", .icon_asset = ui.icons.plus, .icon_size = @as(f32, 14), .variant = .ghost, .disabled = self.job != null or self.controller.state() == .saving, .base_style = M.toolbarAction(), .on_click = self.cx.on(Button, add_state, Button.click) }).mount(self.render_scope.?, self.cx);
+            add.meta.ownership.meta.test_id = "settings.mcp.add";
+            try mcp_toolbar.appendChild(self.cx.allocator, add);
+            try mcp_card.appendChild(self.cx.allocator, mcp_toolbar);
+        }
         for (self.controller.model.value.ai.extensions.servers, 0..) |server, i| try self.serverRow(mcp_card, server, i);
         if (self.editing) try self.form(mcp_card);
         if (self.job != null) {
@@ -329,7 +330,7 @@ pub const View = struct {
     fn compactButton(self: *View, parent: *ui.Node, label: []const u8, action: Action, index: usize, id: []const u8) !void {
         const scope = self.render_scope.?;
         const state = try scope.createState(Button, .{ .view = self, .action = action, .index = index });
-        const node = try ui.widgets.Button(.{ .label = label, .variant = .ghost, .disabled = self.job != null or self.controller.state() == .saving, .base_style = M.testAction(), .on_click = self.cx.on(Button, state, Button.click) }).mount(scope, self.cx);
+        const node = try ui.widgets.Button(.{ .label = label, .variant = .ghost, .disabled = self.job != null or self.controller.state() == .saving, .base_style = if (action == .choose_skill) M.toolbarAction() else M.testAction(), .on_click = self.cx.on(Button, state, Button.click) }).mount(scope, self.cx);
         node.meta.ownership.meta.test_id = try controls.owned(scope, id);
         if (action == .view_skill) if (node.behavior.interaction.a11y) |*access| {
             access.expanded = self.skillExpanded(self.controller.model.value.ai.extensions.skills[index]);
@@ -368,7 +369,7 @@ pub const View = struct {
         if (toggle.behavior.interaction.a11y) |*access| access.label = try std.fmt.allocPrint(a, "{s}{s}", .{ if (skill.enabled) "停用 " else "启用 ", skill.name });
         try scope.createEffect(.{ .cx = self.cx, .node = toggle, .checked = checked }, struct {
             fn run(args: anytype) void {
-                S.paintSwitch(args.cx, args.node, args.checked.get());
+                S.paintSettingsSwitch(args.cx, args.node, args.checked.get());
             }
         }.run);
         try top.appendChild(self.cx.allocator, toggle);
@@ -421,7 +422,7 @@ pub const View = struct {
         if (toggle.behavior.interaction.a11y) |*access| access.label = try std.fmt.allocPrint(a, "{s}{s}", .{ if (server.enabled) "停用 " else "启用 ", server.name });
         try scope.createEffect(.{ .cx = self.cx, .node = toggle, .checked = checked }, struct {
             fn run(args: anytype) void {
-                S.paintSwitch(args.cx, args.node, args.checked.get());
+                S.paintSettingsSwitch(args.cx, args.node, args.checked.get());
             }
         }.run);
         try top.appendChild(self.cx.allocator, toggle);

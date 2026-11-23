@@ -76,14 +76,8 @@ const Live = struct {
         const disabled = self.bound.saving.peek() or checking;
         if (self.disabled.peek() != disabled) self.disabled.set(disabled);
         if (self.section) |section| {
-            // Reuse Section + its Config-backed Switch. This particular reference
-            // is an always-open card, with a plain title rather than a fold row.
-            if (section.root.style.padding.left != 16 or section.header.style.min_height() != 20) {
-                section.root.setStyleInline(self.cx.allocator, S.card(undefined));
-                section.header.setStyleInline(self.cx.allocator, S.preferenceHeader(undefined));
-                section.body.setStyleInline(self.cx.allocator, S.preferenceBody(undefined));
-                changed = true;
-            }
+            // Section.refresh restores the normal focus state after saving;
+            // this card is always open and its heading is not interactive.
             section.header.setFocusable(false);
         }
         return if (changed) .needs_layout else .done;
@@ -107,33 +101,32 @@ pub fn mountContent(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
         const card = try ui.boxStyled(cx, S.card, .{});
         card.meta.ownership.meta.test_id = "settings.updates.version";
         try page.root.appendChild(cx.allocator, card);
-        try theme.bindMaterial(cx, bound.scope, card, "surface_2");
+        @import("../../ui/layer_materials.zig").card(card, .settings_card);
         const identity = try ui.boxStyled(cx, S.identity, .{});
         try card.appendChild(cx.allocator, identity);
         const mark = try ui.boxStyled(cx, S.appMark, .{});
         try identity.appendChild(cx.allocator, mark);
-        try mark.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.terminal, theme.actionForeground(theme.current().action_accent), .{ .width = .{ .px = 24 }, .height = .{ .px = 24 } }));
+        try mark.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.terminal, theme.actionForeground(theme.current().action_accent), .{ .width = .{ .px = 20 }, .height = .{ .px = 20 } }));
         const title = try ui.boxStyled(cx, S.column, .{});
-        title.setStyleInline(cx.allocator, .{ .gap = 3, .flex = 1 });
+        title.setStyleInline(cx.allocator, .{ .gap = 2, .flex = 1 });
         try identity.appendChild(cx.allocator, title);
-        _ = try ink(cx, title, "ZeroWork", 17, 24, 650, "fg_1");
-        live.version = try ink(cx, title, "", 11, 18, 400, "fg_2");
+        _ = try ink(cx, title, "ZeroWork", 17, 25, 700, "fg_1");
+        live.version = try ink(cx, title, "", 11, 16, 400, "fg_2");
         live.version.?.meta.ownership.meta.test_id = "settings.updates.version_text";
         const badge = try ui.boxStyled(cx, S.badge, .{});
         live.badge_container = badge;
         badge.meta.ownership.meta.test_id = "settings.updates.badge";
         try identity.appendChild(cx.allocator, badge);
-        live.badge = try ui.text(cx, "待检查", .{ .font_size = 11, .line_height = 18.0 / 11.0, .font_weight = 600, .color = theme.current().fg_2, .wrap = .none });
-        live.badge.?.setStyleInline(cx.allocator, .{ .width = .{ .fit = .{} }, .height = .{ .px = 18 }, .flex_shrink = 0 });
+        live.badge = try ui.text(cx, "待检查", .{ .font_size = 11, .line_height = 16.0 / 11.0, .font_weight = 600, .color = theme.current().fg_2, .wrap = .none });
+        live.badge.?.setStyleInline(cx.allocator, .{ .width = .{ .fit = .{} }, .height = .{ .px = 16 }, .flex_shrink = 0 });
         try badge.appendChild(cx.allocator, live.badge.?);
-        try card.appendChild(cx.allocator, try ui.boxStyled(cx, S.divider, .{}));
         const detail = try ui.boxStyled(cx, S.detail, .{});
         try card.appendChild(cx.allocator, detail);
         const labels = try ui.boxStyled(cx, S.column, .{});
-        labels.setStyleInline(cx.allocator, .{ .gap = 4, .flex = 1 });
+        labels.setStyleInline(cx.allocator, .{ .gap = 3, .flex = 1 });
         try detail.appendChild(cx.allocator, labels);
-        live.title = try ink(cx, labels, "检查是否有可用的新版本", 13, 20, 650, "fg_1");
-        _ = try ink(cx, labels, "Apple Silicon · macOS 13 或更新版本", 11, 18, 400, "fg_2");
+        live.title = try ink(cx, labels, "检查是否有可用的新版本", 13, 19, 600, "fg_1");
+        _ = try ink(cx, labels, "Apple Silicon · macOS 13 或更新版本", 11, 16, 400, "fg_2");
         const primary_style = try theme.paintSignal(controls.S.ButtonStyle, cx, bound.scope, S.primaryButton, .{});
         const button = try ui.widgets.Button(.{ .label = live.action_label, .variant = .primary, .disabled = live.disabled, .on_click = cx.on(Click, click, Click.run), .base_style = primary_style }).mount(bound.scope, cx);
         button.meta.ownership.meta.test_id = "settings.updates.open";
@@ -141,7 +134,7 @@ pub fn mountContent(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
         try detail.appendChild(cx.allocator, button);
     }
     if (binding.matches(bound.controller.search_query, "自动 检查 更新 偏好 通道 正式版 auto_check channel")) {
-        const section = try page.section("更新偏好", "", ui.icons.refresh_cw, 59, "settings.updates.preferences", null);
+        const section = try page.section("更新偏好", "", ui.icons.bell, 59, "settings.updates.preferences", null);
         live.section = section;
         section.expanded.set(true);
         section.header.behavior.events.on_event = null;
@@ -153,37 +146,28 @@ pub fn mountContent(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
             a11y.expanded = true;
             a11y.expansion = null;
         }
-        section.header.children.items[1].children.items[0].behavior.events.on_event = null;
-        // Keep the shared title/field composition, omitting decorations absent
-        // from the approved card. No hidden folding action remains keyboardable.
-        section.header.children.items[0].setDisplay(.none);
-        section.header.children.items[section.header.children.items.len - 1].setDisplay(.none);
+        section.heading.title.behavior.events.on_event = null;
+        // Keep the shared heading and switch, without a folding affordance.
+        section.heading.chevron.setDisplay(.none);
         try section.toggle(.{ .section = "updates", .key = "auto_check" }, "自动检查更新", "", null);
         if (section.body.children.items.len != 0) {
             const field_root = section.body.children.items[0];
             const field_row = field_root.children.items[0];
-            field_row.setStyleInline(cx.allocator, S.preferenceRow(undefined));
             const labels = field_row.children.items[0];
-            _ = try ink(cx, labels, "启动后检查，自动检查按 24 小时限频", 11, 16, 400, "fg_2");
-            const label = labels.children.items[0].children.items[0];
-            if (label.getText()) |old| {
-                var text = old;
-                text.font_weight = 400;
-                label.setText(text);
-            }
+            _ = try ink(cx, labels, "启动后检查，自动检查按 24 小时限频", 11, 16, 400, "fg_3");
         }
         const channel = try ui.boxStyled(cx, S.preferenceRow, .{});
         channel.meta.ownership.meta.test_id = "settings.updates.channel";
         try section.body.appendChild(cx.allocator, channel);
-        const channel_label = try ink(cx, channel, "更新通道", 12, 18, 400, "fg_1");
+        const channel_label = try ink(cx, channel, "更新通道", 12, 17, 500, "fg_1");
         channel_label.setStyleInline(cx.allocator, .{ .flex = 1 });
-        live.channel = try ink(cx, channel, "正式版", 12, 18, 400, "fg_2");
+        live.channel = try ink(cx, channel, "正式版", 12, 17, 400, "fg_2");
         live.channel.?.setStyleInline(cx.allocator, .{ .width = .{ .fit = .{} }, .flex_shrink = 0 });
     }
     if (binding.matches(bound.controller.search_query, "检查 来源 GitHub release update")) {
         const notes = try ui.boxStyled(cx, S.notes, .{});
         try page.root.appendChild(cx.allocator, notes);
-        live.last_check = try ink(cx, notes, "尚未检查", 11, 18, 400, "fg_2");
+        live.last_check = try ink(cx, notes, "尚未检查", 11, 16, 400, "fg_2");
         live.last_check.?.meta.ownership.meta.test_id = "settings.updates.last_check";
         const release = try bound.scope.createState(Click, .{ .bound = bound, .action = .open_update_release });
         const style = try theme.paintSignal(controls.S.ButtonStyle, cx, bound.scope, S.sourceButton, .{});

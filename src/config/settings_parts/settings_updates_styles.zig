@@ -1,4 +1,4 @@
-//! Geometry from app-update/styles.css and its exported 900 × 640 DOM snapshot.
+//! Geometry for the About/update page.
 //! Paint always comes from the active global application theme.
 const ui = @import("ui");
 const std = @import("std");
@@ -11,7 +11,8 @@ pub fn column(_: *const ui.ThemeTokens) ui.BoxStyle {
 pub fn card(t: *const ui.ThemeTokens) ui.BoxStyle {
     var style = column(t);
     style.padding = .all(16);
-    style.background = theme.current().surface_2;
+    style.gap = 12;
+    style.background = theme.settingsCard();
     style.border = .{ .width = 0, .radius = 11 };
     return style;
 }
@@ -19,16 +20,14 @@ pub fn row(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .fit = .{} }, .min_width = 0, .direction = .row, .align_items = .center, .gap = 12, .flex_shrink = 0 };
 }
 pub fn identity(t: *const ui.ThemeTokens) ui.BoxStyle {
-    var style = row(t);
-    style.padding = .{ .bottom = 16 };
-    return style;
+    return row(t);
 }
 pub fn appMark(_: *const ui.ThemeTokens) ui.BoxStyle {
     const colors = theme.current();
-    return .{ .width = .{ .px = 42 }, .height = .{ .px = 42 }, .align_items = .center, .justify = .center, .background = colors.action_accent, .gradient = .{ .from = colors.action_accent, .to = colors.action_accent_2, .direction = .diagonal }, .border = .{ .width = 0, .radius = 11 }, .flex_shrink = 0 };
+    return .{ .width = .{ .px = 40 }, .height = .{ .px = 40 }, .align_items = .center, .justify = .center, .background = colors.action_accent, .border = .{ .width = 0, .radius = 10 }, .flex_shrink = 0 };
 }
 pub fn badge(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .{ .fit = .{} }, .height = .{ .px = 26 }, .padding = .{ .left = 9, .right = 9 }, .justify = .center, .align_items = .center, .background = theme.current().fg_2.withAlpha(26), .border = .{ .width = 0, .radius = 6 }, .flex_shrink = 0 };
+    return .{ .width = .{ .fit = .{} }, .height = .{ .px = 24 }, .padding = .{ .left = 10, .right = 10 }, .justify = .center, .align_items = .center, .background = theme.current().fg_2.withAlpha(26), .border = .{ .width = 0, .radius = 6 }, .flex_shrink = 0 };
 }
 pub fn badgeInk(state: []const u8, label: []const u8) ui.Color {
     const colors = theme.current();
@@ -37,33 +36,19 @@ pub fn badgeInk(state: []const u8, label: []const u8) ui.Color {
     if (state.len == 0 or std.mem.eql(u8, state, "idle")) return colors.fg_2;
     return colors.accent_ink;
 }
-pub fn divider(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 1 }, .background = theme.current().border, .flex_shrink = 0 };
-}
 pub fn detail(t: *const ui.ThemeTokens) ui.BoxStyle {
-    var style = row(t);
-    style.padding = .{ .top = 15 };
-    return style;
-}
-pub fn preferenceHeader(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 20 }, .min_height = 20, .padding = .ZERO, .gap = 0, .border = .{ .width = 0, .radius = 0 }, .background = ui.Color.TRANSPARENT, .flex_shrink = 0 };
-}
-pub fn preferenceBody(t: *const ui.ThemeTokens) ui.BoxStyle {
-    var style = column(t);
-    style.margin = .{ .top = 4 };
-    style.padding = .ZERO;
-    return style;
+    return row(t);
 }
 pub fn preferenceRow(t: *const ui.ThemeTokens) ui.BoxStyle {
     var style = row(t);
-    style.min_height = 52;
-    style.padding = .ZERO;
-    style.gap = 20;
+    style.min_height = 37;
+    style.padding = .{ .top = 10, .bottom = 10 };
+    style.gap = 16;
     return style;
 }
 pub fn notes(t: *const ui.ThemeTokens) ui.BoxStyle {
     var style = column(t);
-    style.padding = .{ .left = 5, .right = 5, .top = 2 };
+    style.padding = .all(4);
     style.gap = 6;
     return style;
 }
@@ -90,7 +75,7 @@ pub fn textButton() shared.ButtonStyle {
 
 pub fn sourceButton() shared.ButtonStyle {
     var style = textButton();
-    style.height = .{ .px = 18 };
+    style.height = .{ .px = 16 };
     style.font_weight = 400;
     style.gap = 5;
     return style;

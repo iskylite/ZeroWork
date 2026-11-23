@@ -37,6 +37,7 @@ fn shortcutRow(cx: *ui.Cx, bound: *binding.Binding, parent: *ui.Node, label: []c
     };
     if (!matched) return;
     const row = try ui.boxStyled(cx, S.fieldRow, .{});
+    row.setStyleInline(cx.allocator, .{ .min_height = 50, .padding = .{ .top = 10, .bottom = 10 }, .gap = 16 });
     row.meta.ownership.meta.test_id = try controls.stableId(bound.scope, "settings.key.row.", @tagName(actions[0]));
     const labels = try ui.boxStyled(cx, S.fieldLabel, .{});
     labels.setStyleInline(cx.allocator, .{ .direction = .row, .align_items = .center, .gap = 4 });
@@ -46,6 +47,7 @@ fn shortcutRow(cx: *ui.Cx, bound: *binding.Binding, parent: *ui.Node, label: []c
     }
     try row.appendChild(cx.allocator, labels);
     const group = try ui.boxStyled(cx, S.shortcutGroup, .{});
+    group.setStyleInline(cx.allocator, .{ .height = .{ .px = 30 } });
     for (actions) |action| {
         const fixed = action == .recent_tab or action == .accept_completion;
         const click = try bound.scope.allocator.create(Click);
@@ -71,11 +73,11 @@ fn actionMatches(bound: *binding.Binding, query: []const u8, action: keys.Action
 
 fn shortcutStyle() S.ButtonStyle {
     var style = S.shortcutButton(110, false);
-    style.height = .{ .px = 30.5 };
-    style.padding = .{ .left = 12, .right = 12, .top = 8, .bottom = 8 };
+    style.height = .{ .px = 30 };
+    style.padding = .{ .left = 12, .right = 12 };
     style.font_size = 12;
     style.font_weight = 400;
-    style.corner_radius = 7;
+    style.corner_radius = 8;
     return style;
 }
 

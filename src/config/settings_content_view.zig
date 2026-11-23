@@ -194,15 +194,15 @@ pub fn mountPage(cx: *ui.Cx, scope: *ui.Scope, controller: *Controller, hooks: H
     const root = try ui.boxStyled(cx, styles.content, .{});
     root.meta.ownership.meta.test_id = "settings.content";
     const header = try ui.boxStyled(cx, styles.header, .{});
-    const heading = try ui.box(cx, .{ .width = .fill(), .min_width = 0, .flex = 1, .direction = .column, .gap = 4 }, .{});
+    const heading = try ui.box(cx, .{ .width = .fill(), .min_width = 0, .flex = 1, .direction = .column, .gap = 3 }, .{});
     const searching = std.mem.trim(u8, controller.search_query, " \t\r\n").len != 0;
-    try heading.appendChild(cx.allocator, try ui.text(cx, if (searching) "搜索结果" else controller.model.page().name, .{ .font_size = 13, .font_weight = 700, .line_height = 20.0 / 13.0, .color = styles.theme.current().fg_1 }));
-    try heading.appendChild(cx.allocator, try ui.text(cx, if (searching) "在全部设置分类中查找，输入内容不会改变折叠偏好。" else controller.model.page().description, .{ .font_size = 11, .color = styles.secondaryInk() }));
+    try heading.appendChild(cx.allocator, try ui.textStyled(cx, styles.title, if (searching) "搜索结果" else controller.model.page().name));
+    try heading.appendChild(cx.allocator, try ui.textStyled(cx, styles.note, if (searching) "在全部设置分类中查找，输入内容不会改变折叠偏好。" else controller.model.page().description));
     try header.appendChild(cx.allocator, heading);
     const help_text = controller.model.page().description;
     const help = try ui.widgets.Tooltip(.{ .text = help_text, .open_delay_ms = 450 }).mount(scope, cx);
     help.content.meta.ownership.meta.test_id = "settings.help.content";
-    const help_button = try ui.widgets.Button(.{ .icon_asset = ui.icons.circle_help, .icon_only = true, .a11y_label = "分类帮助", .variant = .ghost, .base_style = styles.fieldHelpButton(), .hover_style = styles.buttonHover() }).mount(scope, cx);
+    const help_button = try ui.widgets.Button(.{ .icon_asset = ui.icons.circle_help, .icon_size = @as(f32, 16), .icon_only = true, .a11y_label = "分类帮助", .variant = .ghost, .base_style = styles.fieldHelpButton(), .hover_style = styles.buttonHover() }).mount(scope, cx);
     help_button.meta.ownership.meta.test_id = "settings.help";
     try help.trigger.appendChild(cx.allocator, help_button);
     try header.appendChild(cx.allocator, help.wrapper);
@@ -210,9 +210,8 @@ pub fn mountPage(cx: *ui.Cx, scope: *ui.Scope, controller: *Controller, hooks: H
     const scroll = try ui.widgets.ScrollArea(.{ .direction = .vertical, .rubber_band_y = false }).mount(scope, cx);
     scroll.container.style.flex = 1;
     scroll.container.style.flex_shrink = 1;
-    scroll.container.style.margin.top = styles.geometry.viewport_gap;
     scroll.container.meta.ownership.meta.test_id = "settings.viewport";
-    scroll.content.style.padding = .{ .left = 5, .right = 5, .bottom = 12 };
+    scroll.content.style.padding = .{ .left = styles.geometry.content_inset, .right = styles.geometry.content_inset, .top = 12, .bottom = 20 };
     scroll.content.style.gap = styles.geometry.section_gap;
     binding.scroll = scroll;
     const page = try mountBody(cx, binding);
@@ -579,7 +578,12 @@ pub const Binding = struct {
         if (action == .reset_defaults or action == .revert or action == .save) style = styles.footerButton();
         const node = try ui.widgets.Button(.{ .label = label, .icon_asset = if (action == .reset_defaults or action == .revert or action == .save) null else icon, .icon_size = @as(f32, 14), .icon_tint = if (primary) self.save_tint else try self.scope.createSignal(?ui.Color, styles.theme.current().fg_2), .a11y_label = label, .variant = @as(ui.widgets.ButtonVariant, if (primary) .primary else .secondary), .disabled = if (primary) self.save_disabled else if (action == .revert) self.revert_disabled else self.saving, .loading = if (primary) self.saving else try self.scope.createSignal(bool, false), .on_click = cx.on(ActionClick, click, ActionClick.activate), .base_style = @as(ui.Source(styles.ButtonStyle), if (primary) .{ .signal = self.save_style } else .{ .value = style }), .hover_style = @as(?ui.BoxStyle, if (primary) .{ .background = styles.theme.current().action_accent } else styles.buttonHover()), .pressed_style = @as(?ui.BoxStyle, if (primary) .{ .background = styles.theme.current().action_accent } else null) }).mount(self.scope, cx);
         node.meta.ownership.meta.test_id = id;
-        if (primary) try self.scope.createEffect(.{ .bound = self, .node = node, .hovered = try ui.hooks.useHover(self.scope, node), .pressed = try ui.hooks.usePressed(self.scope, cx, node), .publication = try cx.themeSignal(self.scope) }, struct {
+        if (action == .revert) try self.scope.createEffect(.{ .node = node, .disabled = self.revert_disabled }, struct {
+            fn run(args: anytype) void {
+                args.node.setOpacity(if (args.disabled.get()) 0.65 else 1);
+            }
+        }.run);
+        if (primary) try self.scope.createEffect(.{ .bound = self, .node = node, .footer = std.mem.eql(u8, id, "settings.save"), .hovered = try ui.hooks.useHover(self.scope, node), .pressed = try ui.hooks.usePressed(self.scope, cx, node), .publication = try cx.themeSignal(self.scope) }, struct {
             fn run(args: anytype) void {
                 _ = args.publication.get();
                 const disabled = args.bound.save_disabled.get();
@@ -588,9 +592,9 @@ pub const Binding = struct {
                 const state_colors = styles.theme.states();
                 const down = !disabled and pressed and hovered;
                 const hot = !disabled and hovered;
-                const from = if (down) state_colors.primary_pressed else if (hot) state_colors.primary_hover else state_colors.primary;
+                const from = if (down) state_colors.primary_pressed else if (hot) state_colors.primary_hover else if (args.footer) styles.theme.current().action_accent else state_colors.primary;
                 const to = if (down) state_colors.primary_pressed_to else if (hot) state_colors.primary_hover_to else state_colors.primary_to;
-                args.node.setStyleInline(args.bound.cx.allocator, .{ .background = from, .gradient = .{ .from = from, .to = to, .direction = .diagonal }, .opacity = if (disabled) @as(f32, 0.4) else @as(f32, 1) });
+                args.node.setStyleInline(args.bound.cx.allocator, .{ .background = from, .gradient = if (args.footer) null else .{ .from = from, .to = to, .direction = .diagonal }, .opacity = if (disabled) @as(f32, 0.4) else @as(f32, 1) });
             }
         }.run);
         return .{ .wrapper = node, .button = node };

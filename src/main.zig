@@ -13005,7 +13005,6 @@ const SettingsHost = struct {
     navigation: ?*ui.Node = null,
     header_title: ?*ui.Node = null,
     header_icon: ?*ui.Node = null,
-    layout: ?*ui.Node = null,
     /// Right content column (rebuilt on page switch / save / discard).
     content: *ui.Node = undefined,
     open: bool = false,
@@ -13485,7 +13484,7 @@ const SettingsHost = struct {
                 self.refresh(@errorName(err));
                 return;
             };
-            self.controller.folded_sections = std.math.maxInt(u64);
+            self.controller.folded_sections = 0;
             self.controller.ai_fields.provider_open.clearRetainingCapacity();
             self.controller.ai_fields.connection_open.clearRetainingCapacity();
             self.controller.ai_fields.model_open.clearRetainingCapacity();
@@ -14073,10 +14072,12 @@ const SettingsHost = struct {
             const click = try self.cx.allocator.create(SettingsNavClick);
             click.* = .{ .host = self, .page_index = index };
             try nav_scope.onCleanup(SettingsNavClick, click, SettingsNavClick.cleanup);
-            const btn = try ui.widgets.Button(.{ .a11y_label = page.name, .variant = .ghost, .disabled = self.controller.state() == .saving, .on_click = self.cx.on(SettingsNavClick, click, SettingsNavClick.activate), .base_style = ui.BoxStyle{ .width = .fill(), .height = .{ .px = 36 }, .flex_shrink = 0, .direction = .row, .justify = .start, .gap = 8, .padding = .{ .left = 6, .right = 6 }, .background = if (selected) settings_styles.selectionBackground(false) else ui.Color.TRANSPARENT, .border = .{ .width = 0, .color = c.border, .radius = 7 } }, .hover_style = settings_styles.selectionHover(selected), .pressed_style = settings_styles.selectionHover(selected) }).mount(nav_scope, self.cx);
-            btn.setStyleInline(self.cx.allocator, .{ .width = .fill(), .height = .{ .px = 36 }, .flex_shrink = 0, .direction = .row, .align_items = .center, .justify = .start, .gap = 8, .padding = .{ .left = 6, .right = 6 }, .border = .{ .width = 0, .color = c.border, .radius = 7 } });
-            try btn.appendChild(self.cx.allocator, try ui.iconTint(self.cx, icons[index], if (selected) c.accent else settings_styles.secondaryInk(), .{ .width = .{ .px = 16 }, .height = .{ .px = 16 }, .flex_shrink = 0 }));
-            try btn.appendChild(self.cx.allocator, try ui.text(self.cx, page.name, .{ .font_size = 12, .font_weight = if (selected) @as(u16, 600) else 400, .color = if (selected) c.fg_1 else settings_styles.secondaryInk() }));
+            const recipe = settings_styles.navigationItem(selected);
+            const btn = try ui.widgets.Button(.{ .a11y_label = page.name, .variant = .ghost, .disabled = self.controller.state() == .saving, .on_click = self.cx.on(SettingsNavClick, click, SettingsNavClick.activate), .base_style = recipe, .hover_style = settings_styles.selectionHover(selected), .pressed_style = settings_styles.selectionHover(selected) }).mount(nav_scope, self.cx);
+            btn.setStyleInline(self.cx.allocator, recipe);
+            const ink = if (!selected) settings_styles.secondaryInk() else if (app_theme.currentName() == .dark) c.fg_1 else c.accent_ink;
+            try btn.appendChild(self.cx.allocator, try ui.iconTint(self.cx, icons[index], ink, .{ .width = .{ .px = 15 }, .height = .{ .px = 15 }, .flex_shrink = 0 }));
+            try btn.appendChild(self.cx.allocator, try ui.text(self.cx, page.name, .{ .font_size = 12.5, .font_weight = if (selected) @as(u16, 600) else 500, .color = ink }));
             const test_ids = [_][]const u8{ "settings.nav.appearance", "settings.nav.terminal", "settings.nav.keys", "settings.nav.ssh", "settings.nav.transfer", "settings.nav.ai.models", "settings.nav.ai", "settings.nav.ai.children", "settings.nav.ai.context", "settings.nav.plugins", "settings.nav.notifications", "settings.nav.data", "settings.nav.updates" };
             btn.meta.ownership.meta.test_id = test_ids[index];
             try self.nav_list.appendChild(self.cx.allocator, btn);
@@ -15713,21 +15714,11 @@ const AppNavHost = struct {
         if (self.settings) |settings| if (settings.card) |card| {
             const expected_width: ui.Sizing = .{ .px = @max(1, @min(@import("ui/v3_geometry.zig").settings_width, self.cx.viewport.width - 32)) };
             const expected_height: ui.Sizing = .{ .px = settings_content_view.constrainedModalHeight(settings.controller.model.page_index, self.cx.viewport.height) };
-            const navigation_width: ui.Sizing = .{ .px = if (width < 950) @import("ui/v3_geometry.zig").settings_sidebar_compact else @import("ui/v3_geometry.zig").settings_sidebar };
+            const settings_geometry = @import("ui/v3_geometry.zig");
+            const navigation_width: ui.Sizing = .{ .px = if (width < settings_geometry.settings_width + 2 * settings_geometry.settings_inset) settings_geometry.settings_sidebar_compact else settings_geometry.settings_sidebar };
             if (settings.navigation) |navigation| if (!std.meta.eql(navigation.style.width, navigation_width)) navigation.setStyle(self.allocator, .width, navigation_width);
-            if (settings.layout) |layout| {
-                const gap: f32 = if (width < 950) 10 else 16;
-                if (layout.style.gap != gap) layout.setStyle(self.allocator, .gap, gap);
-            }
             if (resize or !std.meta.eql(card.style.width, expected_width) or !std.meta.eql(card.style.height, expected_height)) {
-                settings.panel.style.padding = .{};
-                if (settings.layout) |layout| layout.setStyle(self.allocator, .gap, if (width < 950) @as(f32, 10) else @as(f32, 16));
-                if (settings.navigation) |navigation| navigation.setStyleInline(self.allocator, .{ .width = .{ .px = if (width < 950) @import("ui/v3_geometry.zig").settings_sidebar_compact else @import("ui/v3_geometry.zig").settings_sidebar } });
-                card.setStyleInline(self.allocator, .{
-                    .padding = .{},
-                    .height = .{ .px = settings_content_view.constrainedModalHeight(settings.controller.model.page_index, self.cx.viewport.height) },
-                    .width = .{ .px = @max(0, @min(@import("ui/v3_geometry.zig").settings_width, self.cx.viewport.width - 32)) },
-                });
+                card.setStyleInline(self.allocator, .{ .height = expected_height, .width = expected_width });
             }
         };
         if (before != self.quick.sidebar.collapsed) self.applySidebar();
@@ -18238,7 +18229,7 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     try mountAssistantConversation(ai_host, scope, ai_card_box, ai_scroll, ai_conversation, ai_prompt);
     try ai_panel.appendChild(cx.allocator, ai_card_box);
 
-    // Frozen V3 settings: centered shell, independently scrolling navigation and content.
+    // Preferences keeps separate scroll areas beneath the shared top bar.
     const settings_panel = try ui.boxStyled(cx, shell_styles.settingsBackdrop, .{});
     try scoped_modal.registerWindowCover(cx, settings_panel);
     _ = try FloatingSurface.Surface.mount(cx, scope, settings_panel, .{ .dialog = true });
@@ -18247,20 +18238,18 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     const settings_card = try ui.boxStyled(cx, shell_styles.settingsPanel, .{});
     settings_card.meta.ownership.meta.test_id = "settings.panel";
     try settings_panel.appendChild(cx.allocator, settings_card);
-    const settings_header = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = @import("ui/v3_geometry.zig").settings_header }, .flex_shrink = 0, .direction = .row, .align_items = .center, .padding = .{ .left = 18, .right = 18, .top = 15, .bottom = 10 }, .gap = 10 }, .{});
-    const settings_header_icon = try ui.iconTint(cx, ui.icons.settings, app_theme.current().accent, .{ .width = .{ .px = 20 }, .height = .{ .px = 20 } });
+    const settings_header = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = @import("ui/v3_geometry.zig").settings_header }, .flex_shrink = 0, .direction = .row, .align_items = .center, .padding = .{ .left = 20, .right = 20 }, .gap = 10 }, .{});
+    const settings_header_icon = try ui.iconTint(cx, ui.icons.settings, app_theme.current().accent, .{ .width = .{ .px = 17 }, .height = .{ .px = 17 } });
     settings_header_icon.meta.ownership.meta.test_id = "settings.header.icon";
     try settings_header.appendChild(cx.allocator, settings_header_icon);
-    const settings_header_title = try ui.text(cx, "偏好设置", .{ .font_size = 14, .font_weight = 700, .color = app_theme.current().fg_1 });
+    const settings_header_title = try ui.text(cx, "偏好设置", .{ .font_size = 13.5, .font_weight = 700, .color = app_theme.current().fg_1 });
     settings_header_title.meta.ownership.meta.test_id = "settings.header.title";
     try settings_header.appendChild(cx.allocator, settings_header_title);
     try settings_header.appendChild(cx.allocator, try ui.spacer(cx));
     try settings_card.appendChild(cx.allocator, settings_header);
     const settings_body = try ui.boxStyled(cx, shell_styles.settingsBody, .{});
-    settings_body.setStyle(cx.allocator, .gap, if (cx.viewport.width < 950) @as(f32, 10) else @as(f32, 16));
     try settings_card.appendChild(cx.allocator, settings_body);
     const settings_nav = try ui.boxStyled(cx, shell_styles.settingsNavigation, .{});
-    settings_nav.style.gap = 10;
     settings_nav.meta.ownership.meta.test_id = "settings.navigation";
     try settings_body.appendChild(cx.allocator, settings_nav);
 
@@ -18268,10 +18257,9 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     settings_nav_scroll.container.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .fill(), .flex = 1, .min_height = 0 });
     settings_nav_scroll.container.meta.ownership.meta.test_id = "settings.navigation.scroll";
     const settings_nav_list = settings_nav_scroll.content;
-    settings_nav_list.setStyleInline(cx.allocator, .{ .width = .fill(), .direction = .column, .gap = 5 });
+    settings_nav_list.setStyleInline(cx.allocator, .{ .width = .fill(), .direction = .column, .gap = 2 });
     try settings_nav.appendChild(cx.allocator, settings_nav_scroll.container);
     const settings_right = try ui.boxStyled(cx, shell_styles.settingsContent, .{});
-    settings_right.setStyle(cx.allocator, .padding, ui.Padding{ .right = 4 });
     const settings_content = try ui.boxStyled(cx, shell_styles.settingsContent, .{});
     try settings_right.appendChild(cx.allocator, settings_content);
     try settings_body.appendChild(cx.allocator, settings_right);
@@ -18283,18 +18271,18 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     settings_host.navigation = settings_nav;
     settings_host.header_title = settings_header_title;
     settings_host.header_icon = settings_header_icon;
-    settings_host.layout = settings_body;
     settings_host.content = settings_content;
     settings_host.card = settings_card;
-    const settings_search_result = try ui.widgets.Input(.{ .placeholder = "搜索设置…", .leading_icon_asset = ui.icons.search, .width = @as(f32, 282), .on_change = cx.on(SettingsHost, settings_host, SettingsHost.searchChanged) }).mountResult(scope, cx);
+    const settings_search_result = try ui.widgets.Input(.{ .placeholder = "搜索设置…", .leading_icon_asset = ui.icons.search, .width = @as(f32, 220), .on_change = cx.on(SettingsHost, settings_host, SettingsHost.searchChanged) }).mountResult(scope, cx);
     settings_host.search_input = settings_search_result;
     const settings_search = settings_search_result.node;
     settings_search.style.height = .{ .px = 32 };
+    settings_search_result.input_container.setStyleInline(cx.allocator, .{ .height = .{ .px = 32 }, .padding = .{ .left = 10, .right = 10 }, .border = .{ .radius = 8 } });
+    settings_content_view.styles.tuneInput(&settings_search_result);
+    settings_content_view.styles.paintSearch(cx, &settings_search_result);
     settings_search.meta.ownership.meta.test_id = "settings.search";
     try settings_header.appendChild(cx.allocator, settings_search);
-    const settings_close = try ui.widgets.Button(.{ .icon_asset = ui.icons.x, .icon_only = true, .a11y_label = "关闭偏好设置", .variant = .ghost, .on_click = cx.on(SettingsHost, settings_host, SettingsHost.toggle) }).mount(scope, cx);
-    shell_styles.toolbarButton(cx.allocator, settings_close);
-    settings_close.setStyleInline(cx.allocator, .{ .width = .{ .px = 22 }, .height = .{ .px = 22 } });
+    const settings_close = try ui.widgets.Button(.{ .icon_asset = ui.icons.x, .icon_size = @as(f32, 15), .icon_only = true, .a11y_label = "关闭偏好设置", .variant = .ghost, .base_style = ui.BoxStyle{ .width = .{ .px = 28 }, .height = .{ .px = 28 }, .padding = .ZERO, .flex_shrink = 0, .corner_radius = 7 }, .on_click = cx.on(SettingsHost, settings_host, SettingsHost.toggle) }).mount(scope, cx);
     settings_close.meta.ownership.meta.test_id = "settings.close";
     try settings_header.appendChild(cx.allocator, settings_close);
     try scope.onCleanup(SettingsHost, settings_host, SettingsHost.cleanup);

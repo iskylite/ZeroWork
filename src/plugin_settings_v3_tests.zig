@@ -41,7 +41,7 @@ test "plugin V3 reads registered metadata and detail actions preserve draft" {
     try std.testing.expectEqualStrings("下次连接生效", timing.behavior.interaction.a11y.?.label.?);
     try std.testing.expect(!hasText(content, "下次连接生效"));
     const row = byId(content, "settings.plugin.ssh.row").?;
-    try std.testing.expectEqual(@as(f32, 66), row.style.height.px);
+    try std.testing.expectEqual(@as(f32, 57), row.style.height.px);
     try std.testing.expectEqualStrings("远程终端、认证与端口转发", byId(content, "settings.plugin.ssh.description").?.getText().?.content);
     const button = byId(content, "settings.plugin.ssh.version").?;
     try std.testing.expect(hasText(button, "9.8.7"));

@@ -25,7 +25,7 @@ pub fn sectionHeader(cx: *ui.Cx, scope: *ui.Scope, result: ui.widgets.AccordionI
     @import("../../ui/layer_materials.zig").card(result.item, .settings_card);
     result.item.setStyleInline(cx.allocator, S.sectionState(expanded));
     result.item.setBorderWidth(0);
-    result.header.setStyleInline(cx.allocator, S.summaryHeader(expanded, summary.len != 0));
+    result.header.setStyleInline(cx.allocator, S.summaryHeader(summary.len != 0));
     result.header.setBorderWidth(0);
     try bindHeaderInteraction(cx, result.item.meta.ownership.scope.scope orelse scope, result.header);
 
@@ -37,9 +37,9 @@ pub fn sectionHeader(cx: *ui.Cx, scope: *ui.Scope, result: ui.widgets.AccordionI
     result.title.setStyleInline(cx.allocator, S.sectionTitle(undefined));
     if (result.title.getText()) |old| {
         var text = old;
-        text.font_size = 14;
-        text.font_weight = 700;
-        text.line_height = 20.0 / 14.0;
+        text.font_size = 13;
+        text.font_weight = 600;
+        text.line_height = S.geometry.section_title_line / 13.0;
         text.color = S.theme.current().fg_1;
         result.title.setText(text);
     }
@@ -47,83 +47,46 @@ pub fn sectionHeader(cx: *ui.Cx, scope: *ui.Scope, result: ui.widgets.AccordionI
     const summary_node = try ui.textStyled(cx, S.sectionSummary, try owned(scope, summary));
     summary_node.style.width = .fill();
     summary_node.setStyleInline(cx.allocator, .{ .min_width = 0 });
-    summary_node.setDisplay(if (!expanded and summary.len != 0) .flex else .none);
+    summary_node.setDisplay(if (summary.len != 0) .flex else .none);
     summary_node.meta.ownership.meta.test_id = try stableId(scope, id, ".summary");
     try heading.appendChild(cx.allocator, summary_node);
     result.chevron.setStyleInline(cx.allocator, S.sectionChevron(undefined));
+    result.chevron.setOpacity(if (expanded) 0 else 1);
     try result.header.appendChild(cx.allocator, result.chevron);
     const owner_scope = result.item.meta.ownership.scope.scope orelse scope;
-    const state = try owner_scope.createState(SectionHeading, .{ .cx = cx, .header = result.header, .title = result.title, .summary = summary_node, .expanded = expanded });
+    const state = try owner_scope.createState(SectionHeading, .{ .cx = cx, .header = result.header, .title = result.title, .summary = summary_node, .chevron = result.chevron, .hovered = try ui.hooks.useHover(owner_scope, result.header), .focused = (try ui.hooks.useFocusState(owner_scope, cx, result.header)).visible });
     try cx.addAfterLayoutHook(state, SectionHeading.afterLayout);
     try owner_scope.onCleanup(SectionHeading, state, SectionHeading.cleanup);
     return state;
 }
 
-/// Keep the title/summary transition local to the mounted Accordion. Its body
-/// and chevron use the shared settings Accordion motion.
 pub const SectionHeading = struct {
     cx: *ui.Cx,
     header: *ui.Node,
     title: *ui.Node,
     summary: *ui.Node,
-    expanded: bool,
+    chevron: *ui.Node,
+    hovered: *ui.Signal(bool),
+    focused: *ui.Signal(bool),
     accessory: ?*ui.Node = null,
-    animating: bool = false,
-    height: @import("../../ui/layout_motion.zig").Height = .{},
 
     fn afterLayout(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
         const self: *SectionHeading = @ptrCast(@alignCast(raw));
         const expanded = self.header.behavior.interaction.a11y.?.expanded.?;
-        const has_summary = self.summary.getText().?.content.len != 0;
-        if (expanded != self.expanded) {
-            const current = self.header.globalRect().h;
-            self.height = .{ .value = current, .target = current, .from = current, .started = self.cx.frame_time_ms };
-            self.expanded = expanded;
-            self.animating = true;
-            self.header.setStyle(self.cx.allocator, .min_height, @as(f32, 48));
-            self.header.setStyle(self.cx.allocator, .height, .{ .px = current });
-            // Accordion's generic title weights do not apply to settings titles.
-            if (self.title.getText()) |old| {
-                var title = old;
-                title.font_weight = 700;
-                self.title.setText(title);
-            }
-        }
-        const show_summary = has_summary and (!expanded or self.animating);
-        if ((self.summary.style.display != .none) != show_summary) {
-            self.summary.setDisplay(if (show_summary) .flex else .none);
-            return .needs_layout;
-        }
+        const opacity: f32 = if (!expanded or self.hovered.peek() or self.focused.peek()) 1 else 0;
+        if (self.chevron.getOpacity() != opacity) self.chevron.setOpacity(opacity);
         var changed = false;
-        if (self.animating) {
-            const summary_height = self.title.globalRect().h + self.title.parent.?.style.gap + self.header.style.padding.vertical() + self.summary.globalRect().h;
-            const target = if (expanded or !has_summary) @as(f32, 48) else @max(S.geometry.section_summary_header, summary_height);
-            const height = self.height.sample(self.cx, target, true);
-            self.animating = @abs(height - target) >= 0.1;
-            if (self.header.style.height != .px or @abs(self.header.style.height.px - height) > 0.05) {
-                self.header.setStyle(self.cx.allocator, .height, .{ .px = height });
-                changed = true;
-            }
-            const opacity = if (!has_summary) @as(f32, 0) else std.math.clamp((height - 48) / @max(1, summary_height - 48), 0, 1);
-            if (@abs(self.summary.getOpacity() - opacity) > 0.001) self.summary.setStyle(self.cx.allocator, .opacity, opacity);
-        }
-        if (!self.animating) {
-            const minimum: f32 = if (!expanded and has_summary) S.geometry.section_summary_header else 48;
-            if (self.header.style.height != .fit or self.header.style.min_height() != minimum) {
-                self.header.setStyle(self.cx.allocator, .height, .{ .fit = .{} });
-                self.header.setStyle(self.cx.allocator, .min_height, minimum);
-                changed = true;
-            }
-            if (self.summary.getOpacity() != 1) self.summary.setStyle(self.cx.allocator, .opacity, @as(f32, 1));
-            if (expanded and self.summary.style.display != .none) {
-                self.summary.setDisplay(.none);
-                changed = true;
-            }
-        }
         if (self.accessory) |accessory| {
-            const top = (self.header.globalRect().h - accessory.globalRect().h) / 2;
-            if (@abs(accessory.style.ext.?.inset.top.px - top) > 0.05) {
-                accessory.setStyle(self.cx.allocator, .inset, .{ .right = .{ .px = 36 }, .top = .{ .px = top } });
+            const area = accessory.globalRect();
+            const top = self.header.style.padding.top + (self.header.globalRect().h - self.header.style.padding.vertical() - area.h) / 2;
+            const inset: ui.Inset = .{ .right = .{ .px = 16 }, .top = .{ .px = top } };
+            if (!std.meta.eql(accessory.style.ext.?.inset, inset)) {
+                accessory.setStyle(self.cx.allocator, .inset, inset);
+                changed = true;
+            }
+            const reserve = area.w + 8;
+            if (self.chevron.style.margin.right != reserve) {
+                self.chevron.setStyle(self.cx.allocator, .margin, .{ .right = reserve });
                 changed = true;
             }
         }
@@ -249,7 +212,7 @@ pub const Page = struct {
             result.header.setFocusable(false);
         }
         result.body.setStyleInline(self.cx.allocator, S.column(undefined));
-        result.body.style.padding = .{ .left = 16, .right = 16, .bottom = 8 };
+        result.body.style.padding = .{ .left = 16, .right = 16, .bottom = 16 };
         result.body.style.gap = 0;
         try self.root.appendChild(self.cx.allocator, result.item);
         try self.sections.append(self.bound.scope.allocator, self_section);
@@ -283,12 +246,14 @@ pub const Section = struct {
         self.expanded.set(open);
         const mask = @as(u64, 1) << self.bit;
         if (open) bound.controller.folded_sections &= ~mask else bound.controller.folded_sections |= mask;
+        self.refresh();
         bound.cx.requestRedraw();
     }
     fn refresh(self: *Section) void {
         var buffer: [512]u8 = undefined;
-        const text = if (self.summary) |render| render(self.page.bound.controller.model.value, &buffer) catch self.description else self.description;
+        const text = if (self.expanded.peek()) self.description else if (self.summary) |render| render(self.page.bound.controller.model.value, &buffer) catch self.description else self.description;
         self.heading.summary.setTextContent(self.page.cx.allocator, text) catch {};
+        self.heading.summary.setDisplay(if (text.len != 0) .flex else .none);
         self.root.setBorderWidth(0);
         self.header.setBorderWidth(0);
 
@@ -332,6 +297,7 @@ pub const Section = struct {
         const field = try Field.create(self.page, key, label, help, enabled);
         field.checked = try self.page.bound.scope.createSignal(bool, values.read(self.page.bound.controller.model.value, key.section, key.key).?.boolean);
         const node = try ui.widgets.Switch(.{ .checked = field.checked.?, .disabled = field.disabled, .on_change = self.page.cx.on(Field, field, Field.toggle) }).mount(self.page.bound.scope, self.page.cx);
+        field.row.setStyleInline(self.page.cx.allocator, .{ .min_height = 42, .padding = .{ .top = 10, .bottom = 10 } });
         node.meta.ownership.meta.test_id = try stableId(self.page.bound.scope, "settings.field.", key.key);
         if (node.behavior.interaction.a11y) |*a11y| a11y.label = label;
         field.control = node;
@@ -340,7 +306,8 @@ pub const Section = struct {
         try self.page.bound.scope.createEffect(.{ .field = field }, struct {
             fn run(ctx: anytype) void {
                 _ = ctx.field.checked.?.get();
-                S.paintSwitch(ctx.field.page.cx, ctx.field.control.?, ctx.field.checked.?.peek());
+                _ = ctx.field.disabled.get();
+                S.paintSettingsSwitch(ctx.field.page.cx, ctx.field.control.?, ctx.field.checked.?.peek());
             }
         }.run);
         field.refresh();

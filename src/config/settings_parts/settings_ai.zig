@@ -98,6 +98,8 @@ pub fn mountChildren(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
     }
     if (binding.matches(query, "角色模板 编排 多智能体 模型 推理强度")) {
         const section = try page.section("角色模板", "", ui.icons.get("layers").?, 32, "settings.ai.role_templates", null);
+        section.header.setStyleInline(cx.allocator, .{ .min_height = controls.S.geometry.section_summary_header });
+        section.heading.title.parent.?.setStyleInline(cx.allocator, .{ .height = .{ .px = 38 } });
         try @import("settings_role_templates.zig").mount(section);
     }
     return page.finish();

@@ -11,7 +11,7 @@ pub const g = struct {
     pub const row: f32 = 52;
     pub const control: f32 = 32;
     pub const control_width: f32 = 220;
-    pub const font_control_width: f32 = 280;
+    pub const font_control_width: f32 = 240;
     pub const icon: f32 = 16;
     pub const tile_height: f32 = 56;
     pub const thumbnail_width: f32 = 40;
@@ -33,7 +33,7 @@ pub fn pageTitle(_: *const ui.ThemeTokens) ui.TextStyle {
     return .{ .font_size = 13, .font_weight = 600, .line_height = 20.0 / 13.0, .color = theme.current().fg_1 };
 }
 pub fn row(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .fit = .{} }, .min_height = g.row, .padding = .{ .top = 8, .bottom = 8 }, .direction = .row, .align_items = .center, .gap = 20, .flex_shrink = 0, .min_width = 0 };
+    return .{ .width = .fill(), .height = .{ .fit = .{} }, .min_height = g.row, .padding = .{ .top = 10, .bottom = 10 }, .direction = .row, .align_items = .center, .gap = 16, .flex_shrink = 0, .min_width = 0 };
 }
 pub fn labelGroup(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .flex = 1, .min_width = 0, .direction = .column, .gap = 3, .align_items = .start };
@@ -97,10 +97,10 @@ pub fn tileIdentity(_: *const ui.ThemeTokens) ui.TextStyle {
     return .{ .font_size = 9.5, .line_height = 14.0 / 9.5, .color = theme.current().fg_2, .text_overflow = .ellipsis };
 }
 pub fn toggle(enabled: bool, disabled: bool) ButtonStyle {
-    return .{ .width = .{ .px = 30 }, .height = .{ .px = 18 }, .direction = .row, .align_items = .center, .justify = if (enabled) .end else .start, .padding = .{ .left = 2, .right = 2 }, .background = theme.choiceBackground(enabled, disabled), .corner_radius = 9, .border_width = 0, .gap = 0 };
+    return .{ .width = .{ .px = 40 }, .height = .{ .px = 22 }, .direction = .row, .align_items = .center, .justify = if (enabled) .end else .start, .padding = .{ .left = 2, .right = 2 }, .background = base.settingsSwitchFill(enabled, disabled), .corner_radius = 11, .border_width = 0, .gap = 0 };
 }
 pub fn toggleKnob(enabled: bool, disabled: bool) ui.BoxStyle {
-    return .{ .width = .{ .px = 14 }, .height = .{ .px = 14 }, .background = theme.choiceThumb(enabled, disabled), .border = .{ .radius = 7 }, .flex_shrink = 0 };
+    return .{ .width = .{ .px = 18 }, .height = .{ .px = 18 }, .background = base.settingsSwitchThumb(enabled, disabled), .border = .{ .radius = 9 }, .flex_shrink = 0 };
 }
 pub fn materialRow(_: *const ui.ThemeTokens) ui.BoxStyle {
     var s = row(undefined);
@@ -115,8 +115,8 @@ pub fn previewBar(_: *const ui.ThemeTokens) ui.BoxStyle {
 }
 
 pub fn backgroundPair(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .row, .flex_wrap = .wrap, .gap = 16, .padding = .{ .top = 8, .bottom = 8 }, .flex_shrink = 0, .min_width = 0 };
+    return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .row, .flex_wrap = .wrap, .gap = 16, .padding = .{ .top = 4, .bottom = 8 }, .flex_shrink = 0, .min_width = 0 };
 }
 pub fn backgroundField(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .{ .px = 280 }, .height = .{ .px = 36 }, .flex_shrink = 0, .direction = .row, .align_items = .center, .gap = 12 };
+    return .{ .width = .{ .px = 280 }, .height = .{ .px = 32 }, .flex_shrink = 0, .direction = .row, .align_items = .center, .gap = 8 };
 }

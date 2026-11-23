@@ -66,7 +66,7 @@ pub const Controller = struct {
     search_return_page: ?usize = null,
     scroll_offsets: [13]f32 = @splat(0),
     role_template_editor: ?usize = null,
-    folded_sections: u64 = std.math.maxInt(u64),
+    folded_sections: u64 = 0,
     plugin_page: plugins.State,
     background: material.Draft,
     theme_library: themes.LibraryState,

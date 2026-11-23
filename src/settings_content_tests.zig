@@ -570,21 +570,21 @@ test "appearance geometry uses V3 card padding and 32 pixel field controls" {
     _ = f.cx.render();
     const font = byId(terminal.root, "settings.appearance.font").?.globalRect();
     const family = byId(terminal.root, "settings.field.font_family").?.globalRect();
-    try std.testing.expectApproxEqAbs(@as(f32, 626), font.w, 0.1);
-    try std.testing.expectApproxEqAbs(@as(f32, 330), family.x - font.x, 0.1);
-    try std.testing.expectApproxEqAbs(@as(f32, 58), family.y - font.y, 0.1);
-    try std.testing.expectApproxEqAbs(@as(f32, 280), family.w, 0.1);
+    try std.testing.expectApproxEqAbs(@as(f32, 588), font.w, 0.1);
+    try std.testing.expectApproxEqAbs(@as(f32, 332), family.x - font.x, 0.1);
+    try std.testing.expectApproxEqAbs(@as(f32, 74), family.y - font.y, 0.1);
+    try std.testing.expectApproxEqAbs(@as(f32, 240), family.w, 0.1);
     try std.testing.expectApproxEqAbs(@as(f32, 32), family.h, 0.1);
     const material = byId(mounted.root, "settings.appearance.materials").?.globalRect();
-    try std.testing.expectApproxEqAbs(@as(f32, 48), byId(mounted.root, "settings.materials.header").?.globalRect().h, 0.1);
+    try std.testing.expectApproxEqAbs(@as(f32, 64), byId(mounted.root, "settings.materials.header").?.globalRect().h, 0.1);
     for ([_][]const u8{ "fit", "alignment" }) |field| {
         var buffer: [80]u8 = undefined;
         const control = byId(mounted.root, try std.fmt.bufPrint(&buffer, "settings.field.{s}", .{field})).?.globalRect();
         const pair = byId(mounted.root, "settings.background.position_fields").?.globalRect();
         const fit = byId(mounted.root, "settings.field.fit").?.globalRect();
         const alignment = byId(mounted.root, "settings.field.alignment").?.globalRect();
-        try std.testing.expectApproxEqAbs(fit.y, alignment.y, 0.1);
-        try std.testing.expectApproxEqAbs((pair.w - 16) / 2 - 88, control.w, 0.1);
+        try std.testing.expect(alignment.y > fit.y);
+        try std.testing.expectApproxEqAbs(pair.w - 126, control.w, 0.1);
         try std.testing.expect(control.x >= material.x and control.x + control.w <= material.x + material.w);
         try std.testing.expectApproxEqAbs(@as(f32, 32), control.h, 0.1);
     }
@@ -618,11 +618,18 @@ test "appearance directory controls follow detected source without a source sele
     const interval = byId(directory.root, "settings.field.interval_minutes").?;
     const fit = byId(directory.root, "settings.field.fit").?;
     const alignment = byId(directory.root, "settings.field.alignment").?;
+    try std.testing.expect(interval.globalRect().y > order.globalRect().y);
+    try std.testing.expect(alignment.globalRect().y > fit.globalRect().y);
+    // Wider panels show the paired fields side by side; narrow panels stack them.
+    f.cx.setViewport(708, 628);
+    f.cx.root.?.setStyleInline(f.cx.allocator, .{ .width = .{ .px = 708 } });
+    f.cx.layout();
+    _ = f.cx.render();
     try std.testing.expectApproxEqAbs(order.globalRect().y, interval.globalRect().y, 0.1);
     try std.testing.expectApproxEqAbs(fit.globalRect().y, alignment.globalRect().y, 0.1);
     try std.testing.expect(order.globalRect().x + order.globalRect().w <= interval.globalRect().x);
     const pair = byId(directory.root, "settings.background.rotation_fields").?.globalRect();
-    try std.testing.expectApproxEqAbs((pair.w - 16) / 2 - 88, order.globalRect().w, 0.1);
+    try std.testing.expectApproxEqAbs((pair.w - 16) / 2 - 126, order.globalRect().w, 0.1);
     f.cx.setViewport(500, 628);
     f.cx.root.?.setStyleInline(f.cx.allocator, .{ .width = .{ .px = 500 } });
     f.cx.layout();
@@ -639,7 +646,7 @@ test "appearance V3 inline preview and theme import expose real capability" {
     try f.controller.editKey("ui.materials.background", "path", .{ .text = "/fixture.png" });
     const mounted = try f.mount();
     const preview = byId(mounted.root, "settings.background.preview").?;
-    try std.testing.expectApproxEqAbs(@as(f32, 116), preview.globalRect().h, 0.1);
+    try std.testing.expectApproxEqAbs(@as(f32, 102), preview.globalRect().h, 0.1);
     try std.testing.expect(byId(mounted.root, "settings.materials.preview.full") != null);
     const remove = byId(mounted.root, "settings.theme.remove.current").?;
     _ = f.cx.render();
@@ -737,13 +744,13 @@ test "appearance legacy library state cannot replace V3 inline theme selection" 
     try f.controller.editKey("ui", "font_size", .{ .unsigned = 21 });
     const mounted = try f.mount();
     const strip = byId(mounted.root, "settings.theme.strip").?;
-    try std.testing.expectApproxEqAbs(@as(f32, 75), strip.globalRect().h, 0.1);
+    try std.testing.expectApproxEqAbs(@as(f32, 85), strip.globalRect().h, 0.1);
     try std.testing.expect(byId(mounted.root, "settings.theme.grid") == null);
     try std.testing.expect(byId(mounted.root, "settings.theme.library.open") == null);
     try std.testing.expect(byId(mounted.root, "settings.theme.library.close") == null);
     const light = byId(mounted.root, "settings.theme.light").?;
-    try std.testing.expectApproxEqAbs(@as(f32, 150), light.globalRect().w, 0.1);
-    try std.testing.expectApproxEqAbs(@as(f32, 75), light.globalRect().h, 0.1);
+    try std.testing.expectApproxEqAbs(@as(f32, 151), light.globalRect().w, 0.1);
+    try std.testing.expectApproxEqAbs(@as(f32, 73), light.globalRect().h, 0.1);
     clickButton(light);
     try std.testing.expectEqualStrings("light", f.controller.model.value.ui.theme);
     try std.testing.expectEqual(@as(u16, 21), f.controller.model.value.ui.font_size);
@@ -807,10 +814,11 @@ test "settings fixed footer stays outside the scrolling viewport at canonical si
         const viewport = byId(page.root, "settings.viewport").?;
         const footer = byId(page.root, "settings.footer").?;
         const before = footer.globalRect();
-        try std.testing.expectApproxEqAbs(@as(f32, 62), viewport.globalRect().y, 0.1);
-        try std.testing.expectApproxEqAbs(height - 120, viewport.globalRect().h, 0.1);
-        try std.testing.expectApproxEqAbs(height - 58, before.y, 0.1);
-        try std.testing.expectApproxEqAbs(@as(f32, 58), before.h, 0.1);
+        try std.testing.expectApproxEqAbs(@as(f32, 65), viewport.globalRect().y, 0.1);
+        try std.testing.expectApproxEqAbs(height - 121, viewport.globalRect().h, 0.1);
+        try std.testing.expectApproxEqAbs(height - 56, before.y, 0.1);
+        try std.testing.expectApproxEqAbs(@as(f32, 56), before.h, 0.1);
+        try std.testing.expectEqual(ui.Padding{ .left = 24, .right = 24, .top = 12, .bottom = 20 }, page.scroll_content.style.padding);
         try std.testing.expectApproxEqAbs(@as(f32, 0), before.y - viewport.globalRect().y - viewport.globalRect().h, 0.1);
         page.scroll_state.viewport_height = viewport.globalRect().h;
         page.scroll_state.content_height = page.scroll_content.globalRect().h;
@@ -963,8 +971,8 @@ test "settings search repaints its retained translucent input after material rea
         publication.publish(cx, theme.widgetTheme(name));
         view.styles.paintSearch(cx, &input);
         cx.layout();
-        try std.testing.expectEqual(theme.popupInset(), input.input_container.getBackground());
-        try std.testing.expectEqual(theme.current().well.a, input.input_container.getBackground().a);
+        try std.testing.expectEqual(view.styles.footerButton().background.?, input.input_container.getBackground());
+        try std.testing.expectEqual(if (name == .dark) theme.current().well.a else theme.current().overlay.a, input.input_container.getBackground().a);
         try std.testing.expectEqual(id, input.input_container.id);
         try std.testing.expectEqual(rect, input.node.globalRect());
         try std.testing.expectEqualStrings("背景", query.peek());
@@ -976,8 +984,8 @@ test "settings search repaints its retained translucent input after material rea
         _ = theme.setMaterialParameters(0, 0);
         publication.publish(cx, theme.widgetTheme(name));
         view.styles.paintSearch(cx, &input);
-        try std.testing.expectEqual(theme.popupInset(), input.input_container.getBackground());
-        try std.testing.expectEqual(theme.popupInset().a, input.input_container.getBackground().a);
+        try std.testing.expectEqual(view.styles.footerButton().background.?, input.input_container.getBackground());
+        try std.testing.expectEqual(if (name == .dark) theme.current().well.a else theme.current().overlay.a, input.input_container.getBackground().a);
         try std.testing.expect(input.state.imeIsComposing());
     }
 }
@@ -1052,18 +1060,18 @@ test "native settings SSH uses precise accordion and inline control geometry" {
     try f.init();
     defer f.deinit();
     f.controller.model.selectPage(3);
-    f.controller.folded_sections &= ~(@as(u64, 1) << 8);
+    f.controller.folded_sections = @as(u64, 1) << 9;
     const mounted = try f.mount();
     const connection = byId(mounted.root, "settings.ssh.connection").?;
     const reconnect = byId(mounted.root, "settings.ssh.reconnect").?;
     const keepalive = byId(mounted.root, "settings.field.keepalive_sec").?;
-    try std.testing.expectApproxEqAbs(@as(f32, 626), connection.globalRect().w, 0.1);
-    try std.testing.expectApproxEqAbs(@as(f32, 316), connection.globalRect().h, 0.1);
-    try std.testing.expectApproxEqAbs(@as(f32, 62), reconnect.globalRect().h, 0.1);
+    try std.testing.expectApproxEqAbs(@as(f32, 588), connection.globalRect().w, 0.1);
+    try std.testing.expectApproxEqAbs(@as(f32, 320), connection.globalRect().h, 0.1);
+    try std.testing.expectApproxEqAbs(@as(f32, 64), reconnect.globalRect().h, 0.1);
     try std.testing.expectApproxEqAbs(@as(f32, 220), keepalive.globalRect().w, 0.1);
     try std.testing.expectApproxEqAbs(@as(f32, 32), keepalive.globalRect().h, 0.1);
-    try std.testing.expectApproxEqAbs(@as(f32, 390), keepalive.globalRect().x - connection.globalRect().x, 0.1);
-    try std.testing.expectApproxEqAbs(@as(f32, 58), keepalive.globalRect().y - connection.globalRect().y, 0.1);
+    try std.testing.expectApproxEqAbs(@as(f32, 352), keepalive.globalRect().x - connection.globalRect().x, 0.1);
+    try std.testing.expectApproxEqAbs(@as(f32, 74), keepalive.globalRect().y - connection.globalRect().y, 0.1);
     try std.testing.expect(!byId(mounted.root, "settings.ssh.reconnect.header").?.behavior.interaction.a11y.?.expanded.?);
     try std.testing.expectEqualStrings("30", inputFor(mounted, "settings.field.keepalive_sec").getText());
     try std.testing.expect(!f.controller.model.dirty);
@@ -1298,7 +1306,7 @@ fn expectCleanSectionHeaders(node: *ui.Node) !void {
         if (std.mem.endsWith(u8, id, ".header")) {
             if (sectionSummary(node)) |value| {
                 try std.testing.expect(value.getText() != null);
-                const shown = value.getText().?.content.len != 0 and !(node.behavior.interaction.a11y.?.expanded orelse false);
+                const shown = value.getText().?.content.len != 0;
                 try std.testing.expectEqual(if (shown) ui.types.Display.flex else ui.types.Display.none, value.style.display);
                 try std.testing.expectEqual(@as(usize, if (shown) 2 else 1), nonemptyTexts(node));
                 // Title + summary form the flexible middle column, leaving the
@@ -1318,7 +1326,7 @@ fn expectCleanSectionHeaders(node: *ui.Node) !void {
     for (node.children.items) |child| try expectCleanSectionHeaders(child);
 }
 
-test "native settings expanded headers hide repeated summaries while fields remain editable" {
+test "native settings expanded headers show descriptions while fields remain editable" {
     for (0..13) |index| {
         var f: AppearanceFixture = undefined;
         try f.init();
@@ -1329,6 +1337,15 @@ test "native settings expanded headers hide repeated summaries while fields rema
         try f.cx.root.?.appendChild(f.cx.allocator, mounted.root);
         f.cx.layout();
         try expectCleanSectionHeaders(mounted.root);
+        if (index == 0) {
+            const summary = byId(mounted.root, "settings.appearance.themes.summary").?;
+            const header = byId(mounted.root, "settings.appearance.themes.header").?;
+            try std.testing.expectEqualStrings("选择应用与终端配色方案", summary.getText().?.content);
+            foldHeader(header);
+            try std.testing.expectEqualStrings(f.registry.get(f.controller.model.value.ui.theme).?.theme.name, summary.getText().?.content);
+            foldHeader(header);
+            try std.testing.expectEqualStrings("选择应用与终端配色方案", summary.getText().?.content);
+        }
         if (index == 3) {
             const keepalive = inputFor(mounted, "settings.field.keepalive_sec");
             replaceInput(keepalive, "44");
@@ -1348,9 +1365,10 @@ test "native settings appearance icon and workspace folds remain independent aft
     defer f.deinit();
     const mounted = try f.mount();
     const icon = byId(mounted.root, "settings.appearance.app_icon.header").?;
+    try std.testing.expect(icon.behavior.interaction.a11y.?.expanded.?);
     _ = icon.behavior.events.on_event.?(.{ .key_down = .{ .key = .space } }, icon.behavior.events.event_context);
     const remounted = try f.mount();
-    try std.testing.expect(byId(remounted.root, "settings.appearance.app_icon.header").?.behavior.interaction.a11y.?.expanded.?);
+    try std.testing.expect(!byId(remounted.root, "settings.appearance.app_icon.header").?.behavior.interaction.a11y.?.expanded.?);
     // 终端与工作区折叠在独立的「终端配置」页保持自身状态。
     f.controller.model.selectPage(1);
     const terminal = try f.mount();
@@ -1404,7 +1422,7 @@ test "native settings unit suffixes stay outside editable numeric values" {
     replaceInput(input, "128");
     try std.testing.expectEqual(@as(u16, 128), f.controller.model.value.log.ring_mb);
     try std.testing.expectEqualStrings("缓冲、快照与保留策略", byId(mounted.root, "settings.data.history.summary").?.getText().?.content);
-    try std.testing.expectEqual(ui.types.Display.none, byId(mounted.root, "settings.data.history.summary").?.style.display);
+    try std.testing.expectEqual(ui.types.Display.flex, byId(mounted.root, "settings.data.history.summary").?.style.display);
 }
 
 // Presentation rounding must never write the rounded value back without input.
@@ -1509,11 +1527,7 @@ test "settings folds animate locally and keep fields summaries and accessory ali
             std.debug.print("missing fold header page={d} id={s}\n", .{ page, header_id });
             return error.MissingFoldHeader;
         };
-        // Builtin plugin card is initially collapsed by the existing policy.
-        if (!header.behavior.interaction.a11y.?.expanded.?) {
-            foldHeader(header);
-            for (0..30) |_| foldFrame(f.cx);
-        }
+        try std.testing.expect(header.behavior.interaction.a11y.?.expanded.?);
         const item = header.parent.?;
         const content = byId(item, "accordion.content").?;
         const open_height = content.globalRect().h;
@@ -1526,7 +1540,7 @@ test "settings folds animate locally and keep fields summaries and accessory ali
         foldFrame(f.cx);
         try std.testing.expect(content.globalRect().h > 0);
         try std.testing.expect(content.globalRect().h < open_height);
-        try std.testing.expect(header.globalRect().h > 48 and header.globalRect().h < 62);
+        try std.testing.expectApproxEqAbs(@as(f32, 64), header.globalRect().h, 0.1);
         // Reverse before collapse completes; the same instance animates back.
         const partial = content.globalRect().h;
         foldHeader(header);
@@ -1534,11 +1548,11 @@ test "settings folds animate locally and keep fields summaries and accessory ali
         try std.testing.expect(content.globalRect().h >= partial - 0.1);
         for (0..30) |_| foldFrame(f.cx);
         try std.testing.expectApproxEqAbs(open_height, content.globalRect().h, 0.2);
-        try std.testing.expect(byId(mounted.root, summary_id).?.style.display == .none);
+        try std.testing.expect(byId(mounted.root, summary_id).?.style.display != .none);
         foldHeader(header);
         for (0..30) |_| foldFrame(f.cx);
         try std.testing.expectApproxEqAbs(@as(f32, 0), content.globalRect().h, 0.1);
-        try std.testing.expectApproxEqAbs(@as(f32, 62), header.globalRect().h, 0.1);
+        try std.testing.expectApproxEqAbs(@as(f32, 64), header.globalRect().h, 0.1);
         try std.testing.expect(byId(mounted.root, summary_id).?.style.display != .none);
         try std.testing.expectEqual(changes_before, f.rebuilds);
         try std.testing.expectEqual(header, byId(mounted.root, header_id).?);
@@ -1549,7 +1563,7 @@ test "settings folds animate locally and keep fields summaries and accessory ali
         }
         if (page == 0) {
             const toggle = byId(mounted.root, "settings.toggle.enabled").?.globalRect();
-            try std.testing.expectApproxEqAbs(header.globalRect().y + header.globalRect().h / 2, toggle.y + toggle.h / 2, 0.1);
+            try std.testing.expectApproxEqAbs(header.globalRect().y + 16 + (header.globalRect().h - 26) / 2, toggle.y + toggle.h / 2, 0.1);
         }
     }
 }
@@ -1569,10 +1583,10 @@ test "settings folds respect reduced motion without remounting" {
     foldHeader(header);
     foldFrame(f.cx);
     try std.testing.expectApproxEqAbs(@as(f32, 0), content.globalRect().h, 0.1);
-    try std.testing.expectApproxEqAbs(@as(f32, 62), header.globalRect().h, 0.1);
+    try std.testing.expectApproxEqAbs(@as(f32, 64), header.globalRect().h, 0.1);
     foldHeader(header);
     foldFrame(f.cx);
     try std.testing.expectApproxEqAbs(open_height, content.globalRect().h, 0.1);
-    try std.testing.expectApproxEqAbs(@as(f32, 48), header.globalRect().h, 0.1);
+    try std.testing.expectApproxEqAbs(@as(f32, 64), header.globalRect().h, 0.1);
     try std.testing.expectEqual(@as(usize, 0), f.rebuilds);
 }

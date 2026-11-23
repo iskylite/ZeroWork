@@ -98,7 +98,7 @@ pub fn settingsBackdrop(_: *const ui.ThemeTokens) ui.BoxStyle {
         .direction = .column,
         .align_items = .center,
         .justify = .center,
-        .background = theme.modal_barrier,
+        .background = ui.Color.rgba(24, 24, 27, 41),
     };
 }
 
@@ -123,7 +123,7 @@ test "light settings surfaces stay light across transparency and retained theme 
             _ = theme.setMaterialParameters(transparency, 0);
             publication.publish(cx, theme.widgetTheme(name));
             try std.testing.expectEqual(id, backdrop.id);
-            try std.testing.expectEqual(ui.Color.TRANSPARENT, backdrop.getBackground());
+            try std.testing.expectEqual(ui.Color.rgba(24, 24, 27, 41), backdrop.getBackground());
             if (name != .dark) {
                 const card = theme.settingsCard();
                 try std.testing.expect(card.r > 210 and card.g > 210 and card.b > 210);
@@ -135,13 +135,14 @@ test "light settings surfaces stay light across transparency and retained theme 
 
 pub fn settingsPanel(_: *const ui.ThemeTokens) ui.BoxStyle {
     const c = theme.current();
-    return .{ .width = .{ .px = @import("v3_geometry.zig").settings_width }, .height = .{ .px = @import("v3_geometry.zig").settings_height }, .direction = .column, .gap = 0, .padding = .{}, .background = c.overlay, .border = .{ .width = 0, .color = c.border, .radius = 14 }, .shadow = .{ .blur = 32, .offset_y = 24, .color = c.shadow }, .hit_behavior = .@"opaque", .hit_roles = .{ .pointer = true, .scroll = true } };
+    return .{ .width = .{ .px = @import("v3_geometry.zig").settings_width }, .height = .{ .px = @import("v3_geometry.zig").settings_height }, .direction = .column, .background = c.overlay, .border = .{ .radius = 14 }, .shadow = .{ .blur = 8, .offset_y = 3, .color = c.shadow }, .overflow_hidden = true, .hit_behavior = .@"opaque", .hit_roles = .{ .pointer = true, .scroll = true } };
 }
 pub fn settingsBody(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .fill(), .min_height = 0, .direction = .row, .gap = 10, .padding = .{ .left = 14, .right = 14, .bottom = 12 } };
+    return .{ .width = .fill(), .height = .fill(), .min_height = 0, .direction = .row };
 }
 pub fn settingsNavigation(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .{ .px = @import("v3_geometry.zig").settings_sidebar }, .height = .fill(), .flex_shrink = 0, .direction = .column, .padding = .{ .top = 4 }, .gap = 6, .background = ui.Color.TRANSPARENT, .border = .{ .width = 0, .radius = 0 } };
+    const c = theme.current();
+    return .{ .width = .{ .px = @import("v3_geometry.zig").settings_sidebar }, .height = .fill(), .flex_shrink = 0, .direction = .column, .padding = .{ .top = 14, .left = 10, .right = 10, .bottom = 10 }, .background = c.surface_1.withAlpha(c.overlay.a) };
 }
 pub fn settingsContent(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .fill(), .min_width = 0, .min_height = 0, .direction = .column };

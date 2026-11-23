@@ -10,6 +10,6 @@ pub const overlay_radius: f32 = 14;
 pub const settings_width: f32 = 900;
 pub const settings_height: f32 = 640;
 pub const settings_inset: f32 = 16;
-pub const settings_header: f32 = 64;
+pub const settings_header: f32 = 60;
 pub const settings_sidebar: f32 = 192;
 pub const settings_sidebar_compact: f32 = 168;

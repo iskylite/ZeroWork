@@ -164,7 +164,7 @@ pub fn settingsCard() ui.Color {
     const opacity = @as(f32, @floatFromInt(layerAlpha(2))) / 255;
     // Light cards need only a quiet tonal difference. Compensating their tint
     // for transparency mixes almost half the dark ink into the surface.
-    const strength = if (currentName() == .dark) @min(1, 0.12 / opacity) else 0.12;
+    const strength = if (currentName() == .dark) @min(1, 0.12 / opacity) else 0.05;
     return ui.Color.lerp(c.overlay.withAlpha(255), c.fg_2.withAlpha(255), strength).withAlpha(c.surface_2.a);
 }
 /// Keep retained surface paint in sync with the same publication as widget tokens.

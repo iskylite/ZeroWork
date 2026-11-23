@@ -251,7 +251,12 @@ pub const ProviderView = struct {
         const action_click = try action_scope.allocator.create(Click);
         action_click.* = .{ .view = self, .action = .add_provider, .provider = 0, .model = 0 };
         try action_scope.onCleanup(Click, action_click, Click.cleanup);
-        const button = try ui.widgets.Button(.{ .label = "新增服务提供方", .icon_asset = ui.icons.plus, .icon_size = @as(f32, 14), .a11y_label = "新增服务提供方", .disabled = self.disabled, .on_click = cx.on(Click, action_click, Click.run), .base_style = S.actionControl(false), .hover_style = S.buttonHover() }).mount(action_scope, cx);
+        var style = S.actionControl(false);
+        style.height = .{ .px = 30 };
+        style.font_size = 11.5;
+        style.gap = 6;
+        style.background = S.theme.states().control;
+        const button = try ui.widgets.Button(.{ .label = "新增服务提供方", .icon_asset = ui.icons.plus, .icon_size = @as(f32, 14), .a11y_label = "新增服务提供方", .disabled = self.disabled, .on_click = cx.on(Click, action_click, Click.run), .base_style = style, .hover_style = S.buttonHover() }).mount(action_scope, cx);
         button.meta.ownership.meta.test_id = "settings.ai.add_provider";
         return button;
     }
@@ -277,18 +282,18 @@ pub const ProviderView = struct {
         self.render_scope = try self.scope.childScope();
         const count = self.controller.model.value.ai.provider_count;
         self.root.setStyleInline(self.cx.allocator, .{ .background = S.theme.settingsCard(), .border = .{ .radius = 11 }, .gap = 0, .min_width = 0 });
-        const heading = try ui.box(self.cx, .{ .width = .fill(), .min_height = 70, .direction = .row, .padding = .{ .left = 16, .right = 16, .top = 15, .bottom = 14 }, .gap = 10, .align_items = .center, .flex_shrink = 0, .min_width = 0 }, .{});
-        const description = try ui.box(self.cx, .{ .width = .fill(), .flex = 1, .direction = .column, .gap = 3, .min_width = 0 }, .{});
-        const title = try ui.box(self.cx, .{ .width = .fill(), .direction = .row, .gap = 7, .align_items = .center }, .{});
-        try title.appendChild(self.cx.allocator, try ui.iconTint(self.cx, ui.icons.sparkles, S.theme.current().accent_ink, .{ .width = .{ .px = 16 }, .height = .{ .px = 16 } }));
-        try title.appendChild(self.cx.allocator, try ui.textStyled(self.cx, S.title, "服务提供方"));
-        try description.appendChild(self.cx.allocator, title);
-        try description.appendChild(self.cx.allocator, try ui.textStyled(self.cx, S.note, "配置模型服务的连接信息和可用模型。"));
+        const heading = try ui.box(self.cx, .{ .width = .fill(), .height = .{ .px = 64 }, .direction = .row, .padding = .{ .left = 16, .right = 16, .top = 16, .bottom = 10 }, .gap = 10, .align_items = .center, .flex_shrink = 0, .min_width = 0 }, .{});
+        try heading.appendChild(self.cx.allocator, try ui.iconTint(self.cx, ui.icons.sparkles, S.theme.current().accent_ink, .{ .width = .{ .px = 16 }, .height = .{ .px = 16 }, .flex_shrink = 0 }));
+        const description = try ui.box(self.cx, .{ .width = .fill(), .flex = 1, .direction = .column, .gap = 2, .min_width = 0 }, .{});
+        try description.appendChild(self.cx.allocator, try ui.text(self.cx, "服务提供方与模型", .{ .font_size = 13, .font_weight = 600, .line_height = 19.0 / 13.0, .color = S.theme.current().fg_1 }));
+        const hint = try ui.text(self.cx, "连接信息、可用模型与启用状态。", .{ .font_size = 11.5, .line_height = 17.0 / 11.5, .color = S.secondaryInk(), .text_overflow = .ellipsis });
+        hint.setStyleInline(self.cx.allocator, .{ .width = .fill(), .min_width = 0, .overflow_hidden = true });
+        try description.appendChild(self.cx.allocator, hint);
         try heading.appendChild(self.cx.allocator, description);
         try heading.appendChild(self.cx.allocator, try self.mountAddProviderAction(self.render_scope.?, self.cx));
         try self.root.appendChild(self.cx.allocator, heading);
         const list = try ui.widgets.ScrollArea(.{ .direction = .vertical, .rubber_band_y = false }).mount(self.render_scope.?, self.cx);
-        list.container.setStyleInline(self.cx.allocator, .{ .width = .fill(), .height = .{ .fit = .{} }, .max_height = 450, .padding = .{ .left = 10, .right = 10, .bottom = 10 }, .min_width = 0, .flex_shrink = 0 });
+        list.container.setStyleInline(self.cx.allocator, .{ .width = .fill(), .height = .{ .fit = .{} }, .max_height = 450, .padding = .{ .left = 16, .right = 16, .bottom = 16 }, .min_width = 0, .flex_shrink = 0 });
         list.container.meta.ownership.meta.test_id = "settings.ai.provider_list";
         list.content.setStyleInline(self.cx.allocator, .{ .width = .fill(), .direction = .column, .gap = 6, .min_width = 0, .flex_shrink = 0 });
         for (0..count) |i| try list.content.appendChild(self.cx.allocator, try self.providerCard(i));
@@ -495,20 +500,27 @@ pub const ProviderView = struct {
     fn providerCard(self: *ProviderView, i: usize) !*ui.Node {
         const p = self.controller.model.value.ai.providers[i];
         const open = self.controller.ai_fields.provider_open.get(i) orelse false;
-        const result = try self.accordion(.provider, i, 0, displayName(p), open, 64, false);
+        const result = try self.accordion(.provider, i, 0, displayName(p), open, 55, false);
         @import("../ui/layer_materials.zig").card(result.item, .custom);
         result.item.meta.ownership.meta.test_id = try self.id(i, null, "card");
         result.item.setStyleInline(self.cx.allocator, .{ .position = .relative, .background = providerBackground(open), .border = .{ .radius = 8 }, .gap = 0, .flex_shrink = 0, .min_width = 0 });
-        result.header.setStyleInline(self.cx.allocator, .{ .height = .{ .px = 64 }, .padding = .{ .left = 12, .right = 112, .top = 12, .bottom = 12 }, .gap = 9, .min_width = 0, .border = .{ .width = 0, .radius = 8 } });
+        result.header.setStyleInline(self.cx.allocator, .{ .height = .{ .px = 55 }, .padding = .{ .left = 12, .right = 122, .top = 10, .bottom = 10 }, .gap = 10, .min_width = 0, .border = .{ .width = 0, .radius = 8 } });
         try controls.bindHeaderInteraction(self.cx, self.render_scope.?, result.header);
         result.header.removeChild(result.title);
         result.header.removeChild(result.chevron);
-        result.chevron.setStyleInline(self.cx.allocator, .{ .width = .{ .px = 16 }, .height = .{ .px = 16 }, .flex_shrink = 0 });
+        result.chevron.setStyleInline(self.cx.allocator, .{ .width = .{ .px = 14 }, .height = .{ .px = 14 }, .flex_shrink = 0 });
         try result.header.appendChild(self.cx.allocator, result.chevron);
-        const logo = try Brand.mount(self.cx, Brand.provider(displayName(p), p.endpoint), displayName(p), 30);
+        const logo = try Brand.mount(self.cx, Brand.provider(displayName(p), p.endpoint), displayName(p), 28);
+        logo.setStyleInline(self.cx.allocator, .{ .background = S.theme.current().overlay, .border = .{ .radius = 6 } });
+        if (logo.children.items[0].getText()) |old| {
+            var text = old;
+            text.font_size = 11.5;
+            text.color = S.theme.current().fg_1;
+            logo.children.items[0].setText(text);
+        }
         logo.meta.ownership.meta.test_id = try self.id(i, null, "logo");
         try result.header.appendChild(self.cx.allocator, logo);
-        const heading = try ui.box(self.cx, .{ .width = .fill(), .flex = 1, .min_width = 0, .direction = .column, .gap = 3 }, .{});
+        const heading = try ui.box(self.cx, .{ .width = .fill(), .flex = 1, .min_width = 0, .direction = .column, .gap = 2 }, .{});
         if (result.title.getText()) |old| {
             var text = old;
             text.font_size = 12;
@@ -529,20 +541,24 @@ pub const ProviderView = struct {
         const summary = if (p.model_count == 0) try std.fmt.bufPrint(&summary_buffer, "{s} · 尚未添加模型", .{protocol}) else try std.fmt.bufPrint(&summary_buffer, "{s} · {d} 个模型", .{ protocol, p.model_count });
         try heading.appendChild(self.cx.allocator, try ui.textStyled(self.cx, S.note, try controls.owned(self.render_scope.?, summary)));
         try result.header.appendChild(self.cx.allocator, heading);
-        const badge = try ui.text(self.cx, "", .{ .font_size = 10, .line_height = 16.0 / 10.0, .color = if (p.enabled) S.theme.current().ok_ink else S.theme.current().fg_2 });
-        badge.setStyleInline(self.cx.allocator, .{ .position = .absolute, .inset = .{ .right = .{ .px = 52 }, .top = .{ .px = 21 } }, .padding = .{ .left = 6, .right = 6, .top = 3, .bottom = 3 }, .background = if (p.enabled) S.theme.popupInset() else S.theme.states().hover, .border = .{ .radius = 5 } });
+        const badge = try ui.text(self.cx, "", .{ .font_size = 10.5, .font_weight = 500, .line_height = 15.0 / 10.5, .color = if (p.enabled) S.theme.current().ok_ink else S.theme.current().fg_2 });
+        badge.setStyleInline(self.cx.allocator, .{ .position = .absolute, .inset = .{ .right = .{ .px = 62 }, .top = .{ .px = 17 } }, .padding = .{ .left = 8, .right = 8, .top = 3, .bottom = 3 }, .background = if (p.enabled) S.theme.states().tag_ok else S.theme.states().hover, .border = .{ .radius = 5 } });
         badge.meta.ownership.meta.test_id = try self.id(i, null, "status");
         try self.badges.append(self.scope.allocator, .{ .index = i, .node = badge });
         try result.item.appendChild(self.cx.allocator, badge);
         const toggle_click = try self.click(.toggle_provider, i, 0);
-        const toggle = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = "启用服务提供方", .disabled = self.disabled, .on_click = self.cx.on(Click, toggle_click, Click.run), .base_style = .{ .width = .{ .px = 30 }, .height = .{ .px = 18 }, .padding = ui.Padding.all(2), .background = if (p.enabled) S.theme.current().accent else S.theme.states().hover, .corner_radius = 9, .border_width = 0 } }).mount(self.render_scope.?, self.cx);
-        toggle.setStyleInline(self.cx.allocator, .{ .position = .absolute, .inset = .{ .right = .{ .px = 12 }, .top = .{ .px = 23 } }, .direction = .row, .align_items = .center, .justify = if (p.enabled) .end else .start });
+        const checked = try self.render_scope.?.createSignal(bool, p.enabled);
+        const toggle = try ui.widgets.Switch(.{ .checked = checked, .disabled = self.disabled, .on_change = self.cx.on(Click, toggle_click, Click.toggle) }).mount(self.render_scope.?, self.cx);
+        toggle.setStyleInline(self.cx.allocator, .{ .position = .absolute, .inset = .{ .right = .{ .px = 12 }, .top = .{ .px = 16.5 } } });
         if (toggle.behavior.interaction.a11y) |*a11y| {
-            a11y.role = .switch_role;
-            a11y.checked = p.enabled;
+            a11y.label = "启用服务提供方";
         }
         toggle.meta.ownership.meta.test_id = try self.id(i, null, "enabled");
-        try toggle.appendChild(self.cx.allocator, try ui.box(self.cx, .{ .width = .{ .px = 14 }, .height = .{ .px = 14 }, .background = ui.Color.WHITE, .border = .{ .radius = 7 }, .flex_shrink = 0, .hit_behavior = .pass_through }, .{}));
+        try self.render_scope.?.createEffect(.{ .cx = self.cx, .node = toggle, .checked = checked }, struct {
+            fn run(args: anytype) void {
+                S.paintSettingsSwitch(args.cx, args.node, args.checked.get());
+            }
+        }.run);
         try result.item.appendChild(self.cx.allocator, toggle);
         result.body.setStyleInline(self.cx.allocator, .{ .width = .fill(), .direction = .column, .padding = .{ .left = 14, .right = 14, .top = 8, .bottom = 10 }, .gap = 0, .min_width = 0 });
         const fields = try ui.box(self.cx, .{ .width = .fill(), .direction = .column, .gap = 12, .padding = .{ .bottom = 15 }, .min_width = 0, .flex_shrink = 0 }, .{});
@@ -1091,6 +1107,9 @@ const Click = struct {
     fn cleanup(self: *Click) void {
         self.view.scope.allocator.destroy(self);
     }
+    fn toggle(self: *Click, _: bool) void {
+        self.run();
+    }
     fn kind(self: *Click, selected: ?[]const u8) void {
         if (self.view.disabled.peek()) return;
         const selected_kind = std.meta.stringToEnum(config.ProviderKind, selected orelse return) orelse return;
@@ -1281,8 +1300,9 @@ fn tuneProviderText(node: *ui.Node) void {
 
 fn providerBackground(open: bool) ui.Color {
     const c = S.theme.current();
-    if (!open) return c.well;
-    return ui.Color.lerp(c.well, c.surface_2, 0.38);
+    const row_color = ui.Color.lerp(c.overlay.withAlpha(255), c.well.withAlpha(255), 0.7).withAlpha(c.well.a);
+    if (!open) return row_color;
+    return ui.Color.lerp(row_color, c.surface_2, 0.38);
 }
 
 fn displayName(p: config.AiProvider) []const u8 {
@@ -1322,8 +1342,9 @@ test "global material expanded provider preserves mixed surface alpha" {
     for ([_]f32{ 0, 50, 100 }) |percent| {
         _ = theme.setMaterialParameters(percent, 0);
         const c = theme.current();
-        try std.testing.expectEqual(c.well, providerBackground(false));
-        try std.testing.expectEqual(ui.Color.lerp(c.well, c.surface_2, 0.38), providerBackground(true));
+        const row_color = ui.Color.lerp(c.overlay.withAlpha(255), c.well.withAlpha(255), 0.7).withAlpha(c.well.a);
+        try std.testing.expectEqual(row_color, providerBackground(false));
+        try std.testing.expectEqual(ui.Color.lerp(row_color, c.surface_2, 0.38), providerBackground(true));
         if (percent > 0) try std.testing.expect(providerBackground(true).a < 255);
     }
 }

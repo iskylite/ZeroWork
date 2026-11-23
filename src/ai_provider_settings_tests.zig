@@ -124,7 +124,7 @@ test "native provider cards default collapsed and preserve manual expansion with
         const id = try std.fmt.bufPrint(&buffer, "settings.ai.provider.{d}.header", .{i});
         try std.testing.expect(!byId(f.mounted.root, id).?.behavior.interaction.a11y.?.expanded.?);
     }
-    try std.testing.expectApproxEqAbs(@as(f32, 64), byId(f.mounted.root, "settings.ai.provider.0.card").?.globalRect().h, 0.1);
+    try std.testing.expectApproxEqAbs(@as(f32, 55), byId(f.mounted.root, "settings.ai.provider.0.card").?.globalRect().h, 0.1);
     f.clickId("settings.ai.provider.0.header");
     try std.testing.expect(byId(f.mounted.root, "settings.ai.provider.0.header").?.behavior.interaction.a11y.?.expanded.?);
     try f.remount();
@@ -150,7 +150,8 @@ test "provider enabled status stays readable in every builtin at maximum transpa
         defer f.deinit();
         const badge = byId(f.mounted.root, "settings.ai.provider.0.status").?;
         const background = badge.getBackground();
-        try std.testing.expectEqual(theme.popupInset(), background);
+        try std.testing.expectEqual(theme.states().tag_ok, background);
+        try std.testing.expectEqual(theme.current().ok_ink, badge.getText().?.color);
         const ink = badge.getText().?.color;
         const low = @min(statusLuminance(ink), statusLuminance(background));
         const high = @max(statusLuminance(ink), statusLuminance(background));
@@ -176,9 +177,9 @@ test "native provider cards use V3 header field grid and a single model row" {
     const second = byId(f.mounted.root, "settings.ai.provider.1.card").?.globalRect();
     const header = byId(f.mounted.root, "settings.ai.provider.0.header").?.globalRect();
     const model = byId(f.mounted.root, "settings.ai.provider.0.model.0.card").?.globalRect();
-    try std.testing.expectApproxEqAbs(@as(f32, 580), first.w, 0.1);
-    try std.testing.expectApproxEqAbs(@as(f32, 64), header.h, 0.1);
-    try std.testing.expectApproxEqAbs(@as(f32, 64), second.h, 0.1);
+    try std.testing.expectApproxEqAbs(@as(f32, 568), first.w, 0.1);
+    try std.testing.expectApproxEqAbs(@as(f32, 55), header.h, 0.1);
+    try std.testing.expectApproxEqAbs(@as(f32, 55), second.h, 0.1);
     try std.testing.expectApproxEqAbs(@as(f32, 60), model.h, 0.1);
     const name = byId(f.mounted.root, "settings.ai.provider.0.name").?.globalRect();
     const kind = byId(f.mounted.root, "settings.ai.provider.0.kind").?.globalRect();
@@ -186,7 +187,7 @@ test "native provider cards use V3 header field grid and a single model row" {
     try std.testing.expectApproxEqAbs(name.y, kind.y, 0.1);
     try std.testing.expectApproxEqAbs(name.w, kind.w, 0.1);
     try std.testing.expectApproxEqAbs(@as(f32, 14), kind.x - name.x - name.w, 0.1);
-    try std.testing.expectApproxEqAbs(@as(f32, 552), endpoint.w, 0.1);
+    try std.testing.expectApproxEqAbs(@as(f32, 540), endpoint.w, 0.1);
     try std.testing.expect(hasText(f.mounted.root, "已启用"));
     try std.testing.expectEqualStrings("API Key 存储于 macOS 钥匙串", byId(f.mounted.root, "settings.ai.provider.0.keychain").?.behavior.interaction.a11y.?.label.?);
     try std.testing.expect(!f.controller.model.dirty);
@@ -394,7 +395,7 @@ test "native provider disclosure accepts actual Cx pointer independently of enab
     for (0..4) |_| f.frame();
     try std.testing.expect(!(f.controller.ai_fields.provider_open.get(0) orelse true));
     try std.testing.expect(f.controller.model.value.ai.providers[0].enabled);
-    try std.testing.expectApproxEqAbs(@as(f32, 64), byId(f.mounted.root, "settings.ai.provider.0.card").?.globalRect().h, 0.1);
+    try std.testing.expectApproxEqAbs(@as(f32, 55), byId(f.mounted.root, "settings.ai.provider.0.card").?.globalRect().h, 0.1);
     f.clickId("settings.ai.provider.0.header");
     try std.testing.expect(byId(f.mounted.root, "settings.ai.provider.0.endpoint").?.isDisplayedInTree());
     try std.testing.expect(hasText(byId(f.mounted.root, "settings.ai.provider.0.kind").?, "Anthropic"));
@@ -640,6 +641,7 @@ test "provider folds animate without rebuilding forms or notifying settings chan
     const second = byId(f.mounted.root, "settings.ai.provider.1.header").?;
     const endpoint = byId(f.mounted.root, "settings.ai.provider.0.endpoint").?;
     const card = byId(f.mounted.root, "settings.ai.provider.0.card").?;
+    const collapsed_background = byId(f.mounted.root, "settings.ai.provider.1.card").?.getBackground();
     const content = byId(card, "accordion.content").?;
     const scope = f.mounted.render_scope;
     f.replace("settings.ai.provider.0.endpoint", "invalid-raw-value");
@@ -664,7 +666,7 @@ test "provider folds animate without rebuilding forms or notifying settings chan
     toggle(header);
     for (0..30) |_| f.frame();
     try std.testing.expectApproxEqAbs(@as(f32, 0), content.globalRect().h, 0.1);
-    try std.testing.expectEqual(@import("ui/app_theme.zig").current().well, card.getBackground());
+    try std.testing.expectEqual(collapsed_background, card.getBackground());
     try std.testing.expectEqual(@as(u16, 600), header.children.items[2].children.items[0].getText().?.font_weight);
     toggle(second);
     for (0..30) |_| f.frame();

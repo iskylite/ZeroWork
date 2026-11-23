@@ -55,19 +55,24 @@ async function reveal(id: string) {
 }
 const sections = (ids: string[]): [string, string][] => ids.map(id => [id, id + '.header']);
 const pages: Record<string, [string, string][]> = {
-  appearance: sections(['settings.appearance.app_icon', 'settings.appearance.themes', 'settings.appearance.materials', 'settings.appearance.font', 'settings.appearance.aids']),
+  appearance: sections(['settings.appearance.app_icon', 'settings.appearance.themes', 'settings.appearance.materials']),
+  terminal: sections(['settings.appearance.font', 'settings.appearance.aids']),
   keys: sections(['settings.keys.tabs', 'settings.keys.terminal']),
   ssh: sections(['settings.ssh.connection', 'settings.ssh.reconnect', 'settings.ssh.socks', 'settings.ssh.authentication']),
   transfer: sections(['settings.transfer.connection', 'settings.transfer.engine', 'settings.transfer.defaults']),
-  ai: [...sections(['settings.ai.provider.0.card', 'settings.ai.provider.1.card']).map(([id]) => [id, id.replace('.card', '.header')] as [string, string]), ...sections(['settings.ai.permissions', 'settings.ai.execution', 'settings.ai.conversation', 'settings.ai.context', 'settings.ai.attachments', 'settings.ai.behavior', 'settings.ai.skills', 'settings.ai.mcp'])],
+  'ai.models': [0, 1].map(index => [`settings.ai.provider.${index}.card`, `settings.ai.provider.${index}.header`]),
+  ai: sections(['settings.ai.permissions', 'settings.ai.execution', 'settings.ai.conversation', 'settings.ai.behavior']),
+  'ai.children': sections(['settings.ai.children', 'settings.ai.swarm', 'settings.ai.role_templates']),
+  'ai.context': sections(['settings.ai.context', 'settings.ai.attachments', 'settings.ai.skills', 'settings.ai.mcp']),
   plugins: [['settings.plugins.builtin', '已内置'], ['settings.plugins.bundled', '随应用提供']],
   notifications: sections(['settings.notifications.events', 'settings.notifications.attention']),
   data: sections(['settings.data.location', 'settings.data.history', 'settings.data.actions']),
 };
 pages.appearance[2][1] = 'settings.materials.header';
 const report: any = {status: 'running', pages: [], checks: []};
-async function expectCollapsed(cards: [string, string][]) {
-  for (const [id] of cards) assert((await bodyHeight(id)) < 0.5, id + ' starts collapsed');
+const expanded = async (id: string) => (await bodyHeight(id)) > 0.5;
+async function expectDefault(cards: [string, string][], defaultExpanded: boolean) {
+  for (const [id] of cards) assert.equal(await expanded(id), defaultExpanded, id);
 }
 try {
   await h.waitForServerReady();
@@ -82,24 +87,25 @@ try {
       cards.push(candidate);
     }
     assert(cards.length > 0, page);
-    await expectCollapsed(cards);
+    const defaultExpanded = page !== 'ai.models';
+    await expectDefault(cards, defaultExpanded);
     await h.screenshot(join(out, page + '-initial.png'));
     for (const [i, [id, header]] of cards.entries()) {
       await reveal(header); await click(header);
-      await h.waitFor(async () => (await bodyHeight(id)) > 1 || null);
+      await h.waitFor(async () => await expanded(id) !== defaultExpanded || null);
       if (i < cards.length - 1) {
         await reveal(header); await click(header);
-        await h.waitFor(async () => (await bodyHeight(id)) < 0.5 || null);
+        await h.waitFor(async () => await expanded(id) === defaultExpanded || null);
       }
     }
     const last = cards.at(-1)!;
     await click('settings.nav.' + (page === 'ssh' ? 'keys' : 'ssh'));
     await click('settings.nav.' + page);
-    assert((await bodyHeight(last[0])) > 1, page + ' preserves manual expansion within settings');
+    assert.equal(await expanded(last[0]), !defaultExpanded, page + ' preserves the manual fold state within settings');
     await click('settings.close'); await click('toolbar.settings');
-    await expectCollapsed(cards);
+    await expectDefault(cards, defaultExpanded);
     await h.screenshot(join(out, page + '-reopened.png'));
-    report.pages.push({page, sections: cards.map(([id]) => id), defaultCollapsed: true, toggles: true, remountPreserved: true, reopenedCollapsed: true});
+    report.pages.push({page, sections: cards.map(([id]) => id), defaultExpanded, toggles: true, remountPreserved: true, reopenedAtDefault: true});
   }
   await click('settings.nav.updates');
   assert((await bodyHeight('settings.updates.preferences')) > 1, 'About update preferences are a static card');
@@ -111,13 +117,13 @@ try {
   await click('settings.close'); await click('toolbar.settings');
   assert.equal((await h.inputState('settings.search')).buffer, '');
   assert.equal((await h.query('settings.search.results')).length, 0);
-  await expectCollapsed(pages.ssh);
+  await expectDefault(pages.ssh, true);
   report.checks.push('Reopening clears a previous search; searching still expands matching settings');
   await h.resizeWindow(860, 600);
-  await click('settings.nav.appearance'); await expectCollapsed(pages.appearance);
-  await h.screenshot(join(out, 'compact-collapsed.png'));
+  await click('settings.nav.appearance'); await expectDefault(pages.appearance, true);
+  await h.screenshot(join(out, 'compact-expanded.png'));
   assert.equal(await readFile(join(data, 'config.toml'), 'utf8'), initial, 'Fold changes do not save configuration');
-  report.checks.push('Compact window defaults remain collapsed; configuration file is unchanged');
+  report.checks.push('Compact window sections open by default; configuration file is unchanged');
   await h.request('POST', '/zerowork/windows', {action: 'quit'});
   await Promise.race([ended, h.sleep(10000)]);
   assert.equal(app.exitCode, 0, 'Normal application exit');

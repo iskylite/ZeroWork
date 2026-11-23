@@ -16,11 +16,11 @@ pub fn mountContent(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
             try section.iconActionWithValue("凭据存储", storage, "切换到本地存储…", ui.icons.lock, "settings.data.credential_local", .credential_local);
         }
         if (bound.hooks.read) |read| {
-            if (read(bound.hooks.context, .{ .section = "data", .key = "config_path" })) |value| try section.readonly("配置文件", value.text);
-            if (read(bound.hooks.context, .{ .section = "data", .key = "hosts_path" })) |value| try section.readonly("主机配置", value.text);
+            if (read(bound.hooks.context, .{ .section = "data", .key = "config_path" })) |value| try readonlyPath(section, "配置文件", value.text);
+            if (read(bound.hooks.context, .{ .section = "data", .key = "hosts_path" })) |value| try readonlyPath(section, "主机配置", value.text);
         }
-        try section.readonly("缓存目录", readPath(bound, "cache_dir"));
-        try section.readonly("诊断日志目录", readPath(bound, "logs_dir"));
+        try readonlyPath(section, "缓存目录", readPath(bound, "cache_dir"));
+        try readonlyPath(section, "诊断日志目录", readPath(bound, "logs_dir"));
         try section.readonly("配置文件权限", "仅当前用户可读写 · 600");
     }
     if (binding.matches(query, "会话记录 日志 缓冲 上限 快照 间隔 保留 天数 导出格式 ring_mb checkpoint_sec retention_days export_format")) {
@@ -40,6 +40,26 @@ pub fn mountContent(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
 }
 fn historySummary(value: config.Config, buffer: []u8) ![]const u8 {
     return std.fmt.bufPrint(buffer, "缓冲 {d} MiB · 每 {d} 秒快照 · 保留 {d} 天", .{ value.log.ring_mb, value.log.checkpoint_sec, value.log.retention_days });
+}
+
+fn readonlyPath(section: *controls.Section, label: []const u8, value: []const u8) !void {
+    const count = section.body.children.items.len;
+    try section.readonly(label, value);
+    if (section.body.children.items.len == count or
+        (!std.mem.startsWith(u8, value, "/") and !std.mem.startsWith(u8, value, "~/"))) return;
+    // Keep the shared path tooltip and its focus behavior while showing the
+    // directory over multiple lines in this page's wider read-only rows.
+    const node = findText(section.body.children.items[count], value) orelse return;
+    var text = node.getText().?;
+    text.wrap = .word;
+    text.text_overflow = .clip;
+    node.setText(text);
+}
+
+fn findText(node: *ui.Node, value: []const u8) ?*ui.Node {
+    if (node.getText()) |text| if (std.mem.eql(u8, text.content, value)) return node;
+    for (node.children.items) |child| if (findText(child, value)) |found| return found;
+    return null;
 }
 
 fn readPath(bound: *binding.Binding, key: []const u8) []const u8 {
