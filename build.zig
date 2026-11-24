@@ -319,6 +319,15 @@ pub fn build(b: *std.Build) void {
     auth_preview.root_module.addImport("icon_ir", zenit_dep.module("icon_ir"));
     b.step("auth-challenge-preview", "Build isolated retained authentication component acceptance window").dependOn(&b.addInstallArtifact(auth_preview, .{}).step);
 
+    // Shared host-challenge presenter acceptance; never installed by default.
+    const challenge_preview = b.addExecutable(.{ .name = "challenge-presenter-preview", .root_module = b.createModule(.{ .root_source_file = b.path("src/challenge_presenter_native_fixture.zig"), .target = target, .optimize = optimize }) });
+    zenit.attach(zenit_dep, challenge_preview);
+    challenge_preview.root_module.addSystemFrameworkPath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks" });
+    challenge_preview.root_module.addSystemIncludePath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include" });
+    challenge_preview.root_module.addLibraryPath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/lib" });
+    challenge_preview.root_module.addImport("icon_ir", zenit_dep.module("icon_ir"));
+    b.step("challenge-presenter-preview", "Build isolated shared host-challenge presenter acceptance window").dependOn(&b.addInstallArtifact(challenge_preview, .{}).step);
+
     const connection_progress_preview = b.addExecutable(.{ .name = "connection-progress-preview", .root_module = b.createModule(.{ .root_source_file = b.path("src/connection_progress_preview_runner.zig"), .target = target, .optimize = optimize }) });
     zenit.attach(zenit_dep, connection_progress_preview);
     connection_progress_preview.root_module.addImport("generated_ssh_session", ssh_session_translate.createModule());

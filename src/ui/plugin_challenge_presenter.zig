@@ -68,7 +68,6 @@ pub const Presenter = struct {
     choices: [32]Choice = undefined,
     choice_scroll: *ui.Node = undefined,
     trust_actions: [2]*ui.Node = undefined,
-    trust_action_boxes: [2]*ui.Node = undefined,
     trust_labels: [2]*ui.Signal([]const u8) = undefined,
     certificate: *Certificate.View = undefined,
     certificate_mode: bool = false,
@@ -157,12 +156,17 @@ pub const Presenter = struct {
         self.problem.setDisplay(.none);
         const footer = try ui.box(cx, S.footer(), .{});
         try self.modal.body.appendChild(cx.allocator, footer);
+        // Action buttons are footer flex items themselves: no wrapper slot, so
+        // display switching marks the button (and its text) dirty directly and
+        // the footer never has to size a fit-width wrapper around a hidden
+        // button. The trust actions also paint their own fill, so the surface
+        // never depends on the primary gradient effect having run this frame.
         const cancel_button = try ui.widgets.Button(.{
             .label = "取消",
             .variant = .secondary,
-            .base_style = .{ .width = .{ .px = 72 }, .height = .{ .px = S.footer_height }, .padding = .{}, .border = .{ .radius = 8 } },
             .on_click = cx.on(Presenter, self, cancel),
         }).mount(scope, cx);
+        cancel_button.setStyleInline(cx.allocator, S.button(72, false, false));
         cancel_button.meta.ownership.meta.test_id = "plugin.challenge.cancel";
         try footer.appendChild(cx.allocator, cancel_button);
         for (&self.trust_actions, 0..) |*action, i| {
@@ -172,15 +176,13 @@ pub const Presenter = struct {
             const button = try ui.widgets.Button(.{
                 .label = label_signal,
                 .variant = variant,
-                .base_style = .{ .width = .{ .px = 108 }, .height = .{ .px = S.footer_height }, .padding = .{}, .border = .{ .radius = 8 } },
                 .on_click = cx.on(Choice, &self.choices[i], Choice.choose),
             }).mount(scope, cx);
+            button.setStyleInline(cx.allocator, S.button(108, i == 1, false));
             if (i == 1) try @import("app_theme.zig").stylePrimary(cx, scope, button, null);
-            const slot = try ui.box(cx, .{ .width = .{ .fit = .{} }, .height = .{ .fit = .{} }, .display = .none, .flex_shrink = 0 }, .{});
-            try slot.appendChild(cx.allocator, button);
-            self.trust_action_boxes[i] = slot;
             action.* = button;
-            try footer.appendChild(cx.allocator, slot);
+            try footer.appendChild(cx.allocator, button);
+            button.setDisplay(.none);
         }
         self.submit_disabled = try scope.createSignal(bool, true);
         self.submit_label = try scope.createText("确认", .{});
@@ -292,7 +294,7 @@ pub const Presenter = struct {
         }
         for (self.trust_actions, 0..) |button, i| {
             if (trust_actions) self.trust_labels[i].set(view.payload.choices[i].label);
-            self.trust_action_boxes[i].setDisplay(if (trust_actions) .flex else .none);
+            button.setDisplay(if (trust_actions) .flex else .none);
             button.meta.ownership.meta.test_id = if (trust_actions) (if (i == 0) "plugin.challenge.choice.0" else "plugin.challenge.choice.1") else null;
         }
         self.refreshSubmit();
@@ -781,4 +783,28 @@ test "trust material host key layout check" {
     try std.testing.expect(trust0_rect.x + trust0_rect.w < trust1_rect.x);
     try std.testing.expectApproxEqAbs(cancel_rect.y, trust0_rect.y, 0.5);
     try std.testing.expectApproxEqAbs(cancel_rect.y, trust1_rect.y, 0.5);
+    // Trust actions are direct footer children and carry their own display,
+    // so no fit-width wrapper can be left behind at zero width.
+    try std.testing.expectEqual(ui.types.Display.flex, presenter.trust_actions[0].style.display);
+    try std.testing.expectEqual(ui.types.Display.flex, presenter.trust_actions[1].style.display);
+    try std.testing.expectEqual(ui.types.Display.none, presenter.submit_button.style.display);
+    try std.testing.expect(presenter.trust_actions[1].parent == footer);
+    // The surface is painted by the action node itself, not only by the
+    // primary gradient effect: a frame that shows the button before that
+    // effect runs still has to draw a fill.
+    try std.testing.expect(presenter.trust_actions[0].getBackground().a > 0);
+    try std.testing.expect(presenter.trust_actions[1].getBackground().a > 0);
+    const center_x = trust1_rect.x + trust1_rect.w / 2;
+    const center_y = trust1_rect.y + trust1_rect.h / 2;
+    var painted = false;
+    for (cx.render()) |item| switch (item) {
+        .fill_rect => |rect| {
+            if (rect.color.a > 0 and center_x >= rect.x and center_x <= rect.x + rect.w and center_y >= rect.y and center_y <= rect.y + rect.h) painted = true;
+        },
+        .gradient_rect => |rect| {
+            if (center_x >= rect.x and center_x <= rect.x + rect.w and center_y >= rect.y and center_y <= rect.y + rect.h) painted = true;
+        },
+        else => {},
+    };
+    try std.testing.expect(painted);
 }
