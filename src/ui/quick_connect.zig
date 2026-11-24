@@ -124,7 +124,9 @@ pub fn relativeTime(buffer: []u8, now_ms: u64, then_ms: u64) []const u8 {
 /// Resolve the ID against the live registry when painting; a deleted asset is
 /// absent rather than silently selecting the next occupant of its old slot.
 pub const RecentList = struct {
-    pub const capacity = 8;
+    /// Keeps the recency order long enough to rank the session menu's host
+    /// list, not just its three-row recent section.
+    pub const capacity = 32;
 
     const Entry = struct {
         active: bool = false,
@@ -207,7 +209,67 @@ pub const RecentList = struct {
         const index = registry.indexOf(id) orelse return null;
         return .{ .id = id, .revision = registry.hosts[index].revision };
     }
+
+    /// Persisted recency order (most recent first) as one TOML array line.
+    pub fn encode(self: *const RecentList, allocator: std.mem.Allocator) ![]u8 {
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(allocator);
+        try out.appendSlice(allocator, "# ZeroWork 最近连接（最新在前）\nids = [");
+        var rank: usize = 0;
+        while (rank < self.len) : (rank += 1) {
+            const id = self.at(rank) orelse break;
+            if (rank != 0) try out.appendSlice(allocator, ", ");
+            var digits: [24]u8 = undefined;
+            try out.appendSlice(allocator, try std.fmt.bufPrint(&digits, "{d}", .{@intFromEnum(id)}));
+        }
+        try out.appendSlice(allocator, "]\n");
+        return out.toOwnedSlice(allocator);
+    }
+
+    /// Replaces the recency order from `encode` output. The file stores the
+    /// newest id first, while `record` assigns ascending sequence numbers, so
+    /// the ids are replayed back to front to keep the newest sequence highest.
+    pub fn decode(self: *RecentList, text: []const u8) void {
+        self.* = .{};
+        const open = std.mem.indexOfScalar(u8, text, '[') orelse return;
+        const close = std.mem.indexOfScalarPos(u8, text, open, ']') orelse return;
+        var ids: [capacity]ConnectionId = undefined;
+        var count: usize = 0;
+        var tokens = std.mem.tokenizeAny(u8, text[open + 1 .. close], ", \t\r\n");
+        while (tokens.next()) |token| {
+            if (count == ids.len) break;
+            const raw = std.fmt.parseInt(u64, token, 10) catch continue;
+            if (raw == 0) continue;
+            ids[count] = @fromBackingInt(raw);
+            count += 1;
+        }
+        var index = count;
+        while (index > 0) {
+            index -= 1;
+            self.record(ids[index], 0);
+        }
+    }
 };
+
+test "recent list persists recency order across restart" {
+    var recent: RecentList = .{};
+    recent.record(@fromBackingInt(7), 0);
+    recent.record(@fromBackingInt(3), 0);
+    recent.record(@fromBackingInt(9), 0);
+    const text = try recent.encode(std.testing.allocator);
+    defer std.testing.allocator.free(text);
+    var restored: RecentList = .{};
+    restored.decode(text);
+    try std.testing.expectEqual(@as(usize, 3), restored.len);
+    try std.testing.expectEqual(@as(?ConnectionId, @fromBackingInt(9)), restored.at(0));
+    try std.testing.expectEqual(@as(?ConnectionId, @fromBackingInt(3)), restored.at(1));
+    try std.testing.expectEqual(@as(?ConnectionId, @fromBackingInt(7)), restored.at(2));
+    var empty: RecentList = .{};
+    empty.decode("ids = []\n");
+    try std.testing.expectEqual(@as(usize, 0), empty.len);
+    empty.decode("garbage");
+    try std.testing.expectEqual(@as(usize, 0), empty.len);
+}
 
 test "recent saved identity survives registry reorder and cannot reconnect a deleted slot occupant" {
     const hosts = @import("../config/hosts.zig");
@@ -364,9 +426,10 @@ test "RecentList keeps recency order without duplicates and evicts oldest" {
     try std.testing.expectEqual(@as(?u64, null), recent.seqOf(@fromBackingInt(9)));
     try std.testing.expect(recent.seqOf(@fromBackingInt(3)) != null);
 
-    // Ring eviction: the oldest (5) falls out after 8 distinct hosts.
+    // Ring eviction: the oldest (5) falls out once every slot is occupied.
     var index: usize = 10;
-    while (index < 16) : (index += 1) recent.record(@fromBackingInt(index), 0);
+    const stop = 10 + RecentList.capacity;
+    while (index < stop) : (index += 1) recent.record(@fromBackingInt(index), 0);
     try std.testing.expectEqual(@as(usize, RecentList.capacity), recent.len);
     try std.testing.expectEqual(@as(?ConnectionId, null), recent.at(RecentList.capacity - 1 + 1));
     // Oldest surviving set no longer contains 5 or its eviction slot peers.

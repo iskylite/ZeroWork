@@ -64,6 +64,8 @@ test {
     _ = host_queries;
     _ = @import("ui/ai_tools.zig");
     _ = @import("ui/ai_lifecycle_controller.zig");
+    _ = @import("ui/session_menu.zig");
+    _ = @import("ui/quick_connect.zig");
     _ = @import("ai/lifecycle_runtime_tests.zig");
     _ = @import("ai/lifecycle_runtime.zig");
     _ = @import("ai/host_approval.zig");

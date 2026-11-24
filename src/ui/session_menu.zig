@@ -6,6 +6,30 @@ const session_icon = @import("session_icon.zig");
 const identity = @import("../host/identity.zig");
 pub const Saved = struct { owner: identity.AssetOwner, name: []const u8, icon: ui.SvgAsset };
 
+/// Projects saved entries onto connection recency: only owners present in
+/// `recency` (most recent first) are emitted, newest first. Hosts that were
+/// never opened are NOT padded in — the menu lists real recent connections
+/// only. An owner appears at most once even if `recency` repeats it, and a
+/// recency id that no longer resolves to a saved entry is skipped.
+pub fn recentEntries(allocator: std.mem.Allocator, entries: []const Saved, recency: []const identity.AssetOwner) ![]Saved {
+    var ordered: std.ArrayList(Saved) = .empty;
+    errdefer ordered.deinit(allocator);
+    try ordered.ensureTotalCapacity(allocator, @min(entries.len, recency.len));
+    for (recency) |owner| {
+        for (entries) |entry| {
+            if (entry.owner.id != owner.id) continue;
+            if (!hasOwner(ordered.items, entry.owner.id)) ordered.appendAssumeCapacity(entry);
+            break;
+        }
+    }
+    return ordered.toOwnedSlice(allocator);
+}
+
+fn hasOwner(items: []const Saved, id: identity.ConnectionId) bool {
+    for (items) |item| if (item.owner.id == id) return true;
+    return false;
+}
+
 pub const Callbacks = struct {
     context: *anyopaque,
     new_profile: *const fn (*anyopaque) void,
@@ -330,7 +354,7 @@ pub const View = struct {
             try self.more_rows.append(self.cx.allocator, .{ .owner = entry.owner, .button = button, .label = button, .icon = firstIcon(button) orelse button });
         }
         if (entries.len == 0) {
-            const empty = try ui.text(self.cx, "暂无已保存主机", S.label());
+            const empty = try ui.text(self.cx, "暂无更多最近连接", S.label());
             try self.more_content.appendChild(self.cx.allocator, empty);
         }
         self.more_area.setStyle(self.cx.allocator, .height, .{ .px = @as(f32, @floatFromInt(@min(@max(entries.len, 1), 8))) * 33 });
@@ -620,4 +644,29 @@ test "saved session menu refreshes rows and captures stable owner" {
     try view.show(anchor);
     _ = view.handleKey(.down);
     try std.testing.expect(view.selected_more_trigger);
+}
+
+test "session menu lists only recently connected hosts, newest first" {
+    const owner_a: identity.AssetOwner = .{ .id = @fromBackingInt(1), .revision = 1 };
+    const owner_b: identity.AssetOwner = .{ .id = @fromBackingInt(2), .revision = 1 };
+    const owner_c: identity.AssetOwner = .{ .id = @fromBackingInt(3), .revision = 1 };
+    const owner_d: identity.AssetOwner = .{ .id = @fromBackingInt(4), .revision = 1 };
+    const entries = [_]Saved{
+        .{ .owner = owner_a, .name = "A", .icon = ui.icons.terminal },
+        .{ .owner = owner_b, .name = "B", .icon = ui.icons.terminal },
+        .{ .owner = owner_c, .name = "C", .icon = ui.icons.terminal },
+        .{ .owner = owner_d, .name = "D", .icon = ui.icons.terminal },
+    };
+    // C connected most recently, then B; the repeated C must not duplicate a
+    // row, a deleted host (id 9) is skipped, and never-opened A/D stay out.
+    const deleted: identity.AssetOwner = .{ .id = @fromBackingInt(9), .revision = 1 };
+    const recency = [_]identity.AssetOwner{ owner_c, deleted, owner_b, owner_c };
+    const ordered = try recentEntries(std.testing.allocator, &entries, &recency);
+    defer std.testing.allocator.free(ordered);
+    try std.testing.expectEqual(@as(usize, 2), ordered.len);
+    try std.testing.expectEqual(owner_c.id, ordered[0].owner.id);
+    try std.testing.expectEqual(owner_b.id, ordered[1].owner.id);
+    const none = try recentEntries(std.testing.allocator, &entries, &.{});
+    defer std.testing.allocator.free(none);
+    try std.testing.expectEqual(@as(usize, 0), none.len);
 }

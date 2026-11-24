@@ -15235,18 +15235,21 @@ const AppNavHost = struct {
                     var entries: std.ArrayList(session_menu_mod.Saved) = .empty;
                     defer entries.deinit(self.cx.allocator);
                     for (workspace.registry.hosts) |host| entries.append(self.cx.allocator, .{ .owner = host.owner(), .name = host.name, .icon = @import("ui/session_icon.zig").forHost(workspace.plugins, host.protocolId(), @import("ui/session_os_cache.zig").load(workspace.allocator, workspace.io, workspace.hosts_path, host)) }) catch return;
-                    menu.setAll(entries.items) catch return;
-                    var recent: std.ArrayList(session_menu_mod.Saved) = .empty;
-                    defer recent.deinit(self.cx.allocator);
+                    // Only real recent connections, newest first: the top level shows
+                    // the 3 most recent, "更多" continues with the rest of the recent
+                    // history in the same time order. Never-opened hosts stay in the
+                    // sidebar and are not padded into this menu.
+                    var recency: std.ArrayList(@import("host/identity.zig").AssetOwner) = .empty;
+                    defer recency.deinit(self.cx.allocator);
                     for (0..workspace.recent_connections.len) |rank| {
                         const owner = workspace.recent_connections.resolve(rank, &workspace.registry) orelse continue;
-                        for (entries.items) |entry| if (entry.owner.id == owner.id) {
-                            recent.append(self.cx.allocator, entry) catch return;
-                            break;
-                        };
-                        if (recent.items.len == 3) break;
+                        recency.append(self.cx.allocator, owner) catch return;
                     }
-                    menu.setSaved(recent.items) catch return;
+                    const recent = session_menu_mod.recentEntries(self.cx.allocator, entries.items, recency.items) catch return;
+                    defer self.cx.allocator.free(recent);
+                    const top = @min(3, recent.len);
+                    menu.setSaved(recent[0..top]) catch return;
+                    menu.setAll(recent[top..]) catch return;
                 }
                 menu.show(anchor) catch |err| applog.warn(.workspace, "session menu: {s}", .{@errorName(err)});
             }

@@ -605,6 +605,7 @@ pub const Workspace = struct {
             .empty_state = empty_state,
         };
         current_workspace = self;
+        self.loadRecent();
         try scope.onCleanup(Workspace, self, cleanup);
         try self.rebuildSidebar();
         try self.rebuildTabBar();
@@ -5096,12 +5097,38 @@ pub const Workspace = struct {
         try self.groupCreatedSession(before, target);
     }
 
+    /// Recency order lives beside hosts.toml so the session menu can rank hosts
+    /// by last use across restarts.
+    fn recentPath(self: *const Workspace, buffer: []u8) ![]const u8 {
+        // Partially constructed workspaces in tests leave hosts_path empty.
+        if (self.hosts_path.len == 0) return error.NoHostsPath;
+        const dir = std.fs.path.dirname(self.hosts_path) orelse ".";
+        return std.fmt.bufPrint(buffer, "{s}/recent.toml", .{dir});
+    }
+
+    fn loadRecent(self: *Workspace) void {
+        var buffer: [std.fs.max_path_bytes]u8 = undefined;
+        const path = self.recentPath(&buffer) catch return;
+        const text = std.Io.Dir.cwd().readFileAlloc(self.io, path, self.allocator, .limited(16 * 1024)) catch return;
+        defer self.allocator.free(text);
+        self.recent_connections.decode(text);
+    }
+
+    fn persistRecent(self: *Workspace) void {
+        var buffer: [std.fs.max_path_bytes]u8 = undefined;
+        const path = self.recentPath(&buffer) catch return;
+        const text = self.recent_connections.encode(self.allocator) catch return;
+        defer self.allocator.free(text);
+        std.Io.Dir.cwd().writeFile(self.io, .{ .sub_path = path, .data = text }) catch |err| applog.warn(.workspace, "recent connections: {s}", .{@errorName(err)});
+    }
+
     /// Always creates a distinct session for this asset, even if already open.
     pub fn newSession(self: *Workspace, index: usize) !void {
         if (index >= self.registry.hosts.len) return error.InvalidHost;
         try self.identities.appendHosts(self.allocator, self.registry.hosts.len);
         try self.createSession(self.registry.hosts[index], self.hostId(index).?, index, "");
         self.recent_connections.record(self.registry.hosts[index].connection_id, 0);
+        self.persistRecent();
     }
 
     /// The saved revision supplies every routing and policy field. Secrets
@@ -5114,6 +5141,7 @@ pub const Workspace = struct {
         try self.identities.appendHosts(self.allocator, self.registry.hosts.len);
         try self.createSession(host, self.hostId(index).?, index, "");
         self.recent_connections.record(owner.id, 0);
+        self.persistRecent();
     }
 
     /// The session factory owns a frozen copy. A temporary direct endpoint
@@ -7487,6 +7515,7 @@ test "saved revision opens with transient credentials without mutating registry"
     );
     defer workspace.registry.deinit();
     workspace.recent_connections = .{};
+    workspace.hosts_path = "";
     workspace.identities = .{};
     defer workspace.identities.deinit(std.testing.allocator);
     workspace.session_bridge = .{ .context = &capture, .create = Capture.create };
