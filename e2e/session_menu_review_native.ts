@@ -23,16 +23,16 @@ try{
  await click('toolbar.quick_connect');assert((await nodes('quick.query')).length);await cap('quick-default');
  await click('quick.query');await type_('review-host-03');await sleep(120);assert.equal((await nodes('quick.saved.row')).length,1);await cap('quick-filtered');await click('quick.close');
  await click('toolbar.new_session');assert.equal((await nodes('session.menu.saved')).length,0);await cap('plus-initial');
- const more=await screenPos('session.menu.more');await mouseMove(more.x+more.w/2,more.y+more.h/2);await sleep(150);assert((await nodes('session.menu.more.host')).length>=8);await cap('plus-more');
- const scroll=await screenPos('session.menu.more.scroll');await mouseMove(scroll.x+scroll.w/2,scroll.y+scroll.h/2);const beforeRows=await nodes('session.menu.more.host');await scrollAt(scroll.x+scroll.w/2,scroll.y+scroll.h/2,0,-300);await sleep(150);const afterRows=await nodes('session.menu.more.host');assert(afterRows.some(n=>text(n).includes('14')&&n.rect.y>=scroll.y&&n.rect.y+n.rect.h<=scroll.y+scroll.h+1),'last host must be reachable by scrolling');await cap('plus-more-scrolled');
+ const more=await screenPos('session.menu.more');await mouseMove(more.x+more.w/2,more.y+more.h/2);await sleep(150);assert.equal((await nodes('session.menu.more.host')).length,0,'More must start empty when no host was opened');await cap('plus-more-empty');
  await key('escape');await key('escape');
- report.checks.push('Toolbar lightning opens searchable original quick-connect, never the connection editor; + shows independent scrollable host flyout.');
- for(let i=0;i<4;i++){
-  await click('toolbar.new_session');await click('session.menu.more');await sleep(120);
-  const rows=await nodes('session.menu.more.host'),row=rows[i];assert(row);await clickAt(row.rect.x+row.rect.w/2,row.rect.y+row.rect.h/2);await closeProgress();
+ report.checks.push('Toolbar lightning opens searchable original quick-connect, never the connection editor; + shows recent-only menu and More.');
+ for(let i=0;i<5;i++){
+  await click('toolbar.quick_connect');await sleep(120);
+  const rows=await nodes('quick.saved.row'),row=rows[i];assert(row);await clickAt(row.rect.x+row.rect.w/2,row.rect.y+row.rect.h/2);await closeProgress();
  }
- await click('toolbar.new_session');assert.equal((await nodes('session.menu.more.host')).length,0,'More must reopen collapsed');const recent=await nodes('session.menu.saved');assert.equal(recent.length,3);assert.deepEqual(recent.map(text),['review-host-04','review-host-03','review-host-02']);await cap('plus-recent-three');await key('escape');
- report.checks.push('Flyout clicks each open a new tab; recent list contains the last three real selected host identities in newest-first order.');
+ await click('toolbar.new_session');assert.equal((await nodes('session.menu.more.host')).length,0,'More must reopen collapsed');const recent=await nodes('session.menu.saved');assert.equal(recent.length,3);assert.deepEqual(recent.map(text),['review-host-05','review-host-04','review-host-03']);await cap('plus-recent-three');
+ const moreAfter=await screenPos('session.menu.more');await mouseMove(moreAfter.x+moreAfter.w/2,moreAfter.y+moreAfter.h/2);await sleep(150);const moreHosts=await nodes('session.menu.more.host');assert.deepEqual(moreHosts.map(text),['review-host-02','review-host-01']);await cap('plus-more-recent');await key('escape');await key('escape');
+ report.checks.push('Quick-connect opens tabs and records recency; top level shows 3 newest and More lists remaining recent hosts newest-first.');
  await click('toolbar.new_session');await click('session.menu.new_sftp');assert((await nodes('wizard.cancel')).length);await cap('new-sftp');await key('escape');await sleep(80);
  await resizeWindow(860,480);await click('toolbar.new_session');await click('session.menu.more');await cap('compact-more');await key('escape');await key('escape');
  report.checks.push('Dedicated SFTP creation opens its editor; More remains accessible in 860×480.');report.status='passed';

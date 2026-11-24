@@ -159,14 +159,15 @@ pub const Presenter = struct {
         // Action buttons are footer flex items themselves: no wrapper slot, so
         // display switching marks the button (and its text) dirty directly and
         // the footer never has to size a fit-width wrapper around a hidden
-        // button. The trust actions also paint their own fill, so the surface
-        // never depends on the primary gradient effect having run this frame.
+        // button. Reactive base_style keeps theme switches and hover/pressed
+        // states working while the node still paints its own fill.
         const cancel_button = try ui.widgets.Button(.{
             .label = "取消",
             .variant = .secondary,
+            .base_style = try @import("app_theme.zig").paintSignal(ui.BoxStyle, cx, scope, S.button, .{ @as(f32, 72), false, false }),
             .on_click = cx.on(Presenter, self, cancel),
         }).mount(scope, cx);
-        cancel_button.setStyleInline(cx.allocator, S.button(72, false, false));
+        cancel_button.setStyle(cx.allocator, .flex_shrink, 0);
         cancel_button.meta.ownership.meta.test_id = "plugin.challenge.cancel";
         try footer.appendChild(cx.allocator, cancel_button);
         for (&self.trust_actions, 0..) |*action, i| {
@@ -176,9 +177,10 @@ pub const Presenter = struct {
             const button = try ui.widgets.Button(.{
                 .label = label_signal,
                 .variant = variant,
+                .base_style = try @import("app_theme.zig").paintSignal(ui.BoxStyle, cx, scope, S.button, .{ @as(f32, 108), i == 1, false }),
                 .on_click = cx.on(Choice, &self.choices[i], Choice.choose),
             }).mount(scope, cx);
-            button.setStyleInline(cx.allocator, S.button(108, i == 1, false));
+            button.setStyle(cx.allocator, .flex_shrink, 0);
             if (i == 1) try @import("app_theme.zig").stylePrimary(cx, scope, button, null);
             action.* = button;
             try footer.appendChild(cx.allocator, button);
@@ -516,16 +518,6 @@ fn textNode(node: *ui.Node) ?*ui.Node {
     for (node.children.items) |child| if (textNode(child)) |found| return found;
     return null;
 }
-fn styleActionText(button: *ui.Node, primary: bool) void {
-    if (textNode(button)) |node| if (node.getText()) |old| {
-        var value = old;
-        value.font_size = 12;
-        value.font_weight = 500;
-        value.color = S.actionColor(primary, false);
-        value.line_height = 1.5;
-        node.setText(value);
-    };
-}
 
 test "scoped challenge replaces a choice with a measurable input form" {
     const allocator = std.testing.allocator;
@@ -736,6 +728,9 @@ test "certificate trust presenter keeps complete material scrollable and all thr
 }
 
 test "trust material host key layout check" {
+    const previous_theme = S.theme.currentName();
+    defer S.theme.select(previous_theme);
+    S.theme.select(.dark);
     const allocator = std.testing.allocator;
     const cx = try ui.Cx.init(allocator, std.testing.io);
     defer cx.deinit();
@@ -807,4 +802,20 @@ test "trust material host key layout check" {
         else => {},
     };
     try std.testing.expect(painted);
+
+    S.theme.select(.light);
+    cx.setTheme(S.theme.widgetTheme(.light));
+    try cx.setTestFrameStep(100);
+    for (0..4) |_| {
+        cx.advanceFrameClock();
+        cx.layout();
+        _ = cx.render();
+    }
+    try std.testing.expectEqual(S.button(72, false, false).background.?, cancel_btn.getBackground());
+    try std.testing.expectEqual(S.button(108, false, false).background.?, presenter.trust_actions[0].getBackground());
+    try std.testing.expectEqual(S.button(108, true, false).background.?, presenter.trust_actions[1].getBackground());
+    try std.testing.expectEqual(@as(f32, 72), cancel_btn.globalRect().w);
+    try std.testing.expectEqual(@as(f32, 108), presenter.trust_actions[0].globalRect().w);
+    try std.testing.expectEqual(@as(f32, 108), presenter.trust_actions[1].globalRect().w);
+    try std.testing.expectEqual(@as(f32, 34), presenter.trust_actions[1].globalRect().h);
 }

@@ -231,16 +231,44 @@ pub const RecentList = struct {
     /// the ids are replayed back to front to keep the newest sequence highest.
     pub fn decode(self: *RecentList, text: []const u8) void {
         self.* = .{};
-        const open = std.mem.indexOfScalar(u8, text, '[') orelse return;
-        const close = std.mem.indexOfScalarPos(u8, text, open, ']') orelse return;
+        var cursor: usize = 0;
+        var array_slice: ?[]const u8 = null;
+        while (cursor < text.len) {
+            const newline = std.mem.indexOfScalarPos(u8, text, cursor, '\n') orelse text.len;
+            const raw_line = text[cursor..newline];
+            const trimmed = std.mem.trim(u8, raw_line, " \t\r");
+            if (trimmed.len > 0 and trimmed[0] != '#') {
+                if (std.mem.startsWith(u8, trimmed, "ids")) {
+                    const after_key = std.mem.trimStart(u8, trimmed[3..], " \t");
+                    if (after_key.len > 0 and after_key[0] == '=') {
+                        const rest_start = (trimmed.ptr - text.ptr) + (trimmed.len - after_key.len) + 1;
+                        if (std.mem.indexOfScalarPos(u8, text, rest_start, '[')) |open| {
+                            if (std.mem.indexOfScalarPos(u8, text, open, ']')) |close| {
+                                array_slice = text[open + 1 .. close];
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            cursor = if (newline < text.len) newline + 1 else text.len;
+        }
+        const slice = array_slice orelse return;
         var ids: [capacity]ConnectionId = undefined;
         var count: usize = 0;
-        var tokens = std.mem.tokenizeAny(u8, text[open + 1 .. close], ", \t\r\n");
+        var tokens = std.mem.tokenizeAny(u8, slice, ", \t\r\n");
         while (tokens.next()) |token| {
             if (count == ids.len) break;
             const raw = std.fmt.parseInt(u64, token, 10) catch continue;
             if (raw == 0) continue;
-            ids[count] = @fromBackingInt(raw);
+            const id: ConnectionId = @fromBackingInt(raw);
+            var duplicate = false;
+            for (ids[0..count]) |existing| if (existing == id) {
+                duplicate = true;
+                break;
+            };
+            if (duplicate) continue;
+            ids[count] = id;
             count += 1;
         }
         var index = count;
@@ -264,6 +292,14 @@ test "recent list persists recency order across restart" {
     try std.testing.expectEqual(@as(?ConnectionId, @fromBackingInt(9)), restored.at(0));
     try std.testing.expectEqual(@as(?ConnectionId, @fromBackingInt(3)), restored.at(1));
     try std.testing.expectEqual(@as(?ConnectionId, @fromBackingInt(7)), restored.at(2));
+
+    var commented: RecentList = .{};
+    commented.decode("# [ignored section]\n# ids = [999]\nids = [11, 22, 11, 0, 33]\n");
+    try std.testing.expectEqual(@as(usize, 3), commented.len);
+    try std.testing.expectEqual(@as(?ConnectionId, @fromBackingInt(11)), commented.at(0));
+    try std.testing.expectEqual(@as(?ConnectionId, @fromBackingInt(22)), commented.at(1));
+    try std.testing.expectEqual(@as(?ConnectionId, @fromBackingInt(33)), commented.at(2));
+
     var empty: RecentList = .{};
     empty.decode("ids = []\n");
     try std.testing.expectEqual(@as(usize, 0), empty.len);

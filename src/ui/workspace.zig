@@ -5119,7 +5119,28 @@ pub const Workspace = struct {
         const path = self.recentPath(&buffer) catch return;
         const text = self.recent_connections.encode(self.allocator) catch return;
         defer self.allocator.free(text);
-        std.Io.Dir.cwd().writeFile(self.io, .{ .sub_path = path, .data = text }) catch |err| applog.warn(.workspace, "recent connections: {s}", .{@errorName(err)});
+        var atomic_buffer: [4096]u8 = undefined;
+        var atomic = std.Io.Dir.cwd().createFileAtomic(self.io, path, .{
+            .permissions = .fromMode(0o600),
+            .make_path = true,
+            .replace = true,
+        }) catch |err| {
+            applog.warn(.workspace, "recent connections: {s}", .{@errorName(err)});
+            return;
+        };
+        defer atomic.deinit(self.io);
+        var writer = atomic.file.writer(self.io, &atomic_buffer);
+        writer.interface.writeAll(text) catch |err| {
+            applog.warn(.workspace, "recent connections: {s}", .{@errorName(err)});
+            return;
+        };
+        writer.flush() catch |err| {
+            applog.warn(.workspace, "recent connections: {s}", .{@errorName(err)});
+            return;
+        };
+        atomic.replace(self.io) catch |err| {
+            applog.warn(.workspace, "recent connections: {s}", .{@errorName(err)});
+        };
     }
 
     /// Always creates a distinct session for this asset, even if already open.

@@ -123,12 +123,12 @@ test "wizard hidden logs cannot intercept a subsequent file authentication point
     f.settle();
     const test_button = f.wizard.test_btn.?;
     const button_rect = test_button.globalRect();
-    try std.testing.expectEqual(@as(f32, 76), button_rect.w);
+    try std.testing.expectEqual(@import("ui/wizard_styles.zig").test_action_width, button_rect.w);
     for (test_button.children.items) |child| if (child.getText()) |label| {
         const label_rect = child.globalRect();
         try std.testing.expectEqualStrings("检测 SFTP", label.content);
-        try std.testing.expect(label_rect.w > 0 and label_rect.w <= button_rect.w);
-        try std.testing.expectApproxEqAbs(button_rect.x + button_rect.w / 2, label_rect.x + label_rect.w / 2, 0.5);
+        try std.testing.expect(label_rect.w > 0 and label_rect.x >= button_rect.x and label_rect.x + label_rect.w <= button_rect.x + button_rect.w);
+        try std.testing.expectApproxEqAbs(button_rect.y + button_rect.h / 2, label_rect.y + label_rect.h / 2, 0.5);
         try std.testing.expectEqual(@as(f32, 18), label_rect.h);
         try std.testing.expectEqual(@as(f32, 12), label.font_size);
         try std.testing.expectEqual(@as(u16, 500), label.font_weight);

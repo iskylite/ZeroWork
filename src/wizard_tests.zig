@@ -34,6 +34,8 @@ const SaveFixture = struct {
         try self.cx.setTestFrameStep(100);
         self.cx.setViewport(1440, 900);
         self.cx.root = try ui.box(self.cx, .{ .width = .fill(), .height = .fill() }, .{});
+        // Sync Zenit's frame clock before any mounted transition captures start_time_ms.
+        _ = self.cx.render();
         self.scope = try ui.Scope.init(a, null, self.cx.owner);
         self.wizard.on_result = result;
         self.wizard.result_ctx = self;

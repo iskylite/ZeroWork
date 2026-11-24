@@ -355,6 +355,7 @@ pub const View = struct {
         }
         if (entries.len == 0) {
             const empty = try ui.text(self.cx, "暂无更多最近连接", S.label());
+            empty.setStyleInline(self.cx.allocator, .{ .width = .fill(), .height = .{ .px = 33 }, .padding = .{ .left = 10, .top = 9 } });
             try self.more_content.appendChild(self.cx.allocator, empty);
         }
         self.more_area.setStyle(self.cx.allocator, .height, .{ .px = @as(f32, @floatFromInt(@min(@max(entries.len, 1), 8))) * 33 });

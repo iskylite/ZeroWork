@@ -268,7 +268,7 @@ test "global material publication repaints retained shell after an image becomes
     try std.testing.expectEqual(@import("v3_geometry.zig").settings_sidebar, nodes[4].style.width.px);
     _ = theme.setMaterialVisible(false);
     publication.publish(cx, theme.widgetTheme(.dark));
-    for (nodes, 0..) |node, index| try std.testing.expectEqual(if (index == 0 or index == 4) @as(u8, 0) else if (index == 3) theme.current().overlay.a else theme.current().surface_1.a, node.getBackground().a);
+    for (nodes, 0..) |node, index| try std.testing.expectEqual(if (index == 0) @as(u8, 0) else if (index == 3 or index == 4) theme.current().overlay.a else theme.current().surface_1.a, node.getBackground().a);
     try std.testing.expectEqual(@as(u8, 0), shell.getBackground().a);
 }
 
