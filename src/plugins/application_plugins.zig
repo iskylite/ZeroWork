@@ -8,6 +8,7 @@ const bmc = @import("bmc_ikvm/plugin.zig");
 const web = @import("web/plugin.zig");
 const ledger = @import("bmc_ikvm/management_journal.zig");
 const notes = @import("notes/plugin.zig");
+const ai = @import("ai/plugin.zig");
 
 pub fn Bundle(comptime acceptance_plugins: bool) type {
     return struct {
@@ -21,14 +22,15 @@ pub fn Bundle(comptime acceptance_plugins: bool) type {
             plugin: ?*bmc.Plugin = null,
             web_plugin: ?*web.Plugin = null,
             notes_plugin: notes.Plugin,
+            ai_plugin: ?*ai.Plugin = null,
             fixture: if (acceptance_plugins) ?*@import("fixture_probe/plugin.zig").Plugin else void = if (acceptance_plugins) null else {},
         };
 
         // Backend contexts and reservations borrow Resources, never this
         // return-by-value Bundle. Moving the Bundle cannot invalidate them.
         resources: ?*Resources,
-        manifest_entries: [if (acceptance_plugins) 4 else 3]registry.PluginManifest,
-        renderer_entries: [if (acceptance_plugins) 4 else 3]presentation.RendererDefinition,
+        manifest_entries: [if (acceptance_plugins) 5 else 4]registry.PluginManifest,
+        renderer_entries: [if (acceptance_plugins) 5 else 4]presentation.RendererDefinition,
 
         pub fn init(allocator: std.mem.Allocator, io: std.Io, data_directory: []const u8) !Self {
             const resources = try allocator.create(Resources);
@@ -49,19 +51,22 @@ pub fn Bundle(comptime acceptance_plugins: bool) type {
             const web_plugin = try web.Plugin.init(allocator);
             errdefer web_plugin.deinit() catch unreachable;
             resources.web_plugin = web_plugin;
+            const ai_plugin = try ai.Plugin.init(allocator);
+            errdefer ai_plugin.deinit();
+            resources.ai_plugin = ai_plugin;
             if (comptime acceptance_plugins) {
                 const fixture = try @import("fixture_probe/plugin.zig").Plugin.init(allocator);
                 resources.fixture = fixture;
                 return .{
                     .resources = resources,
-                    .manifest_entries = .{ plugin.manifest(), web_plugin.manifest(), resources.notes_plugin.manifest(), fixture.manifest() },
-                    .renderer_entries = .{ plugin.renderer(), web_plugin.renderer(), resources.notes_plugin.renderer(), fixture.renderer() },
+                    .manifest_entries = .{ plugin.manifest(), web_plugin.manifest(), resources.notes_plugin.manifest(), resources.ai_plugin.?.manifest(), fixture.manifest() },
+                    .renderer_entries = .{ plugin.renderer(), web_plugin.renderer(), resources.notes_plugin.renderer(), resources.ai_plugin.?.renderer(), fixture.renderer() },
                 };
             }
             return .{
                 .resources = resources,
-                .manifest_entries = .{ plugin.manifest(), web_plugin.manifest(), resources.notes_plugin.manifest() },
-                .renderer_entries = .{ plugin.renderer(), web_plugin.renderer(), resources.notes_plugin.renderer() },
+                .manifest_entries = .{ plugin.manifest(), web_plugin.manifest(), resources.notes_plugin.manifest(), resources.ai_plugin.?.manifest() },
+                .renderer_entries = .{ plugin.renderer(), web_plugin.renderer(), resources.notes_plugin.renderer(), resources.ai_plugin.?.renderer() },
             };
         }
         pub fn manifests(self: *const Self) []const registry.PluginManifest {
@@ -86,6 +91,10 @@ pub fn Bundle(comptime acceptance_plugins: bool) type {
                 resources.plugin = null;
             }
             try resources.frame_budget.deinit();
+            if (resources.ai_plugin) |plugin| {
+                plugin.deinit();
+                resources.ai_plugin = null;
+            }
             if (comptime acceptance_plugins) if (resources.fixture) |fixture| fixture.deinit();
             resources.notes_plugin.deinit();
             resources.directory.close(resources.io);

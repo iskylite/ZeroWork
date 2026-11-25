@@ -28,6 +28,11 @@ comptime {
     _ = @import("ui/ai_recording_query_access.zig");
 }
 test {
+    _ = @import("host/workspace_text_reference.zig");
+    _ = ai_session_runtime;
+    _ = @import("file_workspace_icons_tests.zig");
+    _ = @import("ui/ai_workspace_shell_tests.zig");
+    _ = @import("ui/mascot_island.zig");
     _ = @import("ai/host_recall.zig");
     _ = @import("ai/swarm_wake.zig");
     _ = @import("notes_store_tests.zig");
@@ -435,6 +440,7 @@ test {
     _ = @import("host/terminal_files.zig");
     _ = @import("host/local_file_commit.zig");
     _ = @import("ai/local_file_operation.zig");
+    _ = @import("ai/workspace_turn_diff.zig");
     _ = @import("host/local_file_search.zig");
     _ = @import("host/local_file_reads.zig");
     _ = @import("ai/host_local_files.zig");

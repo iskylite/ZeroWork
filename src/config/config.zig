@@ -5,8 +5,23 @@ pub const store = @import("store.zig");
 pub const ai_extensions = @import("ai_extensions.zig");
 pub const ai_role_templates = @import("ai_role_templates.zig");
 pub const material = @import("background_asset.zig");
+pub const ParseDetails = struct {
+    line: ?usize = null,
+    allow_unknown: bool = false,
+    layout: LayoutPresence = .{},
+    ui_insert_offset: ?usize = null,
+};
 
-pub const ParseDetails = struct { line: ?usize = null, allow_unknown: bool = false };
+pub const LayoutPresence = struct {
+    ai_dock_width: bool = false,
+    ai_dock_preferred: bool = false,
+    mascot_anchor_x: bool = false,
+    mascot_anchor_y: bool = false,
+
+    pub fn complete(self: LayoutPresence) bool {
+        return self.ai_dock_width and self.ai_dock_preferred and self.mascot_anchor_x and self.mascot_anchor_y;
+    }
+};
 
 pub const Config = struct {
     /// Persisted monotonic identity of the committed global configuration.
@@ -138,6 +153,10 @@ pub const Config = struct {
                     provider_index = null;
                     model_index = null;
                 }
+                if (details) |diagnostic| if (section == .ui and diagnostic.ui_insert_offset == null) {
+                    const end = @intFromPtr(raw.ptr) - @intFromPtr(text.ptr) + raw.len;
+                    diagnostic.ui_insert_offset = end + @intFromBool(end < text.len);
+                };
                 continue;
             }
             if (section == .keys) {
@@ -187,10 +206,18 @@ pub const Config = struct {
                     const field = if (eq(key, "name") and model_index != null) "id" else if (eq(key, "id") and model_index == null) "name" else key;
                     const flat = if (model_index) |j| std.fmt.bufPrint(&key_buffer, "provider_{d}_model_{d}_{s}", .{ i, j, field }) catch return error.InvalidValue else std.fmt.bufPrint(&key_buffer, "provider_{d}_{s}", .{ i, field }) catch return error.InvalidValue;
                     try result.applyProvider(allocator, flat, value);
-                } else result.apply(allocator, section, key, value) catch |err| {
-                    if (err != error.UnknownKey or !allow_unknown) return err;
-                    try recordUnknown(allocator, &unknown, .{ .line = line_number, .assignment = pair, .section = section }, key, value, text, &lines, &line_number, details, &remaining, &filtered_keys);
-                };
+                } else {
+                    result.apply(allocator, section, key, value) catch |err| {
+                        if (err != error.UnknownKey or !allow_unknown) return err;
+                        try recordUnknown(allocator, &unknown, .{ .line = line_number, .assignment = pair, .section = section }, key, value, text, &lines, &line_number, details, &remaining, &filtered_keys);
+                        continue;
+                    };
+                    if (details) |diagnostic| if (section == .ui) {
+                        inline for (@typeInfo(LayoutPresence).@"struct".field_names) |field| {
+                            if (eq(key, field)) @field(diagnostic.layout, field) = true;
+                        }
+                    };
+                }
             }
         }
         // Counts in legacy input may precede their fields, but must be valid
@@ -273,6 +300,7 @@ pub const Config = struct {
         try writer.writeByte('\n');
         try writer.print("[ui]\nicon_background = \"{s}\"\ntheme = \"{s}\"\nfont_family = \"{s}\"\nfont_size = {d}\nfont_weight = \"{s}\"\nline_height = {d}\ncursor_style = \"{s}\"\nsidebar_collapsed = {}\ninput_line_highlight = {}\ntimestamp_gutter = {}\ncommand_info = {}\nscrollback_limit = {d}\n\n", .{ @tagName(self.ui.icon_background), self.ui.theme, self.ui.font_family, self.ui.font_size, self.ui.font_weight, self.ui.line_height, self.ui.cursor_style, self.ui.sidebar_collapsed, self.ui.input_line_highlight, self.ui.timestamp_gutter, self.ui.command_info, self.ui.scrollback_limit });
         if (self.ui.sidebar_width) |width| try writer.print("sidebar_width = {d}\n\n", .{width});
+        try writer.print("ai_dock_width = {d}\nai_dock_preferred = {}\nmascot_anchor_x = {d}\nmascot_anchor_y = {d}\n\n", .{ self.ui.ai_dock_width, self.ui.ai_dock_preferred, self.ui.mascot_anchor_x, self.ui.mascot_anchor_y });
         try self.writeUnknown(&writer, .ui, null, null, null);
         const background = self.ui.materials.background;
         try writer.print("[ui.materials]\nblur_px = {d}\n", .{self.ui.materials.blur_px});
@@ -503,7 +531,7 @@ pub const Config = struct {
                 if (eq(key, "config_revision")) self.config_revision = try parseInt(u64, value) else return error.UnknownKey;
             },
             .ui => {
-                if (eq(key, "scrollback_limit")) self.ui.scrollback_limit = try parseInt(u32, value) else if (eq(key, "icon_background")) self.ui.icon_background = std.meta.stringToEnum(IconBackground, try parseString(value)) orelse return error.InvalidValue else if (eq(key, "theme")) self.ui.theme = try parseString(value) else if (eq(key, "font_family")) self.ui.font_family = try parseString(value) else if (eq(key, "font_size")) self.ui.font_size = try parseInt(u8, value) else if (eq(key, "font_weight")) self.ui.font_weight = try parseString(value) else if (eq(key, "line_height")) self.ui.line_height = try parseFloat(value) else if (eq(key, "cursor_style")) self.ui.cursor_style = try parseString(value) else if (eq(key, "sidebar_collapsed")) self.ui.sidebar_collapsed = try parseBool(value) else if (eq(key, "sidebar_width")) self.ui.sidebar_width = try parseFloat(value) else if (eq(key, "input_line_highlight")) self.ui.input_line_highlight = try parseBool(value) else if (eq(key, "timestamp_gutter")) self.ui.timestamp_gutter = try parseBool(value) else if (eq(key, "command_info")) self.ui.command_info = try parseBool(value) else return error.UnknownKey;
+                if (eq(key, "ai_dock_width")) self.ui.ai_dock_width = try parseBoundedFloat(value, 360, 2400) else if (eq(key, "ai_dock_preferred")) self.ui.ai_dock_preferred = try parseBool(value) else if (eq(key, "mascot_anchor_x")) self.ui.mascot_anchor_x = try parseBoundedFloat(value, 0, 1) else if (eq(key, "mascot_anchor_y")) self.ui.mascot_anchor_y = try parseBoundedFloat(value, 0, 1) else if (eq(key, "scrollback_limit")) self.ui.scrollback_limit = try parseInt(u32, value) else if (eq(key, "icon_background")) self.ui.icon_background = std.meta.stringToEnum(IconBackground, try parseString(value)) orelse return error.InvalidValue else if (eq(key, "theme")) self.ui.theme = try parseString(value) else if (eq(key, "font_family")) self.ui.font_family = try parseString(value) else if (eq(key, "font_size")) self.ui.font_size = try parseInt(u8, value) else if (eq(key, "font_weight")) self.ui.font_weight = try parseString(value) else if (eq(key, "line_height")) self.ui.line_height = try parseFloat(value) else if (eq(key, "cursor_style")) self.ui.cursor_style = try parseString(value) else if (eq(key, "sidebar_collapsed")) self.ui.sidebar_collapsed = try parseBool(value) else if (eq(key, "sidebar_width")) self.ui.sidebar_width = try parseFloat(value) else if (eq(key, "input_line_highlight")) self.ui.input_line_highlight = try parseBool(value) else if (eq(key, "timestamp_gutter")) self.ui.timestamp_gutter = try parseBool(value) else if (eq(key, "command_info")) self.ui.command_info = try parseBool(value) else return error.UnknownKey;
             },
             .@"ui.materials" => {
                 if (eq(key, "blur_px")) self.ui.materials.blur_px = try parseInt(u8, value) else return error.UnknownKey;
@@ -669,6 +697,7 @@ pub const Config = struct {
 
         if (self.ui.font_size < 8 or self.ui.font_size > 48) return error.OutOfRange;
         if (self.ui.sidebar_width) |width| if (!std.math.isFinite(width) or width < 220 or width > 480) return error.OutOfRange;
+        if (!inRange(self.ui.ai_dock_width, 360, 2400) or !inRange(self.ui.mascot_anchor_x, 0, 1) or !inRange(self.ui.mascot_anchor_y, 0, 1)) return error.OutOfRange;
         if (!std.math.isFinite(self.ui.line_height) or self.ui.line_height < 1.0 or self.ui.line_height > 3.0) return error.OutOfRange;
         if (std.mem.trim(u8, self.ui.font_family, " \t\r\n").len == 0 or !std.unicode.utf8ValidateSlice(self.ui.font_family) or std.mem.indexOfAny(u8, self.ui.font_family, "\"\\\n\r") != null) return error.InvalidValue;
         if (!validFontWeight(self.ui.font_weight) or !validCursorStyle(self.ui.cursor_style)) return error.InvalidValue;
@@ -687,7 +716,7 @@ fn validPreferenceId(value: []const u8) bool {
 }
 
 pub const IconBackground = enum { transparent, light, dark };
-pub const Ui = struct { scrollback_limit: u32 = 25000, icon_background: IconBackground = .transparent, theme: []const u8 = "dark", font_family: []const u8 = "Monaco", font_size: u8 = 14, font_weight: []const u8 = "regular", line_height: f32 = 1.5, cursor_style: []const u8 = "bar", sidebar_collapsed: bool = false, sidebar_width: ?f32 = null, input_line_highlight: bool = true, timestamp_gutter: bool = false, command_info: bool = true, materials: material.Materials = .{} };
+pub const Ui = struct { scrollback_limit: u32 = 25000, icon_background: IconBackground = .transparent, theme: []const u8 = "dark", font_family: []const u8 = "Monaco", font_size: u8 = 14, font_weight: []const u8 = "regular", line_height: f32 = 1.5, cursor_style: []const u8 = "bar", sidebar_collapsed: bool = false, sidebar_width: ?f32 = null, ai_dock_width: f32 = 468, ai_dock_preferred: bool = false, mascot_anchor_x: f32 = 1, mascot_anchor_y: f32 = 1, input_line_highlight: bool = true, timestamp_gutter: bool = false, command_info: bool = true, materials: material.Materials = .{} };
 pub fn resetDefaults() Config {
     var value: Config = .{};
     value.ui.theme = "sauber";
@@ -1236,6 +1265,14 @@ fn parseInt(comptime T: type, value: []const u8) ParseError!T {
 }
 fn parseFloat(value: []const u8) ParseError!f32 {
     return std.fmt.parseFloat(f32, value) catch error.InvalidValue;
+}
+fn inRange(value: f32, min: f32, max: f32) bool {
+    return std.math.isFinite(value) and value >= min and value <= max;
+}
+fn parseBoundedFloat(value: []const u8, min: f32, max: f32) ParseError!f32 {
+    const number = try parseFloat(value);
+    if (!inRange(number, min, max)) return error.OutOfRange;
+    return number;
 }
 fn parseBackoff(value: []const u8) ParseError![5]u8 {
     if (value.len < 3 or value[0] != '[' or value[value.len - 1] != ']') return error.InvalidValue;

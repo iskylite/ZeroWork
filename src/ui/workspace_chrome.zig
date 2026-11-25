@@ -11,7 +11,7 @@ pub const View = struct {
     bar: *ui.Node,
     tabs: *ui.Node,
     tools: *ui.Node,
-    groups: [3]*ui.Node,
+    groups: [1]*ui.Node,
     more: *ui.Node,
     expanded: bool = false,
     compact: bool = false,
@@ -33,7 +33,7 @@ pub const View = struct {
             node.?.setStyleInline(self.cx.allocator, .{ .position = .absolute, .width = .{ .px = 28 }, .height = .{ .px = 28 }, .padding = .{}, .corner_radius = 14, .z_index = 5 });
         }
     }
-    pub fn mount(cx: *ui.Cx, scope: *ui.Scope, workspace: *Workspace, bar: *ui.Node, tabs: *ui.Node, tools: *ui.Node, groups: [3]*ui.Node) !*View {
+    pub fn mount(cx: *ui.Cx, scope: *ui.Scope, workspace: *Workspace, bar: *ui.Node, tabs: *ui.Node, tools: *ui.Node, groups: [1]*ui.Node) !*View {
         const self = try scope.createState(View, .{ .cx = cx, .workspace = workspace, .bar = bar, .tabs = tabs, .tools = tools, .groups = groups, .more = undefined });
         const capsule = try ui.boxStyled(cx, S.titleFloating, .{});
         capsule.setStyleInline(cx.allocator, .{ .width = .{ .px = 36 }, .justify = .center });
@@ -103,7 +103,7 @@ pub const View = struct {
         }
         const width = self.bar.globalRect().w;
         if (width <= 0) return .done;
-        var tools_width: f32 = 16;
+        var tools_width: f32 = 0;
         var widths_changed = false;
         for (self.groups) |group| {
             var visible: usize = 0;
@@ -133,15 +133,15 @@ pub const View = struct {
         self.compact = compact;
         if (!compact) self.expanded = false;
         const more_rect = self.more.globalRect();
-        const over_more = compact and self.more.style.display != .none and contains(more_rect, self.cx.mouse_x, self.cx.mouse_y);
+        const over_more = compact and !self.expanded and self.more.style.display != .none and contains(more_rect, self.cx.mouse_x, self.cx.mouse_y);
         if (over_more and !self.expanded) {
             self.expand();
             changed = true;
         }
         if (compact and self.expanded and self.cx.frame_time_ms > self.opened_frame + 80) {
             const r = self.tools.globalRect();
-            // Include the gaps between groups and the retained ellipsis anchor.
-            const region: ui.ComputedRect = .{ .x = r.x, .y = r.y, .w = more_rect.x + more_rect.w - r.x, .h = r.h };
+            // Expanded state hides the ellipsis entirely; the island itself is the hot zone.
+            const region: ui.ComputedRect = r;
             const inside = contains(region, self.cx.mouse_x, self.cx.mouse_y);
             var popup = false;
             if (self.workspace.active_tab) |index| {
@@ -173,7 +173,7 @@ pub const View = struct {
             }
         }
         const tool_display: @TypeOf(self.tools.style.display) = if (!compact or self.expanded) .flex else .none;
-        const more_display: @TypeOf(self.tools.style.display) = if (compact) .flex else .none;
+        const more_display: @TypeOf(self.tools.style.display) = if (compact and !self.expanded) .flex else .none;
         if (self.tools.style.display != tool_display) {
             self.tools.setDisplay(tool_display);
             changed = true;
@@ -184,7 +184,7 @@ pub const View = struct {
         }
         const position: @TypeOf(self.tools.style.position) = if (compact) .absolute else .relative;
         if (self.tools.style.position != position) {
-            self.tools.setStyleInline(self.cx.allocator, .{ .position = position, .inset = if (compact) .{ .right = .{ .px = 44 }, .top = .{ .px = 0 } } else .{}, .z_index = 20 });
+            self.tools.setStyleInline(self.cx.allocator, .{ .position = position, .inset = if (compact) .{ .right = .{ .px = 0 }, .top = .{ .px = 0 } } else .{}, .z_index = 20 });
             changed = true;
         }
         const progress: f32 = if (!compact or !self.expanded or ui.a11y.preferences.reduceMotion()) 1 else @floatCast(std.math.clamp((self.cx.frame_time_ms - self.opened_frame) / 220, 0, 1));
@@ -200,7 +200,7 @@ pub const View = struct {
         }
         // Reserve the expanded groups and ellipsis so their transparent gaps
         // never expose (or forward clicks to) an overlapping tab capsule.
-        const reserved = if (compact) (if (self.expanded) tools_width + 44 else @as(f32, 36)) else tools_width;
+        const reserved = if (compact) (if (self.expanded) tools_width else @as(f32, 36)) else tools_width;
         const budget = @max(96, width - reserved - 16 - 40);
         if (self.workspace.tab_budget == null or @abs(self.workspace.tab_budget.? - budget) > 0.5) {
             self.workspace.tab_budget = budget;

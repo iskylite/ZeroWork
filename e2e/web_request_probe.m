@@ -8,6 +8,7 @@
 #include "../src/platform/macos_web_surface.h"
 
 extern void zw_web_surface_acceptance_counts(uint64_t *, uint64_t *, uint64_t *);
+extern uint64_t zw_web_popup_acceptance_count(void);
 static unsigned changes;
 static void changed(void) { ++changes; }
 
@@ -32,11 +33,29 @@ static void changed(void) { ++changes; }
 @interface FixtureAction : NSObject
 @property (nonatomic, readonly) BOOL shouldPerformDownload;
 @property (nonatomic, readonly) WKFrameInfo *sourceFrame;
+@property (nonatomic, strong) NSURLRequest *request;
 @end
 @implementation FixtureAction
 - (BOOL)shouldPerformDownload { return YES; }
 - (WKFrameInfo *)sourceFrame { return (WKFrameInfo *)[[FixtureFrame alloc] init]; }
 @end
+
+@interface FixtureWindowFeatures : NSObject
+@end
+@implementation FixtureWindowFeatures
+- (NSNumber *)width { return @560; }
+- (NSNumber *)height { return @460; }
+- (NSNumber *)x { return nil; }
+- (NSNumber *)y { return nil; }
+@end
+
+static WKWebView *open_popup(WKWebView *view, WKWebViewConfiguration *configuration, NSString *url) {
+    FixtureAction *action = [[FixtureAction alloc] init];
+    action.request = [NSURLRequest requestWithURL:[NSURL URLWithString:url]];
+    return [view.UIDelegate webView:view createWebViewWithConfiguration:configuration
+        forNavigationAction:(WKNavigationAction *)action
+        windowFeatures:(WKWindowFeatures *)[[FixtureWindowFeatures alloc] init]];
+}
 
 static ZWWebRequest pending(ZWWebSurface *surface, int kind) {
     ZWWebRequest request;
@@ -173,11 +192,15 @@ int main(void) {
         request = pending(surface, ZWWebRequestNotice);
         assert(strcmp(request.message, "暂不支持下载文件。") == 0);
         accept_request(surface, &request);
-        assert(![ui webView:view createWebViewWithConfiguration:[[WKWebViewConfiguration alloc] init] forNavigationAction:(WKNavigationAction *)[[FixtureAction alloc] init] windowFeatures:(WKWindowFeatures *)[[NSObject alloc] init]]);
+        assert(!open_popup(view, view.configuration, @"file:///fixture-not-opened"));
         request = pending(surface, ZWWebRequestNotice);
-        assert(strcmp(request.message, "暂不支持此网页弹窗。") == 0);
+        assert(strcmp(request.message, "暂不支持打开此类型的链接。") == 0);
         accept_request(surface, &request);
-        puts("PASS: unsupported upload, download and popup retain explicit notices");
+        assert(!open_popup(view, [[WKWebViewConfiguration alloc] init], @"about:blank"));
+        request = pending(surface, ZWWebRequestNotice);
+        assert(strcmp(request.message, "无法继承此网页会话的连接配置。") == 0);
+        accept_request(surface, &request);
+        puts("PASS: unsupported upload, download, popup schemes and unowned data stores retain explicit notices");
 
         before = callbacks;
         [ui webView:view runJavaScriptAlertPanelWithMessage:@"Timeout" initiatedByFrame:frame completionHandler:^{ ++callbacks; }];
@@ -212,5 +235,68 @@ int main(void) {
     zw_web_surface_acceptance_counts(&owners, &handlers, &completed);
     assert(owners == 0 && handlers == 0 && completed >= expectedCompletions);
     puts("PASS: destruction releases every callback and replacement instances reject old tokens");
+    @autoreleasepool {
+        ZWWebSurface *surface = zw_web_surface_create();
+        WKWebView *view = [(__bridge id)surface valueForKey:@"webView"];
+        __block unsigned popupCallbacks = 0;
+        @autoreleasepool {
+            for (NSUInteger i = 0; i < 8; i++) {
+                assert(open_popup(view, view.configuration, @"about:blank"));
+            }
+            assert(zw_web_surface_popup_count(surface) == 8);
+            assert(!open_popup(view, view.configuration, @"about:blank"));
+            ZWWebRequest cap = pending(surface, ZWWebRequestNotice);
+            assert(strcmp(cap.message, "已达到单会话子窗口数量上限。") == 0);
+            accept_request(surface, &cap);
+        }
+        assert(zw_web_popup_acceptance_count() == 8);
+        @autoreleasepool {
+            NSArray *registry = [(__bridge id)surface valueForKey:@"popups"];
+            WKWebView *child = [registry[0] valueForKey:@"webView"];
+            WKFrameInfo *frame = (WKFrameInfo *)[[FixtureFrame alloc] init];
+            [child.UIDelegate webView:child runJavaScriptConfirmPanelWithMessage:@"Cancel on teardown"
+                initiatedByFrame:frame completionHandler:^(BOOL accepted) {
+                    assert(!accepted);
+                    ++popupCallbacks;
+                    // Simulate a reentrant WebKit callback from the retiring
+                    // generation while one of its children is being closed.
+                    assert(!open_popup(view, view.configuration, @"about:blank"));
+                }];
+            zw_web_surface_close_popups(surface);
+            assert(!child.UIDelegate && !child.navigationDelegate);
+            assert(!zw_web_surface_popup_count(surface));
+            assert(!open_popup(view, view.configuration, @"about:blank"));
+        }
+        assert(popupCallbacks == 1 && zw_web_popup_acceptance_count() == 0);
+        zw_web_surface_acceptance_counts(&owners, &handlers, &completed);
+        assert(owners == 1 && handlers == 0);
+        view = nil;
+        zw_web_surface_destroy(surface);
+    }
+    zw_web_surface_acceptance_counts(&owners, &handlers, &completed);
+    assert(owners == 0 && handlers == 0 && zw_web_popup_acceptance_count() == 0);
+    puts("PASS: eight-child cap, synchronous popup retirement, callback cancellation and stale generation rejection");
+    if (@available(macOS 14.0, *)) {
+        @autoreleasepool {
+            const uint8_t user[] = "popup-fixture";
+            const uint8_t secret[] = "fixture-only";
+            ZWWebSurface *surface = zw_web_surface_create_proxied(9, user, sizeof(user) - 1, secret, sizeof(secret) - 1);
+            assert(surface);
+            WKWebView *view = [(__bridge id)surface valueForKey:@"webView"];
+            WKWebView *child = open_popup(view, view.configuration, @"about:blank");
+            assert(child);
+            WKWebsiteDataStore *parentStore = view.configuration.websiteDataStore;
+            WKWebsiteDataStore *childStore = child.configuration.websiteDataStore;
+            assert(parentStore == childStore && !childStore.isPersistent);
+            assert(childStore.proxyConfigurations.count == 1);
+            zw_web_surface_destroy(surface);
+            assert(!child.UIDelegate && !child.navigationDelegate);
+            view = nil;
+            child = nil;
+        }
+        zw_web_surface_acceptance_counts(&owners, &handlers, &completed);
+        assert(owners == 0 && handlers == 0 && zw_web_popup_acceptance_count() == 0);
+        puts("PASS: popup shares the parent's exact isolated proxied WebsiteDataStore");
+    }
     return 0;
 }

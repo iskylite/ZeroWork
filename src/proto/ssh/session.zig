@@ -643,6 +643,11 @@ pub const SftpHandle = struct {
     handle: *c.LIBSSH2_SFTP_HANDLE,
     consumed: ?ReleaseReceipt = null,
 
+    pub fn seek(self: *SftpHandle, offset: u64) !void {
+        if (self.consumed != null) return error.SftpHandleClosed;
+        c.zw_libssh2_sftp_seek(self.handle, offset);
+    }
+
     pub fn read(self: *SftpHandle, bytes: []u8) !usize {
         if (self.consumed != null) return error.SftpHandleClosed;
         const count = c.zw_libssh2_sftp_read(self.handle, bytes.ptr, bytes.len);
@@ -1206,6 +1211,13 @@ pub const Session = struct {
     }
 
     /// Opens only an existing destination without truncation, including offset zero.
+    pub fn sftpOpenResume(self: *Session, path: [:0]const u8) !SftpHandle {
+        if (self.state != .active) return error.SessionNotActive;
+        try self.sftpInit();
+        const handle = c.zw_libssh2_sftp_open_resume(self.sftp.?, path.ptr) orelse return self.sftpReadonlyError(c.zw_libssh2_session_last_error(self.handle.?));
+        return .{ .handle = handle };
+    }
+
     pub fn sftpOpenAppend(self: *Session, path: [:0]const u8, offset: u64) !SftpHandle {
         if (self.state != .active) return error.SessionNotActive;
         try self.sftpInit();

@@ -248,6 +248,7 @@ pub const Inbox = struct {
             if (!std.meta.eql(prior.receipt.original, original)) return error.SubmissionConflict;
             const prior_message = prior.payload.messages[0];
             if (!std.meta.eql(prior_message.skill, message.skill)) return error.SubmissionConflict;
+            if (prior_message.workspace_reselect_required != message.workspace_reselect_required) return error.SubmissionConflict;
             if (prior.receipt.mode != mode or !std.mem.eql(u8, prior_message.content, message.content) or prior_message.images.len != message.images.len or prior_message.offloaded_images.len != message.offloaded_images.len or !std.meta.eql(prior_message.image_owner, message.image_owner) or prior_message.image_transform != message.image_transform) return error.SubmissionConflict;
             for (prior_message.images, message.images) |left, right| if (!sameImage(left, right)) return error.SubmissionConflict;
             for (prior_message.offloaded_images, message.offloaded_images) |left, right| if (!sameImage(left.reference, right.reference) or !std.meta.eql(left.owner, right.owner)) return error.SubmissionConflict;
@@ -259,6 +260,7 @@ pub const Inbox = struct {
         const next_sequence = try identity.advance(self.next_sequence);
         const queue_rev = try identity.advance(self.queue_revision);
         const route = self.routeLocked(mode);
+        if (message.workspace_reselect_required and (mode != .steer or route != .start)) return error.WorkspaceFileNeedsIdle;
         if (mode == .steer and self.hasUnconfirmedLocked()) return error.SubmissionUnconfirmed;
         const is_steer = route == .steer;
         const input_rev = if (is_steer) try identity.advance(self.revision) else self.revision;

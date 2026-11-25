@@ -24,6 +24,7 @@
 
 #ifdef ZW_WEB_SURFACE_ACCEPTANCE
 static uint64_t zw_live_surface_owners;
+static uint64_t zw_live_popup_owners;
 static uint64_t zw_pending_completions;
 static uint64_t zw_completed_handlers;
 
@@ -31,6 +32,10 @@ void zw_web_surface_acceptance_counts(uint64_t *owners, uint64_t *pending, uint6
     *owners = zw_live_surface_owners;
     *pending = zw_pending_completions;
     *completed = zw_completed_handlers;
+}
+
+uint64_t zw_web_popup_acceptance_count(void) {
+    return zw_live_popup_owners;
 }
 
 #define ZW_COMPLETE(...) do { \
@@ -63,6 +68,7 @@ static const int64_t zw_request_lifetime = ZW_WEB_REQUEST_LIFETIME_NS;
 @property (nonatomic, copy) NSString *tlsHost;
 @property (nonatomic) uint16_t tlsPort;
 @property (nonatomic, copy) NSArray<NSData *> *tlsChain;
+@property (nonatomic, strong) NSWindow *presentation;
 @property (nonatomic, copy) void (^complete)(BOOL, NSString *, NSString *);
 @end
 @implementation ZWWebPendingRequest
@@ -154,6 +160,8 @@ static void zw_add_nonempty_rect(NSMutableArray<NSValue *> *rects, NSRect rect) 
 }
 @end
 
+@class ZWWebPopupOwner;
+
 @interface ZWWebSurfaceOwner : NSObject <WKNavigationDelegate, WKUIDelegate>
 @property (nonatomic, strong) ZWWebClipView *clipView;
 @property (nonatomic, strong) WKWebView *webView;
@@ -172,12 +180,15 @@ static void zw_add_nonempty_rect(NSMutableArray<NSValue *> *rects, NSRect rect) 
 @property (nonatomic) BOOL activeGet;
 @property (nonatomic) BOOL pendingGet;
 @property (nonatomic) BOOL closing;
+@property (nonatomic) BOOL popupsRetired;
 @property (nonatomic) BOOL invalidatingRequests;
 @property (nonatomic) BOOL tlsReview;
 @property (nonatomic) NSUInteger tlsReviewsInFlight;
 @property (nonatomic) uint64_t requestEpoch;
 @property (nonatomic, copy) NSURL *mainFrameURL;
 @property (nonatomic, strong) NSMutableArray<ZWWebPendingRequest *> *requests;
+@property (nonatomic, strong) NSMutableArray<ZWWebPopupOwner *> *popups;
+@property (nonatomic, copy) NSString *popupOwnerText;
 @property (nonatomic, strong) id<ZWNativeWebInspector> nativeInspector;
 - (void)installWebView:(WKWebViewConfiguration *)configuration;
 - (void)observeNavigation:(WKNavigation *)navigation explicitGet:(BOOL)explicitGet;
@@ -188,6 +199,9 @@ static void zw_add_nonempty_rect(NSMutableArray<NSValue *> *rects, NSRect rect) 
 - (BOOL)finishRequest:(uint64_t)token accepted:(BOOL)accepted value:(NSString *)value secret:(NSString *)secret;
 - (void)cancelRequests;
 - (void)notice:(NSString *)message origin:(NSString *)origin;
+- (void)forgetPopup:(ZWWebPopupOwner *)popup;
+- (void)closeAllPopups;
+- (BOOL)popupTlsReview;
 @end
 
 static NSArray<NSString *> *zw_observed_properties(void) {
@@ -227,12 +241,727 @@ static NSString *zw_bounded_text(NSString *text, NSUInteger maxBytes) {
     return [[NSString alloc] initWithBytes:raw length:length encoding:NSUTF8StringEncoding] ?: @"";
 }
 
-@implementation ZWWebSurfaceOwner
-#ifdef ZW_WEB_SURFACE_ACCEPTANCE
-- (void)dealloc {
-    --zw_live_surface_owners;
+static size_t zw_live_popup_count(ZWWebSurfaceOwner *owner);
+
+static const NSUInteger zw_max_popups_per_session = 8;
+static const CGFloat zw_popup_toolbar_height = 38.0;
+static const CGFloat zw_popup_default_width = 1280.0;
+static const CGFloat zw_popup_default_height = 800.0;
+static const CGFloat zw_popup_min_width = 480.0;
+static const CGFloat zw_popup_min_height = 360.0;
+
+static NSImage *zw_popup_symbol(NSString *name, NSString *description) {
+    if (@available(macOS 11.0, *)) {
+        return [NSImage imageWithSystemSymbolName:name accessibilityDescription:description];
+    }
+    return nil;
 }
+
+static void zw_popup_set_button_symbol(NSButton *button, NSString *symbol, NSString *fallback) {
+    NSImage *image = zw_popup_symbol(symbol, fallback);
+    if (image) {
+        button.image = image;
+        button.title = @"";
+        button.imagePosition = NSImageOnly;
+    } else {
+        button.image = nil;
+        button.title = fallback;
+        button.imagePosition = NSNoImage;
+    }
+}
+
+static NSButton *zw_popup_button(NSString *symbol, NSString *fallback, NSString *accessibility) {
+    NSButton *button = [NSButton buttonWithTitle:fallback target:nil action:nil];
+    button.bordered = NO;
+    button.focusRingType = NSFocusRingTypeNone;
+    button.imageScaling = NSImageScaleProportionallyDown;
+    button.contentTintColor = NSColor.secondaryLabelColor;
+    button.toolTip = accessibility;
+    button.imagePosition = NSNoImage;
+    zw_popup_set_button_symbol(button, symbol, fallback);
+    return button;
+}
+
+static NSTextField *zw_popup_label(NSString *value, CGFloat size, NSColor *color) {
+    NSTextField *label = [NSTextField labelWithString:value ?: @""];
+    label.font = [NSFont systemFontOfSize:size weight:NSFontWeightMedium];
+    label.textColor = color;
+    label.lineBreakMode = NSLineBreakByTruncatingTail;
+    label.maximumNumberOfLines = 1;
+    label.cell.truncatesLastVisibleLine = YES;
+    label.selectable = NO;
+    label.bezeled = NO;
+    label.drawsBackground = NO;
+    return label;
+}
+
+static BOOL zw_is_popup_initial_url(NSURL *url) {
+    if (!url) return YES;
+    if ([url.absoluteString isEqualToString:@"about:blank"]) return YES;
+    return zw_is_web_url(url);
+}
+
+static BOOL zw_is_popup_navigation_url(NSURL *url, BOOL committed) {
+    if (zw_is_web_url(url)) return YES;
+    return !committed && [url.absoluteString isEqualToString:@"about:blank"];
+}
+
+static BOOL zw_is_popup_subframe_url(NSURL *url) {
+    if (zw_is_web_url(url)) return YES;
+    return [url.scheme.lowercaseString isEqualToString:@"about"];
+}
+
+static NSRect zw_popup_window_frame(NSWindow *parent, WKWindowFeatures *features) {
+    NSScreen *screen = parent.screen ?: NSScreen.mainScreen;
+    if (!screen && NSScreen.screens.count) screen = NSScreen.screens.firstObject;
+    NSRect visible = screen ? screen.visibleFrame : NSMakeRect(0, 0, zw_popup_default_width, zw_popup_default_height);
+    CGFloat width = features.width ? features.width.doubleValue : zw_popup_default_width;
+    CGFloat height = features.height ? features.height.doubleValue : zw_popup_default_height;
+    if (!isfinite(width)) width = zw_popup_default_width;
+    if (!isfinite(height)) height = zw_popup_default_height;
+    width = MIN(MAX(width, zw_popup_min_width), MAX(zw_popup_min_width, NSWidth(visible)));
+    height = MIN(MAX(height, zw_popup_min_height), MAX(zw_popup_min_height, NSHeight(visible)));
+    NSRect frame = NSMakeRect(0, 0, width, height);
+    CGFloat x = features.x ? features.x.doubleValue : NAN;
+    CGFloat y = features.y ? features.y.doubleValue : NAN;
+    if (isfinite(x) && isfinite(y)) {
+        // WKWindowFeatures reports screen-space x/y with a top-left origin.
+        frame.origin.x = x;
+        frame.origin.y = NSMaxY(visible) - y - height;
+    } else if (parent) {
+        frame.origin.x = NSMidX(parent.frame) - width / 2;
+        frame.origin.y = NSMaxY(parent.frame) - height - 48;
+    } else {
+        frame.origin.x = NSMidX(visible) - width / 2;
+        frame.origin.y = NSMidY(visible) - height / 2;
+    }
+    frame.origin.x = MIN(MAX(frame.origin.x, NSMinX(visible)), NSMaxX(visible) - width);
+    frame.origin.y = MIN(MAX(frame.origin.y, NSMinY(visible)), NSMaxY(visible) - height);
+    return NSIntegralRect(frame);
+}
+
+@class ZWWebPopupOwner;
+
+@interface ZWWebPopupWindow : NSWindow
+@property (nonatomic, weak) ZWWebPopupOwner *popupOwner;
+@end
+
+@interface ZWWebPopupToolbarView : NSVisualEffectView
+@property (nonatomic, strong) NSView *ownerBadge;
+@property (nonatomic, strong) NSTextField *ownerLabel;
+@property (nonatomic, strong) NSView *urlPill;
+@property (nonatomic, strong) NSImageView *tlsIcon;
+@property (nonatomic, strong) NSTextField *urlLabel;
+@property (nonatomic, strong) NSButton *urlCopyButton;
+@property (nonatomic, strong) NSButton *reloadButton;
+@property (nonatomic, strong) NSButton *fullScreenButton;
+@property (nonatomic, strong) NSButton *closeButton;
+- (void)layoutNow;
+- (void)applyAppearance;
+@end
+
+@implementation ZWWebPopupToolbarView
+- (instancetype)initWithFrame:(NSRect)frame {
+    self = [super initWithFrame:frame];
+    if (!self) return nil;
+    self.material = NSVisualEffectMaterialHeaderView;
+    self.blendingMode = NSVisualEffectBlendingModeWithinWindow;
+    self.state = NSVisualEffectStateActive;
+    self.wantsLayer = YES;
+
+    _ownerBadge = [[NSView alloc] initWithFrame:NSZeroRect];
+    _ownerBadge.wantsLayer = YES;
+    _ownerBadge.layer.cornerRadius = 10;
+    [self addSubview:_ownerBadge];
+    _ownerLabel = zw_popup_label(@"关联自: 浏览器", 11, NSColor.secondaryLabelColor);
+    [_ownerBadge addSubview:_ownerLabel];
+
+    _urlPill = [[NSView alloc] initWithFrame:NSZeroRect];
+    _urlPill.wantsLayer = YES;
+    _urlPill.layer.cornerRadius = 8;
+    [self addSubview:_urlPill];
+    _tlsIcon = [[NSImageView alloc] initWithFrame:NSZeroRect];
+    _tlsIcon.imageScaling = NSImageScaleProportionallyDown;
+    [_urlPill addSubview:_tlsIcon];
+    _urlLabel = zw_popup_label(@"about:blank", 11, NSColor.labelColor);
+    _urlLabel.font = [NSFont monospacedSystemFontOfSize:11 weight:NSFontWeightRegular];
+    _urlLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
+    [_urlPill addSubview:_urlLabel];
+    _urlCopyButton = zw_popup_button(@"doc.on.doc", @"⧉", @"复制网址");
+    _urlCopyButton.contentTintColor = NSColor.secondaryLabelColor;
+    [_urlPill addSubview:_urlCopyButton];
+
+    _reloadButton = zw_popup_button(@"arrow.clockwise", @"↻", @"刷新");
+    _fullScreenButton = zw_popup_button(@"arrow.up.left.and.arrow.down.right", @"⤢", @"全屏");
+    _closeButton = zw_popup_button(@"xmark", @"×", @"关闭子窗口");
+    for (NSButton *button in @[_reloadButton, _fullScreenButton, _closeButton]) [self addSubview:button];
+    [self applyAppearance];
+    [self layoutNow];
+    return self;
+}
+- (void)viewDidChangeEffectiveAppearance {
+    [super viewDidChangeEffectiveAppearance];
+    [self applyAppearance];
+}
+- (void)applyAppearance {
+    self.ownerBadge.layer.backgroundColor = [NSColor.controlBackgroundColor colorWithAlphaComponent:0.55].CGColor;
+    self.urlPill.layer.backgroundColor = [NSColor.textBackgroundColor colorWithAlphaComponent:0.45].CGColor;
+}
+- (void)setFrameSize:(NSSize)newSize {
+    [super setFrameSize:newSize];
+    [self layoutNow];
+}
+- (void)mouseDown:(NSEvent *)event {
+    [self.window performWindowDragWithEvent:event];
+}
+- (void)layoutNow {
+    CGFloat width = self.bounds.size.width;
+    CGFloat bar = NSHeight(self.bounds);
+    CGFloat button = 24;
+    CGFloat gap = 2;
+    CGFloat right = width - 8;
+    CGFloat closeX = right - button;
+    CGFloat fullX = closeX - gap - button;
+    CGFloat reloadX = fullX - gap - button;
+    self.closeButton.frame = NSMakeRect(closeX, (bar - button) / 2, button, button);
+    self.fullScreenButton.frame = NSMakeRect(fullX, (bar - button) / 2, button, button);
+    self.reloadButton.frame = NSMakeRect(reloadX, (bar - button) / 2, button, button);
+
+    CGFloat left = 78;
+    [self.ownerLabel sizeToFit];
+    CGFloat badge = MIN(MAX((CGFloat)72, MIN((CGFloat)280, width * 0.34)), MAX((CGFloat)72, self.ownerLabel.frame.size.width + 16));
+    self.ownerBadge.frame = NSMakeRect(left, (bar - 22) / 2, badge, 22);
+    self.ownerLabel.frame = NSMakeRect(8, 2, MAX((CGFloat)0, badge - 16), 18);
+
+    CGFloat urlX = NSMaxX(self.ownerBadge.frame) + 8;
+    CGFloat urlWidth = MAX((CGFloat)80, reloadX - 8 - urlX);
+    self.urlPill.frame = NSMakeRect(urlX, (bar - 28) / 2, urlWidth, 28);
+    self.tlsIcon.frame = NSMakeRect(8, 6, 16, 16);
+    self.urlCopyButton.frame = NSMakeRect(urlWidth - 8 - 22, 3, 22, 22);
+    self.urlLabel.frame = NSMakeRect(28, 5, MAX((CGFloat)0, urlWidth - 28 - 8 - 22 - 4), 18);
+}
+@end
+
+@interface ZWWebPopupOwner : NSObject <WKNavigationDelegate, WKUIDelegate, NSWindowDelegate>
+@property (nonatomic, weak) ZWWebSurfaceOwner *surface;
+@property (nonatomic, strong) ZWWebPopupWindow *window;
+@property (nonatomic, strong) WKWebView *webView;
+@property (nonatomic, strong) ZWWebPopupToolbarView *toolbar;
+@property (nonatomic, strong) NSMutableArray<ZWWebPendingRequest *> *requests;
+@property (nonatomic, copy) NSString *ownerText;
+@property (nonatomic, strong) NSURL *pendingURL;
+@property (nonatomic) BOOL closing;
+@property (nonatomic) BOOL committed;
+@property (nonatomic) BOOL tlsReview;
+- (instancetype)initWithSurface:(ZWWebSurfaceOwner *)surface configuration:(WKWebViewConfiguration *)configuration
+    action:(WKNavigationAction *)action features:(WKWindowFeatures *)features;
+- (void)present;
+- (void)closePopup;
+- (void)releasePopupClosingWindow:(BOOL)closeWindow;
+- (void)updateOwnerText:(NSString *)text;
+- (void)refreshToolbar;
+- (void)copyURL:(id)sender;
+- (void)reloadOrStop:(id)sender;
+- (void)toggleFullScreen:(id)sender;
+- (void)closePressed:(id)sender;
+@end
+
+@implementation ZWWebPopupWindow
+- (BOOL)canBecomeKeyWindow { return YES; }
+- (BOOL)canBecomeMainWindow { return YES; }
+- (void)performClose:(id)sender {
+    if (self.popupOwner) {
+        [self.popupOwner closePopup];
+    } else {
+        [super performClose:sender];
+    }
+}
+@end
+
+@implementation ZWWebPopupOwner {
+    BOOL _observing;
+}
+- (instancetype)initWithSurface:(ZWWebSurfaceOwner *)surface configuration:(WKWebViewConfiguration *)configuration
+    action:(WKNavigationAction *)action features:(WKWindowFeatures *)features {
+    if (!surface || !configuration) return nil;
+    self = [super init];
+    if (!self) return nil;
+#ifdef ZW_WEB_SURFACE_ACCEPTANCE
+    ++zw_live_popup_owners;
 #endif
+    _surface = surface;
+    _requests = [NSMutableArray array];
+    _ownerText = [surface.popupOwnerText copy] ?: @"关联自: 浏览器";
+    _tlsReview = [surface popupTlsReview];
+    _pendingURL = action.request.URL;
+
+    _webView = [[WKWebView alloc] initWithFrame:NSZeroRect configuration:configuration];
+    _webView.navigationDelegate = self;
+    _webView.UIDelegate = self;
+    for (NSString *key in @[@"loading", @"title", @"URL", @"estimatedProgress"]) {
+        [_webView addObserver:self forKeyPath:key options:0 context:NULL];
+    }
+    _observing = YES;
+
+    NSRect frame = zw_popup_window_frame(surface.webView.window, features);
+    _window = [[ZWWebPopupWindow alloc] initWithContentRect:frame
+        styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskResizable | NSWindowStyleMaskMiniaturizable)
+        backing:NSBackingStoreBuffered defer:NO];
+    _window.popupOwner = self;
+    _window.delegate = self;
+    _window.releasedWhenClosed = NO;
+    _window.titlebarAppearsTransparent = YES;
+    _window.titleVisibility = NSWindowTitleHidden;
+    _window.styleMask |= NSWindowStyleMaskFullSizeContentView;
+    _window.backgroundColor = NSColor.windowBackgroundColor;
+    _window.collectionBehavior = NSWindowCollectionBehaviorFullScreenPrimary;
+    _window.minSize = NSMakeSize(zw_popup_min_width, zw_popup_min_height);
+    _window.title = @"子窗口";
+
+    _toolbar = [[ZWWebPopupToolbarView alloc] initWithFrame:NSMakeRect(0, frame.size.height - zw_popup_toolbar_height,
+        frame.size.width, zw_popup_toolbar_height)];
+    _toolbar.autoresizingMask = NSViewWidthSizable | NSViewMinYMargin;
+    _toolbar.ownerLabel.stringValue = _ownerText;
+    _toolbar.urlCopyButton.target = self;
+    _toolbar.urlCopyButton.action = @selector(copyURL:);
+    _toolbar.reloadButton.target = self;
+    _toolbar.reloadButton.action = @selector(reloadOrStop:);
+    _toolbar.fullScreenButton.target = self;
+    _toolbar.fullScreenButton.action = @selector(toggleFullScreen:);
+    _toolbar.closeButton.target = self;
+    _toolbar.closeButton.action = @selector(closePressed:);
+
+    NSView *content = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, frame.size.width, frame.size.height)];
+    content.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    _webView.frame = NSMakeRect(0, 0, frame.size.width, MAX((CGFloat)0, frame.size.height - zw_popup_toolbar_height));
+    _webView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    [content addSubview:_webView];
+    [content addSubview:_toolbar];
+    _window.contentView = content;
+    [self refreshToolbar];
+    return self;
+}
+- (void)dealloc {
+#ifdef ZW_WEB_SURFACE_ACCEPTANCE
+    --zw_live_popup_owners;
+#endif
+    if (self.requests.count) [self cancelRequests];
+    if (_observing) {
+        for (NSString *key in @[@"loading", @"title", @"URL", @"estimatedProgress"]) {
+            [_webView removeObserver:self forKeyPath:key];
+        }
+        _observing = NO;
+    }
+    if (_webView) {
+        _webView.navigationDelegate = nil;
+        _webView.UIDelegate = nil;
+        [_webView stopLoading];
+    }
+    if (_window) {
+        _window.popupOwner = nil;
+        _window.delegate = nil;
+        [_window close];
+    }
+}
+- (void)present {
+    if (self.closing || !self.window) return;
+    [self.window makeKeyAndOrderFront:nil];
+    [NSApp activateIgnoringOtherApps:YES];
+    [self.window makeFirstResponder:self.webView];
+    [self refreshToolbar];
+}
+- (void)updateOwnerText:(NSString *)text {
+    self.ownerText = text.length ? text : @"关联自: 浏览器";
+    self.toolbar.ownerLabel.stringValue = self.ownerText;
+    [self.toolbar layoutNow];
+}
+- (void)copyURL:(id)sender {
+    NSString *value = (self.webView.URL ?: self.pendingURL).absoluteString;
+    if (!value.length) return;
+    NSPasteboard *pasteboard = [NSPasteboard generalPasteboard];
+    [pasteboard clearContents];
+    [pasteboard setString:value forType:NSPasteboardTypeString];
+}
+- (void)reloadOrStop:(id)sender {
+    if (self.webView.loading) {
+        [self.webView stopLoading];
+    } else {
+        [self.webView reload];
+    }
+}
+- (void)toggleFullScreen:(id)sender {
+    if (!self.window) return;
+    [self.window toggleFullScreen:nil];
+    [self refreshToolbar];
+}
+- (void)closePressed:(id)sender {
+    [self closePopup];
+}
+- (void)refreshToolbar {
+    NSURL *url = self.webView.URL ?: self.pendingURL;
+    NSString *display = url.absoluteString.length ? url.absoluteString : @"about:blank";
+    self.toolbar.urlLabel.stringValue = display;
+    BOOL secure = [url.scheme.lowercaseString isEqualToString:@"https"];
+    NSString *symbol = secure ? @"lock.fill" : (url.host.length ? @"lock.open" : @"globe");
+    NSImage *tls = zw_popup_symbol(symbol, secure ? @"TLS 已连接" : @"连接状态");
+    if (tls) self.toolbar.tlsIcon.image = tls;
+    zw_popup_set_button_symbol(self.toolbar.reloadButton, self.webView.loading ? @"xmark" : @"arrow.clockwise",
+        self.webView.loading ? @"×" : @"↻");
+    NSString *title = self.webView.title.length ? self.webView.title : (url.host.length ? url.host : @"子窗口");
+    self.window.title = title;
+    self.window.representedURL = url;
+}
+- (void)observeValueForKeyPath:(NSString *)keyPath ofObject:(id)object
+    change:(NSDictionary<NSKeyValueChangeKey, id> *)change context:(void *)context {
+    [self refreshToolbar];
+    [self.surface notifyChanged];
+}
+- (ZWWebPendingRequest *)enqueueKind:(int)kind origin:(NSString *)origin message:(NSString *)message
+    defaultText:(NSString *)defaultText realm:(NSString *)realm
+    completion:(void (^)(BOOL, NSString *, NSString *))completion {
+    if (self.closing || self.requests.count >= zw_request_capacity || zw_next_request_token == UINT64_MAX) {
+        if (completion) completion(NO, nil, nil);
+        return nil;
+    }
+    ZWWebPendingRequest *request = [[ZWWebPendingRequest alloc] init];
+    request.token = ++zw_next_request_token;
+    request.kind = kind;
+    request.origin = zw_bounded_text(origin, 4096);
+    request.message = zw_bounded_text(message, 8192);
+    request.defaultText = zw_bounded_text(defaultText, 8192);
+    request.realm = zw_bounded_text(realm, 4096);
+    request.complete = completion;
+    [self.requests addObject:request];
+#ifdef ZW_WEB_SURFACE_ACCEPTANCE
+    if (completion) ++zw_pending_completions;
+#endif
+    uint64_t token = request.token;
+    __weak ZWWebPopupOwner *weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, zw_request_lifetime), dispatch_get_main_queue(), ^{
+        [weakSelf finishRequest:token accepted:NO value:nil secret:nil];
+    });
+    return request;
+}
+- (BOOL)finishRequest:(uint64_t)token accepted:(BOOL)accepted value:(NSString *)value secret:(NSString *)secret {
+    NSUInteger index = [self.requests indexOfObjectPassingTest:^BOOL(ZWWebPendingRequest *request, NSUInteger i, BOOL *stop) {
+        return request.token == token;
+    }];
+    if (index == NSNotFound) return NO;
+    ZWWebPendingRequest *request = self.requests[index];
+    [self.requests removeObjectAtIndex:index];
+    NSWindow *presentation = request.presentation;
+    request.presentation = nil;
+    if (presentation.sheetParent) [presentation.sheetParent endSheet:presentation returnCode:NSModalResponseCancel];
+    void (^completion)(BOOL, NSString *, NSString *) = request.complete;
+    request.complete = nil;
+#ifdef ZW_WEB_SURFACE_ACCEPTANCE
+    if (completion) --zw_pending_completions;
+#endif
+    if (completion) completion(accepted, value, secret);
+    return YES;
+}
+- (void)cancelRequests {
+    NSArray<ZWWebPendingRequest *> *requests = [self.requests copy];
+    for (ZWWebPendingRequest *request in requests) {
+        [self finishRequest:request.token accepted:NO value:nil secret:nil];
+    }
+}
+- (void)notice:(NSString *)message {
+    if (self.closing || !self.window) return;
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.alertStyle = NSAlertStyleInformational;
+    alert.messageText = message ?: @"";
+    [alert addButtonWithTitle:@"好"];
+    [alert beginSheetModalForWindow:self.window completionHandler:nil];
+}
+- (void)closePopup {
+    [self releasePopupClosingWindow:YES];
+}
+- (void)releasePopupClosingWindow:(BOOL)closeWindow {
+    if (self.closing) return;
+    // Removing this popup from its parent's registry may release the final
+    // owning reference. Keep it alive only until this delegate/action unwinds.
+    __attribute__((objc_precise_lifetime)) ZWWebPopupOwner *lease = self;
+    self.closing = YES;
+    [self cancelRequests];
+    if (_observing) {
+        for (NSString *key in @[@"loading", @"title", @"URL", @"estimatedProgress"]) {
+            [_webView removeObserver:self forKeyPath:key];
+        }
+        _observing = NO;
+    }
+    self.webView.navigationDelegate = nil;
+    self.webView.UIDelegate = nil;
+    [self.webView stopLoading];
+    [self.webView removeFromSuperview];
+    self.webView = nil;
+    ZWWebPopupWindow *window = self.window;
+    self.window = nil;
+    window.popupOwner = nil;
+    window.delegate = nil;
+    if (closeWindow) [window close];
+    self.toolbar = nil;
+    ZWWebSurfaceOwner *surface = self.surface;
+    self.surface = nil;
+    [surface forgetPopup:lease];
+    [surface notifyChanged];
+}
+- (void)windowWillClose:(NSNotification *)notification {
+    [self releasePopupClosingWindow:NO];
+}
+- (void)windowDidEnterFullScreen:(NSNotification *)notification {
+    zw_popup_set_button_symbol(self.toolbar.fullScreenButton, @"arrow.down.right.and.arrow.up.left", @"退出全屏");
+}
+- (void)windowDidExitFullScreen:(NSNotification *)notification {
+    zw_popup_set_button_symbol(self.toolbar.fullScreenButton, @"arrow.up.left.and.arrow.down.right", @"全屏");
+}
+- (void)webView:(WKWebView *)view decidePolicyForNavigationAction:(WKNavigationAction *)action
+    decisionHandler:(void (^)(WKNavigationActionPolicy))completion {
+    if (action.shouldPerformDownload) {
+        if (self.surface) [self.surface notice:@"暂不支持下载文件。" origin:zw_url_origin(action.request.URL)];
+        ZW_COMPLETE(WKNavigationActionPolicyCancel);
+        return;
+    }
+    NSURL *url = action.request.URL;
+    if (action.targetFrame && !action.targetFrame.mainFrame) {
+        BOOL allowed = zw_is_popup_subframe_url(url);
+        if (!allowed) [self notice:@"暂不支持打开此类型的链接。"];
+        ZW_COMPLETE(allowed ? WKNavigationActionPolicyAllow : WKNavigationActionPolicyCancel);
+        return;
+    }
+    BOOL allowed = zw_is_popup_navigation_url(url, self.committed);
+    if (allowed && url && action.targetFrame) self.pendingURL = url;
+    ZW_COMPLETE(allowed ? WKNavigationActionPolicyAllow : WKNavigationActionPolicyCancel);
+    if (!allowed) [self notice:@"暂不支持打开此类型的链接。"];
+}
+- (void)webView:(WKWebView *)view decidePolicyForNavigationResponse:(WKNavigationResponse *)response
+    decisionHandler:(void (^)(WKNavigationResponsePolicy))completion {
+    NSHTTPURLResponse *http = [response.response isKindOfClass:NSHTTPURLResponse.class]
+        ? (NSHTTPURLResponse *)response.response : nil;
+    NSString *disposition = [http valueForHTTPHeaderField:@"Content-Disposition"];
+    BOOL attachment = [[[disposition stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet]
+        lowercaseString] hasPrefix:@"attachment"];
+    if (!response.canShowMIMEType || attachment) {
+        if (self.surface) [self.surface notice:@"暂不支持下载文件。" origin:zw_url_origin(response.response.URL)];
+        ZW_COMPLETE(WKNavigationResponsePolicyCancel);
+    } else {
+        ZW_COMPLETE(WKNavigationResponsePolicyAllow);
+    }
+}
+- (void)webView:(WKWebView *)view didStartProvisionalNavigation:(WKNavigation *)navigation {
+    [self refreshToolbar];
+}
+- (void)webView:(WKWebView *)view didCommitNavigation:(WKNavigation *)navigation {
+    self.committed = YES;
+    self.pendingURL = view.URL;
+    [self refreshToolbar];
+}
+- (void)webView:(WKWebView *)view didFinishNavigation:(WKNavigation *)navigation {
+    [self refreshToolbar];
+}
+- (void)webView:(WKWebView *)view didFailProvisionalNavigation:(WKNavigation *)navigation withError:(NSError *)error {
+    [self refreshToolbar];
+}
+- (void)webView:(WKWebView *)view didFailNavigation:(WKNavigation *)navigation withError:(NSError *)error {
+    [self refreshToolbar];
+}
+- (void)webViewWebContentProcessDidTerminate:(WKWebView *)view {
+    [self notice:@"网页内容进程已终止，请重新加载。"];
+}
+- (void)webViewDidClose:(WKWebView *)view {
+    [self closePopup];
+}
+- (void)webView:(WKWebView *)view runJavaScriptAlertPanelWithMessage:(NSString *)message
+    initiatedByFrame:(WKFrameInfo *)frame completionHandler:(void (^)(void))completion {
+    if (self.closing || !self.window) { ZW_COMPLETE(); return; }
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.alertStyle = NSAlertStyleInformational;
+    alert.messageText = message ?: @"";
+    NSString *origin = zw_frame_origin(frame);
+    if (origin.length) alert.informativeText = origin;
+    [alert addButtonWithTitle:@"好"];
+    ZWWebPendingRequest *request = [self enqueueKind:ZWWebRequestAlert origin:origin message:message defaultText:nil realm:nil
+        completion:^(BOOL accepted, NSString *value, NSString *secret) { ZW_COMPLETE(); }];
+    if (!request) return;
+    request.presentation = alert.window;
+    uint64_t token = request.token;
+    __weak ZWWebPopupOwner *weakSelf = self;
+    [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse response) {
+        [weakSelf finishRequest:token accepted:YES value:nil secret:nil];
+    }];
+}
+- (void)webView:(WKWebView *)view runJavaScriptConfirmPanelWithMessage:(NSString *)message
+    initiatedByFrame:(WKFrameInfo *)frame completionHandler:(void (^)(BOOL))completion {
+    if (self.closing || !self.window) { ZW_COMPLETE(NO); return; }
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.alertStyle = NSAlertStyleInformational;
+    alert.messageText = message ?: @"";
+    NSString *origin = zw_frame_origin(frame);
+    if (origin.length) alert.informativeText = origin;
+    [alert addButtonWithTitle:@"确定"];
+    [alert addButtonWithTitle:@"取消"];
+    ZWWebPendingRequest *request = [self enqueueKind:ZWWebRequestConfirm origin:origin message:message defaultText:nil realm:nil
+        completion:^(BOOL accepted, NSString *value, NSString *secret) { ZW_COMPLETE(accepted); }];
+    if (!request) return;
+    request.presentation = alert.window;
+    uint64_t token = request.token;
+    __weak ZWWebPopupOwner *weakSelf = self;
+    [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse response) {
+        [weakSelf finishRequest:token accepted:response == NSAlertFirstButtonReturn value:nil secret:nil];
+    }];
+}
+- (void)webView:(WKWebView *)view runJavaScriptTextInputPanelWithPrompt:(NSString *)prompt
+    defaultText:(NSString *)defaultText initiatedByFrame:(WKFrameInfo *)frame
+    completionHandler:(void (^)(NSString *))completion {
+    if (self.closing || !self.window) { ZW_COMPLETE(nil); return; }
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.alertStyle = NSAlertStyleInformational;
+    alert.messageText = prompt ?: @"";
+    NSString *origin = zw_frame_origin(frame);
+    if (origin.length) alert.informativeText = origin;
+    NSTextField *input = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 280, 22)];
+    input.stringValue = defaultText ?: @"";
+    alert.accessoryView = input;
+    [alert addButtonWithTitle:@"确定"];
+    [alert addButtonWithTitle:@"取消"];
+    ZWWebPendingRequest *request = [self enqueueKind:ZWWebRequestPrompt origin:origin message:prompt defaultText:defaultText realm:nil
+        completion:^(BOOL accepted, NSString *value, NSString *secret) { ZW_COMPLETE(accepted ? (value ?: @"") : nil); }];
+    if (!request) return;
+    request.presentation = alert.window;
+    [alert.window setInitialFirstResponder:input];
+    uint64_t token = request.token;
+    __weak ZWWebPopupOwner *weakSelf = self;
+    [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse response) {
+        BOOL accepted = response == NSAlertFirstButtonReturn;
+        [weakSelf finishRequest:token accepted:accepted value:accepted ? input.stringValue : nil secret:nil];
+    }];
+}
+- (void)webView:(WKWebView *)view runOpenPanelWithParameters:(WKOpenPanelParameters *)parameters
+    initiatedByFrame:(WKFrameInfo *)frame completionHandler:(void (^)(NSArray<NSURL *> *))completion {
+    [self notice:@"暂不支持上传文件。"];
+    ZW_COMPLETE(nil);
+}
+- (WKWebView *)webView:(WKWebView *)view createWebViewWithConfiguration:(WKWebViewConfiguration *)configuration
+    forNavigationAction:(WKNavigationAction *)action windowFeatures:(WKWindowFeatures *)features {
+    if (!self.closing) [self notice:@"暂不支持此网页弹窗。"];
+    return nil;
+}
+- (void)webView:(WKWebView *)view didReceiveAuthenticationChallenge:(NSURLAuthenticationChallenge *)challenge
+    completionHandler:(void (^)(NSURLSessionAuthChallengeDisposition, NSURLCredential *))completion {
+    NSURLProtectionSpace *space = challenge.protectionSpace;
+    if ([space.authenticationMethod isEqualToString:NSURLAuthenticationMethodServerTrust]) {
+        SecTrustRef trust = space.serverTrust;
+        NSURL *target = self.pendingURL ?: self.webView.URL;
+        NSString *origin = zw_origin(space.protocol, space.host, space.port);
+        BOOL sameOrigin = target && [origin.lowercaseString isEqualToString:zw_url_origin(target).lowercaseString];
+        if (!self.tlsReview || !trust || space.isProxy || challenge.previousFailureCount || !sameOrigin ||
+            ![target.scheme.lowercaseString isEqualToString:@"https"] || space.port < 1 || space.port > UINT16_MAX) {
+            ZW_COMPLETE(NSURLSessionAuthChallengePerformDefaultHandling, nil);
+            return;
+        }
+        id retainedTrust = (__bridge id)trust;
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.alertStyle = NSAlertStyleWarning;
+        alert.messageText = @"无法验证网站证书";
+        alert.informativeText = [NSString stringWithFormat:@"%@:%ld\n继续访问仅对本次有效。", space.host ?: @"", (long)space.port];
+        [alert addButtonWithTitle:@"继续访问（本次）"];
+        [alert addButtonWithTitle:@"使用系统验证"];
+        [alert addButtonWithTitle:@"取消"];
+        ZWWebPendingRequest *request = [self enqueueKind:ZWWebRequestServerTrust origin:origin message:@"无法验证网站证书" defaultText:nil realm:nil
+            completion:^(BOOL accepted, NSString *value, NSString *secret) {
+                if (accepted && [value isEqualToString:@"exception"]) {
+                    NSURLCredential *credential = [NSURLCredential credentialForTrust:(__bridge SecTrustRef)retainedTrust];
+                    ZW_COMPLETE(NSURLSessionAuthChallengeUseCredential, credential);
+                } else if (accepted && [value isEqualToString:@"system"]) {
+                    ZW_COMPLETE(NSURLSessionAuthChallengePerformDefaultHandling, nil);
+                } else {
+                    ZW_COMPLETE(NSURLSessionAuthChallengeCancelAuthenticationChallenge, nil);
+                }
+            }];
+        if (!request) return;
+        request.presentation = alert.window;
+        uint64_t token = request.token;
+        __weak ZWWebPopupOwner *weakSelf = self;
+        [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse response) {
+            NSString *choice = response == NSAlertFirstButtonReturn ? @"exception"
+                : (response == NSAlertSecondButtonReturn ? @"system" : nil);
+            [weakSelf finishRequest:token accepted:choice != nil value:choice secret:nil];
+        }];
+        return;
+    }
+    BOOL passwordAuth = [space.authenticationMethod isEqualToString:NSURLAuthenticationMethodHTTPBasic]
+        || [space.authenticationMethod isEqualToString:NSURLAuthenticationMethodHTTPDigest];
+    if (!passwordAuth || space.isProxy) {
+        ZW_COMPLETE(NSURLSessionAuthChallengePerformDefaultHandling, nil);
+        return;
+    }
+    if (challenge.previousFailureCount >= 3) {
+        [self notice:@"网站认证失败，请重新加载后重试。"];
+        ZW_COMPLETE(NSURLSessionAuthChallengeCancelAuthenticationChallenge, nil);
+        return;
+    }
+    if (self.closing || !self.window) {
+        ZW_COMPLETE(NSURLSessionAuthChallengeCancelAuthenticationChallenge, nil);
+        return;
+    }
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.alertStyle = NSAlertStyleInformational;
+    alert.messageText = challenge.previousFailureCount ? @"用户名或密码不正确，请重试。" : @"此网站需要用户名和密码。";
+    if (space.realm.length) alert.informativeText = space.realm;
+    NSView *accessory = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 280, 52)];
+    NSTextField *username = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 30, 280, 22)];
+    username.placeholderString = @"用户名";
+    NSSecureTextField *password = [[NSSecureTextField alloc] initWithFrame:NSMakeRect(0, 0, 280, 22)];
+    password.placeholderString = @"密码";
+    [accessory addSubview:username];
+    [accessory addSubview:password];
+    alert.accessoryView = accessory;
+    [alert addButtonWithTitle:@"登录"];
+    [alert addButtonWithTitle:@"取消"];
+    ZWWebPendingRequest *request = [self enqueueKind:ZWWebRequestHTTPAuth origin:zw_origin(space.protocol, space.host, space.port)
+        message:alert.messageText defaultText:nil realm:space.realm
+        completion:^(BOOL accepted, NSString *value, NSString *secret) {
+            NSURLCredential *credential = accepted ? [NSURLCredential credentialWithUser:value ?: @""
+                password:secret ?: @"" persistence:NSURLCredentialPersistenceNone] : nil;
+            ZW_COMPLETE(accepted ? NSURLSessionAuthChallengeUseCredential : NSURLSessionAuthChallengeCancelAuthenticationChallenge, credential);
+        }];
+    if (!request) return;
+    request.presentation = alert.window;
+    [alert.window setInitialFirstResponder:username];
+    uint64_t token = request.token;
+    __weak ZWWebPopupOwner *weakSelf = self;
+    [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse response) {
+        BOOL accepted = response == NSAlertFirstButtonReturn;
+        [weakSelf finishRequest:token accepted:accepted value:username.stringValue secret:password.stringValue];
+    }];
+}
+@end
+
+@implementation ZWWebSurfaceOwner
+- (void)dealloc {
+#ifdef ZW_WEB_SURFACE_ACCEPTANCE
+    --zw_live_surface_owners;
+#endif
+    for (ZWWebPopupOwner *popup in [self.popups copy]) {
+        popup.surface = nil;
+        [popup closePopup];
+    }
+    [self.popups removeAllObjects];
+}
+- (void)forgetPopup:(ZWWebPopupOwner *)popup {
+    if (popup) [self.popups removeObjectIdenticalTo:popup];
+}
+- (void)closeAllPopups {
+    // This data-store/proxy generation is being retired. A completion can
+    // synchronously invoke WebKit again, and the old parent view can survive
+    // until reconnection. Neither may create another child of this surface.
+    self.popupsRetired = YES;
+    for (ZWWebPopupOwner *popup in [self.popups copy]) [popup closePopup];
+    [self.popups removeAllObjects];
+}
+- (BOOL)popupTlsReview {
+    return self.tlsReview;
+}
 - (void)installWebView:(WKWebViewConfiguration *)configuration {
     self.webView = [[WKWebView alloc] initWithFrame:NSZeroRect configuration:configuration];
     self.webView.navigationDelegate = self;
@@ -358,18 +1087,20 @@ static NSString *zw_bounded_text(NSString *text, NSUInteger maxBytes) {
         ZW_COMPLETE(WKNavigationActionPolicyAllow);
         return;
     }
-    BOOL allowed = zw_is_web_url(action.request.URL);
+    BOOL targetless = action.targetFrame == nil;
+    BOOL allowed = targetless ? zw_is_popup_initial_url(action.request.URL) : zw_is_web_url(action.request.URL);
     BOOL isGet = [action.request.HTTPMethod isEqualToString:@"GET"];
     if (allowed && action.targetFrame) {
         self.mainFrameURL = action.request.URL;
         self.pendingGet = isGet;
         if (!self.committed) self.activeGet = isGet;
     }
-    ZW_COMPLETE(allowed && action.targetFrame ? WKNavigationActionPolicyAllow : WKNavigationActionPolicyCancel);
-    if (allowed && !action.targetFrame && action.navigationType == WKNavigationTypeLinkActivated && isGet) {
-        [self observeNavigation:[view loadRequest:action.request] explicitGet:YES];
-    } else if (!action.targetFrame || !allowed) {
-        [self notice:!action.targetFrame ? @"暂不支持此网页弹窗。" : @"暂不支持打开此类型的链接。"
+    // A targetless action is the WebKit hand-off to
+    // webView:createWebViewWithConfiguration:...; allow it so the child
+    // window can be created with the configuration WebKit supplied.
+    ZW_COMPLETE(allowed ? WKNavigationActionPolicyAllow : WKNavigationActionPolicyCancel);
+    if (!allowed) {
+        [self notice:targetless ? @"暂不支持此网页弹窗。" : @"暂不支持打开此类型的链接。"
             origin:zw_frame_origin(action.sourceFrame)];
     }
 }
@@ -458,8 +1189,32 @@ static NSString *zw_bounded_text(NSString *text, NSUInteger maxBytes) {
 }
 - (WKWebView *)webView:(WKWebView *)view createWebViewWithConfiguration:(WKWebViewConfiguration *)configuration
     forNavigationAction:(WKNavigationAction *)action windowFeatures:(WKWindowFeatures *)features {
-    [self notice:@"暂不支持此网页弹窗。" origin:zw_frame_origin(action.sourceFrame)];
-    return nil;
+    // WebKit hands us the exact configuration for the child. Reusing it keeps
+    // window.opener, the non-persistent data store and the parent proxy intact.
+    if (self.closing || self.popupsRetired) return nil;
+    if (action.request.URL && !zw_is_popup_initial_url(action.request.URL)) {
+        [self notice:@"暂不支持打开此类型的链接。" origin:zw_frame_origin(action.sourceFrame)];
+        return nil;
+    }
+    if (zw_live_popup_count(self) >= zw_max_popups_per_session) {
+        [self notice:@"已达到单会话子窗口数量上限。" origin:zw_frame_origin(action.sourceFrame)];
+        return nil;
+    }
+    WKWebsiteDataStore *store = self.webView.configuration.websiteDataStore;
+    if (!store || store.isPersistent || configuration.websiteDataStore != store) {
+        [self notice:@"无法继承此网页会话的连接配置。" origin:zw_frame_origin(action.sourceFrame)];
+        return nil;
+    }
+    ZWWebPopupOwner *popup = [[ZWWebPopupOwner alloc] initWithSurface:self configuration:configuration
+        action:action features:features];
+    if (!popup) {
+        [self notice:@"无法创建网页子窗口。" origin:zw_frame_origin(action.sourceFrame)];
+        return nil;
+    }
+    [self.popups addObject:popup];
+    [popup present];
+    [self notifyChanged];
+    return popup.webView;
 }
 - (void)webView:(WKWebView *)view didReceiveAuthenticationChallenge:(NSURLAuthenticationChallenge *)challenge
     completionHandler:(void (^)(NSURLSessionAuthChallengeDisposition, NSURLCredential *))completion {
@@ -557,6 +1312,8 @@ static ZWWebSurfaceOwner *zw_surface_owner(void) {
 #endif
     owner.retiredNavigations = [NSHashTable weakObjectsHashTable];
     owner.requests = [NSMutableArray array];
+    owner.popups = [NSMutableArray array];
+    owner.popupOwnerText = @"关联自: 浏览器";
     owner.clipView = [[ZWWebClipView alloc] initWithFrame:NSZeroRect];
     owner.clipView.wantsLayer = YES;
     owner.clipView.layer.masksToBounds = YES;
@@ -681,10 +1438,11 @@ void zw_web_surface_release_focus(ZWWebSurface *surface) {
 void zw_web_surface_destroy(ZWWebSurface *surface) {
     if (!NSThread.isMainThread || !surface) return;
     @autoreleasepool {
-        zw_web_surface_detach(surface);
         ZWWebSurfaceOwner *owner = (__bridge_transfer ZWWebSurfaceOwner *)surface;
         owner.closing = YES;
         owner.changed = NULL;
+        [owner closeAllPopups];
+        zw_web_surface_detach(surface);
         [owner cancelRequests];
         owner.webView.navigationDelegate = nil;
         owner.webView.UIDelegate = nil;
@@ -831,7 +1589,9 @@ int zw_web_surface_copy_request(ZWWebSurface *surface, ZWWebRequest *result) {
 
 int zw_web_surface_set_tls_review(ZWWebSurface *surface, int enabled) {
     if (!NSThread.isMainThread || !surface) return 0;
-    ((__bridge ZWWebSurfaceOwner *)surface).tlsReview = enabled != 0;
+    ZWWebSurfaceOwner *owner = (__bridge ZWWebSurfaceOwner *)surface;
+    owner.tlsReview = enabled != 0;
+    for (ZWWebPopupOwner *popup in owner.popups) popup.tlsReview = enabled != 0;
     return 1;
 }
 
@@ -912,5 +1672,79 @@ char *zw_web_surface_copy_title(ZWWebSurface *surface) {
     @autoreleasepool {
         const char *value = ((__bridge ZWWebSurfaceOwner *)surface).webView.title.UTF8String;
         return value ? strdup(value) : NULL;
+    }
+}
+
+// Closing a popup can invoke WebKit completions before the registry removal.
+// Public accessors therefore skip closing entries and index only live windows.
+static ZWWebPopupOwner *zw_live_popup(ZWWebSurfaceOwner *owner, size_t index) {
+    for (ZWWebPopupOwner *popup in owner.popups) {
+        if (popup.closing || !popup.window) continue;
+        if (index == 0) return popup;
+        index -= 1;
+    }
+    return nil;
+}
+
+static size_t zw_live_popup_count(ZWWebSurfaceOwner *owner) {
+    size_t count = 0;
+    for (ZWWebPopupOwner *popup in owner.popups) {
+        if (!popup.closing && popup.window) count += 1;
+    }
+    return count;
+}
+
+size_t zw_web_surface_popup_count(ZWWebSurface *surface) {
+    if (!NSThread.isMainThread || !surface) return 0;
+    @autoreleasepool {
+        return zw_live_popup_count((__bridge ZWWebSurfaceOwner *)surface);
+    }
+}
+
+int zw_web_surface_focus_popup(ZWWebSurface *surface, size_t index) {
+    if (!NSThread.isMainThread || !surface) return 0;
+    @autoreleasepool {
+        ZWWebSurfaceOwner *owner = (__bridge ZWWebSurfaceOwner *)surface;
+        if (owner.closing) return 0;
+        ZWWebPopupOwner *popup = zw_live_popup(owner, index);
+        if (!popup) return 0;
+        if (popup.window.isMiniaturized) [popup.window deminiaturize:nil];
+        [popup.window makeKeyAndOrderFront:nil];
+        [popup.window orderFrontRegardless];
+        [NSApp activateIgnoringOtherApps:YES];
+        [popup refreshToolbar];
+        return 1;
+    }
+}
+
+char *zw_web_surface_copy_popup_title(ZWWebSurface *surface, size_t index) {
+    if (!NSThread.isMainThread || !surface) return NULL;
+    @autoreleasepool {
+        ZWWebPopupOwner *popup = zw_live_popup((__bridge ZWWebSurfaceOwner *)surface, index);
+        if (!popup) return NULL;
+        NSString *title = popup.webView.title.length ? popup.webView.title : popup.window.title;
+        const char *value = (title ?: @"").UTF8String;
+        return value ? strdup(value) : NULL;
+    }
+}
+
+void zw_web_surface_close_popups(ZWWebSurface *surface) {
+    if (!NSThread.isMainThread || !surface) return;
+    @autoreleasepool {
+        [(__bridge ZWWebSurfaceOwner *)surface closeAllPopups];
+    }
+}
+
+int zw_web_surface_set_popup_context(ZWWebSurface *surface, const uint8_t *label, size_t label_len) {
+    if (!NSThread.isMainThread || !surface || (!label && label_len) || label_len > 1024) return 0;
+    @autoreleasepool {
+        NSString *text = label_len ? [[NSString alloc] initWithBytes:label length:label_len encoding:NSUTF8StringEncoding] : nil;
+        if (label_len && !text) return 0;
+        ZWWebSurfaceOwner *owner = (__bridge ZWWebSurfaceOwner *)surface;
+        NSString *value = zw_bounded_text(text, 1024);
+        if (!value.length) value = @"关联自: 浏览器";
+        owner.popupOwnerText = value;
+        for (ZWWebPopupOwner *popup in owner.popups) [popup updateOwnerText:value];
+        return 1;
     }
 }

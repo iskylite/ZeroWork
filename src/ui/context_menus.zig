@@ -39,6 +39,8 @@ pub const Action = enum {
     close_others,
     start_background_socks,
     manage_background_socks,
+    // V0.8: standalone AI session opened into the current group.
+    open_ai_in_group,
 };
 
 pub const Item = struct {
@@ -169,6 +171,7 @@ const tab_menu = [_]Item{
     .{ .action = .save_host, .label = "保存连接配置", .icon = "save" },
     .{ .action = .view_jump_chain, .label = "通信链路", .icon = "network" },
     .{ .action = .open_theme, .label = "全局主题", .icon = "palette" },
+    .{ .action = .open_ai_in_group, .label = "在当前会话组打开 AI 会话", .icon = "sparkles" },
     .{ .action = .export_session, .label = "导出记录", .icon = "download" },
     .{ .action = .close_others, .label = "关闭其他页签", .icon = "x" },
     .{ .action = .close_session, .label = "断开并关闭", .icon = "⏻", .shortcut = "⌘W", .danger = true },
@@ -182,6 +185,7 @@ const local_tab = [_]Item{
     .{ .action = .tab_color, .label = "页签颜色", .icon = "palette" },
     .{ .action = .join_session_group, .label = "加入会话组…", .icon = "group" },
     .{ .action = .duplicate_into_group, .label = "复制并创建会话组", .icon = "panels-top-left" },
+    .{ .action = .open_ai_in_group, .label = "在当前会话组打开 AI 会话", .icon = "sparkles" },
     .{ .action = .command_history, .label = "命令历史", .icon = "list-restart" },
     .{ .action = .history, .label = "当前会话历史", .icon = "history" },
     .{ .action = .search, .label = "搜索终端", .icon = "search", .shortcut = "⌘F" },
@@ -199,6 +203,7 @@ const local_terminal = [_]Item{
     .{ .action = .search, .label = "在终端中搜索", .icon = "search", .shortcut = "⌘F", .separator_before = true },
     .{ .action = .export_selection, .label = "导出选中内容…", .icon = "download" },
     .{ .action = .duplicate_into_group, .label = "复制并创建会话组", .icon = "panels-top-left", .separator_before = true },
+    .{ .action = .open_ai_in_group, .label = "在当前会话组打开 AI 会话", .icon = "sparkles" },
 };
 const local_terminal_ended = local_terminal ++ [_]Item{
     .{ .action = .close_session, .label = "关闭本地会话", .icon = "x", .separator_before = true, .danger = true },
@@ -207,17 +212,18 @@ const local_terminal_ended = local_terminal ++ [_]Item{
 test "local menus expose current local capabilities without remote or future operations" {
     for ([_]Kind{ .tab, .session_ended }) |kind| {
         const list = items(kind, .{ .local_session = true });
-        try std.testing.expectEqual(@as(usize, 11), list.len);
+        try std.testing.expectEqual(@as(usize, 12), list.len);
         try std.testing.expectEqual(Action.new_tab, list[0].action);
         try std.testing.expectEqual(Action.clone_session, list[1].action);
         try std.testing.expect(list[1].shortcut == null);
         try std.testing.expectEqual(Action.tab_color, list[3].action);
         try std.testing.expectEqual(Action.join_session_group, list[4].action);
         try std.testing.expectEqual(Action.duplicate_into_group, list[5].action);
-        try std.testing.expectEqual(Action.command_history, list[6].action);
-        try std.testing.expectEqual(Action.history, list[7].action);
-        try std.testing.expectEqual(Action.search, list[8].action);
-        try std.testing.expectEqual(Action.export_session, list[9].action);
+        try std.testing.expectEqual(Action.open_ai_in_group, list[6].action);
+        try std.testing.expectEqual(Action.command_history, list[7].action);
+        try std.testing.expectEqual(Action.history, list[8].action);
+        try std.testing.expectEqual(Action.search, list[9].action);
+        try std.testing.expectEqual(Action.export_session, list[10].action);
         for (list) |item| try std.testing.expect(item.action != .edit_host and item.action != .view_jump_chain and item.action != .reconnect);
     }
     const context: Context = .{ .local_session = true };
@@ -231,6 +237,7 @@ test "local menus expose current local capabilities without remote or future ope
     try std.testing.expectEqual(Action.history, terminal[6].action);
     try std.testing.expectEqual(Action.search, terminal[7].action);
     try std.testing.expectEqual(Action.export_selection, terminal[8].action);
+    try std.testing.expectEqual(Action.open_ai_in_group, terminal[10].action);
 }
 
 test "new-window action stays unavailable until shared application host supports it" {
@@ -251,6 +258,7 @@ const terminal_selection = [_]Item{
     .{ .action = .history, .label = "历史回溯", .icon = "📜", .shortcut = "@log" },
     .{ .action = .search, .label = "在终端中搜索", .icon = "🔍", .shortcut = "⌘F", .separator_before = true },
     .{ .action = .export_selection, .label = "导出选中内容…", .icon = "⇪" },
+    .{ .action = .open_ai_in_group, .label = "在当前会话组打开 AI 会话", .icon = "✨", .separator_before = true },
 };
 
 const terminal_empty = [_]Item{
@@ -266,6 +274,7 @@ const terminal_empty = [_]Item{
     .{ .action = .history, .label = "历史回溯", .icon = "📜", .shortcut = "@log" },
     .{ .action = .search, .label = "在终端中搜索", .icon = "🔍", .shortcut = "⌘F", .separator_before = true },
     .{ .action = .export_selection, .label = "导出选中内容…", .icon = "⇪" },
+    .{ .action = .open_ai_in_group, .label = "在当前会话组打开 AI 会话", .icon = "✨", .separator_before = true },
 };
 
 const terminal_ended = [_]Item{
@@ -326,7 +335,7 @@ test "menu actions respect selection and session context" {
 test "context menus keep terminal and host actions separate" {
     const terminal = items(.terminal, .{});
     const host = items(.host_asset, .{});
-    try std.testing.expectEqual(@as(usize, 12), terminal.len);
+    try std.testing.expectEqual(@as(usize, 13), terminal.len);
     try std.testing.expectEqual(Action.duplicate_into_group, terminal[0].action);
     try std.testing.expectEqual(Action.copy, terminal[2].action);
     try std.testing.expectEqual(Action.new_tab, host[0].action);
@@ -336,7 +345,7 @@ test "context menus keep terminal and host actions separate" {
 
 test "tab menu carries session lifecycle actions, disjoint from text ops" {
     const tab = items(.tab, .{});
-    try std.testing.expectEqual(@as(usize, 14), tab.len);
+    try std.testing.expectEqual(@as(usize, 15), tab.len);
     try std.testing.expectEqual(Action.rename_tab, tab[0].action);
     // Terminal text operations never appear on the tab menu (zero-overlap rule).
     for (tab) |item| {
@@ -345,8 +354,8 @@ test "tab menu carries session lifecycle actions, disjoint from text ops" {
         try std.testing.expect(item.action != .search);
     }
     // Danger styling on disconnect+close.
-    try std.testing.expect(tab[13].danger);
-    try std.testing.expectEqual(Action.close_session, tab[13].action);
+    try std.testing.expect(tab[14].danger);
+    try std.testing.expectEqual(Action.close_session, tab[14].action);
     // "Close others" requires multiple open tabs.
     try std.testing.expect(!isEnabled(.close_others, .{ .multi_tabs = false }));
     try std.testing.expect(isEnabled(.close_others, .{ .multi_tabs = true }));

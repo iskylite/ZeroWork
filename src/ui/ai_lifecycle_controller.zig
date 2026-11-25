@@ -170,6 +170,36 @@ pub const Controller = struct {
             },
         };
     }
+
+    /// Explicit independent-AI selections permit execution and observation on
+    /// the chosen connection, not lifecycle actions such as closing, moving,
+    /// reconnecting or provisioning it. Check both the frozen request handle
+    /// and the current owning tab, so a reused numeric ID grants nothing.
+    pub fn inExecutionBinding(self: *Controller, handle_: identity.SessionHandle) bool {
+        if (self.inBinding(handle_)) return true;
+        if (self.authority.binding != .session) return false;
+        const captured = self.bridge.captured_scope orelse return false;
+        if (!captured.explicit_inventory or !captured.owner.eql(self.authority.binding)) return false;
+        const id = @backingInt(handle_.session_id);
+        _ = captured.validate(&.{id}) catch return false;
+        const source = self.bridge.sourceOwner(id) orelse return false;
+        if (!source.eql(handle_)) return false;
+        if (self.authority.child_origin) |origin| {
+            const service = &(self.app.domain.ai orelse return false).service;
+            _ = service.validateAuthority(self.authority) catch return false;
+            const agent = service.store.agent(origin.agent) orelse return false;
+            for (agent.targets) |target| {
+                if (target.eql(handle_)) break;
+            } else return false;
+        }
+        for (self.app.workspace.tabs.items) |tab| {
+            if (tab.content_owner != .session or @backingInt(tab.content_owner.session.session_id) != self.authority.binding.session) continue;
+            if (tab.archived or tab.closing or !std.mem.eql(u8, tab.plugin_protocol_id, @import("../plugins/ai/plugin.zig").id)) return false;
+            for (self.roster.groups.items) |group| if (group.contains(tab.id)) return false;
+            return tab.ai_associated_targets.contains(handle_);
+        }
+        return false;
+    }
     /// Closed content requires an exact host close receipt from this
     /// conversation and binding, including receipts from an earlier Task. Historical ownership alone never authorizes a live outsider.
     pub fn permitsHistoricalOwner(self: *Controller, handle_: identity.SessionHandle) bool {

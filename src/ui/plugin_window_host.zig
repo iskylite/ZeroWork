@@ -609,8 +609,8 @@ pub const Host = struct {
         const show = visible and !settings_visible and slot.isDisplayedInTree() and rect.w > 0 and rect.h > 0;
         if (!show and binding.* == null) return;
         if (binding.* == null) binding.* = try surface.bind(owner, app.windowId());
-        var covers: [self.cx.overlay_stack.layers.len * 2 + 1]web_surface.Occlusion = undefined;
-        const cover_count = if (show) collectWebOcclusions(self.cx, workspace.notes_float_surface, rect, &covers) else 0;
+        var covers: [self.cx.overlay_stack.layers.len * 2 + 2]web_surface.Occlusion = undefined;
+        const cover_count = if (show) collectWebOcclusions(self.cx, workspace.notes_float_surface, workspace.mascot_occlusion, rect, &covers) else 0;
         // Entering native focus clears Zenit focus. A subsequent explicit
         // focus change to Zenit must also move the AppKit first responder.
         if (self.cx.focus_manager.getFocused() != null) try surface.releaseFocus(binding.*.?);
@@ -783,7 +783,7 @@ pub const Host = struct {
     }
 };
 
-fn collectWebOcclusions(cx: *const ui.Cx, notes: ?*ui.Node, slot: ui.ComputedRect, covers: []web_surface.Occlusion) usize {
+fn collectWebOcclusions(cx: *const ui.Cx, notes: ?*ui.Node, mascot: ?@import("workspace.zig").MascotOcclusion, slot: ui.ComputedRect, covers: []web_surface.Occlusion) usize {
     var count: usize = 0;
     var covered_notes = false;
     for (&cx.overlay_stack.layers) |*maybe| if (maybe.*) |*layer| {
@@ -797,6 +797,12 @@ fn collectWebOcclusions(cx: *const ui.Cx, notes: ?*ui.Node, slot: ui.ComputedRec
         }
     };
     if (!covered_notes) if (notes) |node| appendWebOcclusion(node, slot, covers, &count);
+    if (mascot) |provider| if (provider.rect(provider.context)) |rect| {
+        if (overlay_bounds.intersects(slot, rect) and count < covers.len) {
+            covers[count] = .{ .x = rect.x, .y = rect.y, .w = rect.w, .h = rect.h };
+            count += 1;
+        }
+    };
     return count;
 }
 

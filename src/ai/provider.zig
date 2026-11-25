@@ -117,6 +117,8 @@ pub const Message = struct {
     skill: ?SkillReference = null,
     /// Offsets of host-issued locators only, never part of provider JSON.
     file_reference_spans: []const @import("../host/local_file_reference.zig").Span = &.{},
+    /// Durable reminder only. It never contains an attachment or access grant.
+    workspace_reselect_required: bool = false,
     images: []const @import("image_attachments.zig").ContentRef = &.{},
     /// Retained evidence, never serialized as image input. Offload decisions
     /// belong to this occurrence and survive history copies/model changes.
@@ -190,6 +192,11 @@ pub const SkillCatalogStatus = struct {
     }
 };
 
+pub const WorkspaceBodyGate = struct {
+    context: *anyopaque,
+    begin: *const fn (*anyopaque) anyerror!void,
+};
+
 pub const ChatRequest = struct {
     thinking: ?bool = null,
     native_effort: bool = false,
@@ -221,6 +228,8 @@ pub const ChatRequest = struct {
     /// Stream inactivity limit, reset by received bytes.
     idle_timeout_ms: u32 = 60_000,
     cancel: ?*CancelToken = null,
+    /// Optional one-shot check at the native transport's request-body edge.
+    workspace_body_gate: ?WorkspaceBodyGate = null,
     /// Transport writes a retry hint for this attempt; owned by the caller's
     /// worker thread, and never exposed as a pointer into a response header.
     retry_after_ms: ?*?u32 = null,

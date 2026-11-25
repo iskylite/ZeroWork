@@ -14,6 +14,9 @@ const SessionTab = @import("workspace.zig").SessionTab;
 const inventory = @import("../ai/inventory_grants.zig");
 
 pub const Options = struct {
+    /// Caller-verified, window-local standalone AI selections. An empty
+    /// slice is deliberately different from an ordinary attached assistant.
+    explicit_session_ids: ?[]const u64 = null,
     child_work_group: ?u32 = null,
     /// Policies captured when this Task was prepared, independent of defaults
     /// or composer selections made while its worker is still running.
@@ -90,7 +93,10 @@ fn captureSnapshot(app: *Application, roster: ?*@import("group_model.zig").Roste
         const in_binding = if (group) |value| blk: {
             for (value.members.items) |member| if (member.active and member.pane_id == tab.id) break :blk true;
             break :blk false;
-        } else @backingInt(handle.session_id) == binding.session;
+        } else if (options.explicit_session_ids) |ids|
+            !tab.archived and !tab.closing and std.mem.indexOfScalar(u64, ids, @backingInt(handle.session_id)) != null
+        else
+            @backingInt(handle.session_id) == binding.session;
         const owned_by_child = app.childOwnsReadySession(context, handle);
         if (!in_binding and !owned_by_child) continue;
         var basic = basicMetadata(app, tab, a);

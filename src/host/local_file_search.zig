@@ -177,7 +177,7 @@ const Rules = struct {
     }
 };
 
-fn ignoredByDefault(name: []const u8, directory: bool) bool {
+pub fn ignoredByDefault(name: []const u8, directory: bool) bool {
     if (std.mem.eql(u8, name, ".git") or std.mem.eql(u8, name, ".DS_Store")) return true;
     if (!directory) return false;
     for ([_][]const u8{ ".zig-cache", "zig-cache", "zig-out", "node_modules", ".cache", "__pycache__", ".pytest_cache", ".venv", "target", "build", "dist" }) |excluded| {

@@ -91,4 +91,16 @@ ZWWebSurfaceState zw_web_surface_state(ZWWebSurface *surface);
 char *zw_web_surface_copy_url(ZWWebSurface *surface);
 char *zw_web_surface_copy_title(ZWWebSurface *surface);
 
+// Native child windows created through WebKit's createWebView callback. The
+// parent surface owns them; indices are positional and compact after close.
+// All calls are main-thread only. Titles are UTF-8 copies freed with free().
+size_t zw_web_surface_popup_count(ZWWebSurface *surface);
+int zw_web_surface_focus_popup(ZWWebSurface *surface, size_t index);
+char *zw_web_surface_copy_popup_title(ZWWebSurface *surface, size_t index);
+// Permanently stop accepting popups on this surface generation and close its
+// current children synchronously. A fresh surface restores admission.
+void zw_web_surface_close_popups(ZWWebSurface *surface);
+// The label is the popup badge text, e.g. "关联自: BMC 控制台 · SSH 代理".
+int zw_web_surface_set_popup_context(ZWWebSurface *surface, const uint8_t *label, size_t label_len);
+
 #endif

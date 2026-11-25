@@ -6,6 +6,7 @@ const hint = @import("../../ui/control_hint.zig");
 const session_icon = @import("../../ui/session_icon.zig");
 const config = @import("config.zig");
 const books = @import("bookmarks.zig");
+const popup_contract = @import("popup.zig");
 const api = @import("page_service.zig");
 const web_surface = @import("../../host/web_surface.zig");
 const S = @import("renderer_styles.zig");
@@ -58,6 +59,17 @@ const BookmarkControl = struct {
     }
 };
 
+const PopupControl = struct {
+    view: *View,
+    index: usize,
+    label: *ui.Signal([]const u8) = undefined,
+    wrapper: *ui.Node = undefined,
+
+    fn activate(self: *PopupControl) void {
+        self.view.focusPopup(self.index);
+    }
+};
+
 const View = struct {
     request: contract.ContentMount,
     page: api.Page,
@@ -90,6 +102,12 @@ const View = struct {
     star_icon: *ui.Signal(?ui.SvgAsset) = undefined,
     star_label: *ui.Signal([]const u8) = undefined,
     star_button: *ui.Node = undefined,
+    popups_button: *ui.Node = undefined,
+    popups_label: *ui.Signal([]const u8) = undefined,
+    popups_open: *ui.Signal(bool) = undefined,
+    popup_controls: [popup_contract.max_popups]*PopupControl = undefined,
+    popups_visible: bool = false,
+    popups_count: usize = 0,
     more_button: *ui.Node = undefined,
     copy_disabled: *ui.Signal(bool) = undefined,
     native_console_disabled: *ui.Signal(bool) = undefined,
@@ -167,7 +185,8 @@ const View = struct {
         if (self.token == null) self.token = self.page.attach() catch return .done;
         const status_changed = self.refresh() catch return .done;
         const bookmarks_changed = self.projectBookmarks();
-        return if (status_changed or bookmarks_changed) .needs_layout else .done;
+        const popups_changed = self.projectPopups();
+        return if (status_changed or bookmarks_changed or popups_changed) .needs_layout else .done;
     }
 
     fn refresh(self: *View) !bool {
@@ -271,6 +290,34 @@ const View = struct {
         const selected = self.selected_bookmark orelse return null;
         for (self.bookmarkList()) |item| if (item.id.eql(selected)) return item;
         return null;
+    }
+
+    fn projectPopups(self: *View) bool {
+        const state = self.snapshot orelse return false;
+        const count = @min(state.popup_count, popup_contract.max_popups);
+        const visible = count != 0;
+        const changed = visible != self.popups_visible or count != self.popups_count;
+        show(self.popups_button, visible);
+        if (!visible and self.popups_open.peek()) self.popups_open.set(false);
+        if (visible) {
+            var buffer: [32]u8 = undefined;
+            self.popups_label.set(std.fmt.bufPrint(&buffer, "子窗口 {d}", .{count}) catch "子窗口");
+        }
+        for (self.popup_controls, 0..) |control, index| {
+            const row_visible = index < count;
+            show(control.wrapper, row_visible);
+            if (!row_visible) continue;
+            const title = if (index < state.popup_titles.len) state.popup_titles[index] else "";
+            if (title.len != 0) {
+                control.label.set(title);
+            } else {
+                var buffer: [32]u8 = undefined;
+                control.label.set(std.fmt.bufPrint(&buffer, "子窗口 {d}", .{index + 1}) catch "子窗口");
+            }
+        }
+        self.popups_visible = visible;
+        self.popups_count = count;
+        return changed;
     }
 
     fn projectStar(self: *View) void {
@@ -596,6 +643,18 @@ const View = struct {
         self.more_open.set(!self.more_open.peek());
     }
 
+    fn focusPopup(self: *View, index: usize) void {
+        if (self.closed or !self.active) return;
+        self.popups_open.set(false);
+        self.page.command(.{ .focus_popup = index }) catch |err| self.report(err);
+        self.request.cx.requestRedraw();
+    }
+
+    fn togglePopups(self: *View) void {
+        self.popups_open.set(!self.popups_open.peek());
+        self.request.cx.requestRedraw();
+    }
+
     fn toggleDeveloperMode(self: *View) void {
         if (self.closed or !self.active) return;
         const state = self.snapshot orelse return;
@@ -778,6 +837,7 @@ fn message(err: anyerror) []const u8 {
         error.InvalidBookmarkTitle => "请输入书签名称。",
         error.ClipboardUnavailable => "无法复制网址。",
         error.WebNativeConsoleUnavailable => "无法打开 WebKit 控制台。",
+        error.WebPopupUnavailable => "该子窗口已关闭。",
         error.InvalidUrl, error.MissingUrl, error.InvalidHost, error.InvalidPort, error.UnsupportedScheme => "请输入有效的 HTTP 或 HTTPS 网址。",
         error.ResetWarningRequired => "请确认重新连接后再打开网址。",
         else => "操作未完成，请重试。",
@@ -827,6 +887,8 @@ pub fn mount(_: ?*anyopaque, request: contract.ContentMount) !contract.RendererI
     self.star_tint = try scope.createSignal(?ui.Color, null);
     self.star_icon = try scope.createSignal(?ui.SvgAsset, ui.icons.star);
     self.star_label = try scope.createText("添加书签", .{});
+    self.popups_label = try scope.createText("", .{});
+    self.popups_open = try scope.createSignal(bool, false);
     self.copy_disabled = try scope.createSignal(bool, true);
     self.native_console_disabled = try scope.createSignal(bool, true);
     self.developer_mode_label = try scope.createText("开启开发者模式", .{});
@@ -916,6 +978,16 @@ fn buildToolbar(self: *View) !void {
     try self.address_shell.appendChild(cx.allocator, self.address.node);
     self.star_button = try iconButton(cx, scope, "web.address.bookmark", self.star_label, self.star_icon, self.star_disabled, self.star_tint, cx.on(View, self, View.star));
     try self.address_shell.appendChild(cx.allocator, self.star_button);
+    self.popups_button = try ui.widgets.Button(.{
+        .label = self.popups_label,
+        .variant = .ghost,
+        .size = .sm,
+        .base_style = S.popupBadge(),
+        .on_click = cx.on(View, self, View.togglePopups),
+    }).mount(scope, cx);
+    self.popups_button.meta.ownership.meta.test_id = "web.popups";
+    try self.address_shell.appendChild(cx.allocator, self.popups_button);
+    show(self.popups_button, false);
 
     self.strip = try ui.box(cx, .{ .width = .{ .fit = .{} }, .height = .{ .px = 32 }, .flex_shrink = 0, .direction = .row, .gap = S.bookmark_gap, .align_items = .center }, .{});
     self.strip.meta.ownership.meta.test_id = "web.bookmarks";
@@ -1108,6 +1180,27 @@ fn buildPopups(self: *View) !void {
     self.feedback_text = try caption(cx, "", 12, 500, false);
     self.feedback_text.setStyleInline(cx.allocator, .{ .width = .fill(), .padding = ui.Padding.all(8) });
     try feedback.content.appendChild(cx.allocator, self.feedback_text);
+
+    const popups = try makePopup(self, "web.popups.popup", self.popups_open, .{ .node = self.popups_button }, 236, null);
+    const popup_list = try ui.box(cx, .{ .width = .fill(), .direction = .column, .gap = 2, .padding = ui.Padding.all(4) }, .{});
+    try popups.content.appendChild(cx.allocator, popup_list);
+    for (&self.popup_controls, 0..) |*control, index| {
+        const row = try popups.scope.createState(PopupControl, .{
+            .view = self,
+            .index = index,
+            .label = try popups.scope.createText("", .{}),
+        });
+        control.* = row;
+        row.wrapper = try ui.widgets.Button(.{
+            .label = row.label,
+            .variant = .ghost,
+            .base_style = S.menuRow(),
+            .on_click = cx.on(PopupControl, row, PopupControl.activate),
+        }).mount(popups.scope, cx);
+        row.wrapper.meta.ownership.meta.test_id = try scopedId(popups.scope, "web.popups.item.{d}", index + 1);
+        try popup_list.appendChild(cx.allocator, row.wrapper);
+        show(row.wrapper, false);
+    }
 }
 
 fn makePopup(

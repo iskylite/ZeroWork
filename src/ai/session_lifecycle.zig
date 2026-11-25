@@ -871,7 +871,10 @@ pub const Store = struct {
         if (record.ending != null) return error.LifecycleBusy;
         if (record.child != null or self.hasBoundChildren(record.id)) return error.ChildSettlementRequired;
         for (self.agents.items) |other| if (other.role == .attached and !other.id.eql(expected.agent) and other.owner.eql(owner) and !other.closing) return error.BindingConflict;
-        if (record.binding.?.owner != .session or owner != .group or owner.group == 0) return error.InvalidBindingHandoff;
+        const from = record.binding.?.owner;
+        const forward = from == .session and owner == .group and owner.group != 0;
+        const returning = from == .group and owner == .session and owner.session != 0 and record.initial_origin != null and record.initial_origin.?.eql(owner);
+        if (!forward and !returning) return error.InvalidBindingHandoff;
         const revision = try identity.advance(record.revision);
         const target = self.agent(expected.agent).?;
         const environment = try identity.advance(target.environment);

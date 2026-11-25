@@ -11,6 +11,7 @@ const scope = @import("tool_scope.zig");
 const Manager = @import("turn_manager.zig").Manager;
 const tools = @import("tool_loop.zig");
 const stream = @import("stream_mailbox.zig");
+const workspace_text = @import("../host/workspace_text_reference.zig");
 pub const task_budget = @import("task_budget.zig");
 
 pub const Context = struct {
@@ -32,6 +33,7 @@ pub const Context = struct {
 pub const Prepared = struct {
     reasoning: ?*const @import("live_reasoning.zig").State = null,
     file_references: ?@import("../host/local_file_reference.zig").Projection = null,
+    workspace_file: ?*workspace_text.Lease = null,
     skills: ?@import("skill_context.zig").Loader = null,
     provider: provider.Provider,
     request: provider.ChatRequest,
@@ -253,6 +255,7 @@ pub const Runner = struct {
         var task_cancel: provider.CancelToken = .{ .source = .{ .context = &task_control, .poll = TaskControl.cancelled, .user_wait = TaskControl.userWait, .resource_wait = TaskControl.resourceWait } };
         request.cancel = &task_cancel;
         var projection: Projection = .{ .allocator = self.allocator, .original = prepared.provider, .manager = &self.worker.?.manager, .context = self.context.?, .historical_messages = self.historical_messages, .root = self.task_root.?, .slots = self.slots.?, .read_only = self.observation_only, .reasoning = prepared.reasoning, .file_references = prepared.file_references };
+        if (prepared.workspace_file) |lease| projection.workspace = .{ .lease = lease, .io = io, .inbox = &self.record.?.inbox, .context_window = prepared.limits.context_window };
         var skill_arena = std.heap.ArenaAllocator.init(self.allocator);
         defer skill_arena.deinit();
         projection.skills = if (prepared.skills) |loader| .{ .loader = loader, .allocator = skill_arena.allocator(), .io = io, .context_window = prepared.limits.context_window } else null;
@@ -318,13 +321,27 @@ pub const Runner = struct {
         read_only: bool = false,
         reasoning: ?*const @import("live_reasoning.zig").State = null,
         file_references: ?@import("../host/local_file_reference.zig").Projection = null,
+        workspace: ?struct { lease: *workspace_text.Lease, io: std.Io, inbox: *input.Inbox, context_window: u32 } = null,
         skills: ?@import("skill_context.zig").RequestContext = null,
+        const BodyBoundary = struct {
+            lease: *workspace_text.Lease,
+            io: std.Io,
+            inbox: *input.Inbox,
+            fence: input.Fence,
+            cancel: ?*const provider.CancelToken,
+            fn begin(raw: *anyopaque) !void {
+                const self: *BodyBoundary = @ptrCast(@alignCast(raw));
+                try self.lease.beginBody(self.io, self.inbox, self.fence, self.cancel);
+            }
+        };
         fn models(raw: *anyopaque, a: std.mem.Allocator) ![]provider.ModelInfo {
             const self: *@This() = @ptrCast(@alignCast(raw));
             return self.original.models(self.original.ctx, a);
         }
         fn chat(raw: *anyopaque, request: provider.ChatRequest, sink: *const fn (*anyopaque, provider.Delta) void, ctx: *anyopaque) !provider.ChatStats {
             const self: *@This() = @ptrCast(@alignCast(raw));
+            const workspace_index = workspaceMessage(request.messages);
+            if ((workspace_index == null) != (self.workspace == null)) return error.WorkspaceFileReselectRequired;
             var arena = std.heap.ArenaAllocator.init(self.allocator);
             defer arena.deinit();
             const a = arena.allocator();
@@ -378,11 +395,42 @@ pub const Runner = struct {
                     if (current.role == .tool and std.mem.eql(u8, current.content, tools.Loop.revoked_result_body)) message.* = current;
                 }
             };
+            var boundary: BodyBoundary = undefined;
+            if (self.workspace) |current| {
+                errdefer self.root.usage(self.context.task, null) catch {};
+                const index = workspace_index.?;
+                const bytes = try current.lease.takeForSend(a, current.io, current.inbox, self.context.fence, request.cancel);
+                // This is the ephemeral provider copy, never the inbox or the
+                // manager's retained history. The model gets no file locator.
+                const filename = try std.json.Stringify.valueAlloc(a, current.lease.relative, .{});
+                messages[index].content = try std.fmt.allocPrint(a, "{s}\n\n<workspace_text_attachment>\nrelative_path={s}\nbytes={d}\ntext:\n{s}\n</workspace_text_attachment>", .{ messages[index].content, filename, bytes.len, bytes });
+                messages[index].workspace_reselect_required = false;
+                try @import("local_text_request.zig").checkContext(projected, current.context_window);
+                try current.lease.requireCurrent(current.inbox, self.context.fence);
+                boundary = .{ .lease = current.lease, .io = current.io, .inbox = current.inbox, .fence = self.context.fence, .cancel = request.cancel };
+                projected.workspace_body_gate = .{ .context = &boundary, .begin = BodyBoundary.begin };
+            }
             const result = self.original.chat(self.original.ctx, projected, sink, ctx);
             try self.root.usage(self.context.task, if (result) |stats| stats else |_| null);
+            if (self.workspace != null) return result catch |err| switch (err) {
+                error.Cancelled, error.WorkspaceFileLocalFixtureOnly => return err,
+                else => return error.WorkspaceFileReselectRequired,
+            };
             return result;
         }
     };
+
+    /// Historical user turns may retain a reselect hint but never grant a
+    /// fresh request. Ignore assistant/tool/internal context messages.
+    fn workspaceMessage(messages: []const provider.Message) ?usize {
+        var i = messages.len;
+        while (i != 0) {
+            i -= 1;
+            if (messages[i].role == .user and messages[i].origin == .user_or_tool)
+                return if (messages[i].workspace_reselect_required) i else null;
+        }
+        return null;
+    }
     fn ensureWorker(self: *Runner) !*Worker {
         if (self.worker) |worker| return worker;
         const generation = if (self.worker_generation == 0) 1 else try identity.advance(self.worker_generation);
@@ -1262,4 +1310,41 @@ test "notes result delivery rechecks after waiting for model capacity and before
         try std.testing.expect(loop.records.items[0].host_result == null);
         try std.testing.expectEqual(@as(u64, 0), root.counters.pending_requests);
     }
+}
+
+test "workspace reference restored history cannot replay without a fresh lease" {
+    const Probe = struct {
+        calls: usize = 0,
+        fn models(_: *anyopaque, _: std.mem.Allocator) ![]provider.ModelInfo {
+            return error.UnexpectedProviderCall;
+        }
+        fn chat(raw: *anyopaque, _: provider.ChatRequest, _: *const fn (*anyopaque, provider.Delta) void, _: *anyopaque) !provider.ChatStats {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.calls += 1;
+            return error.UnexpectedProviderCall;
+        }
+        fn sink(_: *anyopaque, _: provider.Delta) void {}
+    };
+    var fixture: Probe = .{};
+    const marked = provider.Message{ .role = .user, .content = "@file: docs/guide.txt", .workspace_reselect_required = true };
+    const reply = provider.Message{ .role = .assistant, .content = "A previous answer." };
+    try std.testing.expectEqual(@as(?usize, 0), Runner.workspaceMessage(&.{ marked, reply }));
+    try std.testing.expectEqual(@as(?usize, null), Runner.workspaceMessage(&.{ marked, reply, .{ .role = .user, .content = "new unrelated question" } }));
+    var projection: Runner.Projection = undefined;
+    projection.workspace = null;
+    projection.original = .{ .ctx = &fixture, .chat = Probe.chat, .models = Probe.models };
+    const journal = @import("session_journal.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const stored = try journal.Journal.encode(a, &.{ marked, reply });
+    const serialized = try std.json.Stringify.valueAlloc(a, stored, .{});
+    try std.testing.expect(std.mem.indexOf(u8, serialized, "workspace_reselect_required") != null);
+    var refs: std.ArrayList(@import("image_attachments.zig").ContentRef) = .empty;
+    const parsed = try std.json.parseFromSliceLeaky([]journal.Message, a, serialized, .{});
+    const restored = try journal.Journal.decode(a, a, parsed, &refs);
+    // A restored answer or reconnect reaches this guard before acquiring
+    // provider quota, opening a connection, or projecting any message.
+    try std.testing.expectError(error.WorkspaceFileReselectRequired, Runner.Projection.chat(&projection, .{ .model = "fixture", .system = "", .messages = restored }, Probe.sink, &fixture));
+    try std.testing.expectEqual(@as(usize, 0), fixture.calls);
 }

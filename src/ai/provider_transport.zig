@@ -267,6 +267,7 @@ fn nativeSendStreamUnbounded(raw: *anyopaque, plan: http.RequestPlan, body: []co
     }
     var http_request = try client.request(plan.method, uri, .{ .extra_headers = headers[0..header_count], .redirect_behavior = .unhandled });
     defer http_request.deinit();
+    if (plan.workspace_body_gate) |gate| try gate.begin(gate.context);
     if (plan.method == .GET) try http_request.sendBodiless() else try http_request.sendBodyComplete(@constCast(body));
     var response = try http_request.receiveHead(&.{});
     const status: u16 = @backingInt(response.head.status);
@@ -443,6 +444,7 @@ const RequestAuth = struct {
 pub fn request(allocator: std.mem.Allocator, transport: Transport, config: provider_config.ProviderConfig, chat: provider.ChatRequest) !Response {
     if (chat.retry_after_ms) |hint| hint.* = null;
     if (chat.cancel) |token| if (token.isCancelled()) return error.Cancelled;
+    if (chat.workspace_body_gate != null and !http.isWorkspaceFixture(config)) return error.WorkspaceFileLocalFixtureOnly;
     const auth = try RequestAuth.init(allocator, config, chat.cancel);
     defer auth.deinit(allocator);
     var plan = auth.plan;
@@ -451,6 +453,7 @@ pub fn request(allocator: std.mem.Allocator, transport: Transport, config: provi
     plan.endpoint = endpoint;
     plan.timeout_ms = chat.timeout_ms;
     plan.cancel = chat.cancel;
+    plan.workspace_body_gate = chat.workspace_body_gate;
     const body = try http.requestBody(allocator, config.kind, config.chatRequest(chat), config.context_window);
     defer allocator.free(body);
     var response = try transport.send(transport.ctx, plan, body, allocator);
@@ -486,6 +489,7 @@ pub fn requestStream(allocator: std.mem.Allocator, transport: Transport, config:
         if (chat.cancel) |token| if (token.isCancelled()) return error.Cancelled;
         return .{ .status = response.status, .retry_after_ms = response.retry_after_ms };
     };
+    if (chat.workspace_body_gate != null and !http.isWorkspaceFixture(config)) return error.WorkspaceFileLocalFixtureOnly;
     const auth = try RequestAuth.init(allocator, config, chat.cancel);
     defer auth.deinit(allocator);
     var plan = auth.plan;
@@ -495,6 +499,7 @@ pub fn requestStream(allocator: std.mem.Allocator, transport: Transport, config:
     plan.timeout_ms = chat.timeout_ms;
     plan.idle_timeout_ms = chat.idle_timeout_ms;
     plan.cancel = chat.cancel;
+    plan.workspace_body_gate = chat.workspace_body_gate;
     const body = try http.requestBody(allocator, config.kind, config.chatRequest(chat), config.context_window);
     defer allocator.free(body);
     const LimitedSink = struct {

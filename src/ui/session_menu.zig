@@ -38,12 +38,13 @@ pub const Callbacks = struct {
     new_sftp: ?*const fn (*anyopaque) void = null,
     new_kvm: ?*const fn (*anyopaque) void = null,
     notes: ?*const fn (*anyopaque) void = null,
+    ai: ?*const fn (*anyopaque) void = null,
     new_web: *const fn (*anyopaque) void,
     saved: ?*const fn (*anyopaque, identity.AssetOwner) void = null,
 };
-const Action = enum(usize) { local, new_profile, new_sftp, new_kvm, new_web, notes };
-const labels = [_][]const u8{ "本地终端", "新建主机", "新建 SFTP", "新建 KVM", "新建浏览器", "我的笔记" };
-const ids = [_][]const u8{ "session.menu.local", "session.menu.new_profile", "session.menu.new_sftp", "session.menu.new_kvm", "session.menu.new_web", "session.menu.notes" };
+const Action = enum(usize) { local, new_profile, new_sftp, new_kvm, new_web, notes, ai };
+const labels = [_][]const u8{ "本地终端", "新建主机", "新建 SFTP", "新建 KVM", "新建浏览器", "我的笔记", "AI 会话" };
+const ids = [_][]const u8{ "session.menu.local", "session.menu.new_profile", "session.menu.new_sftp", "session.menu.new_kvm", "session.menu.new_web", "session.menu.notes", "session.menu.ai" };
 
 pub const View = struct {
     cx: *ui.Cx,
@@ -99,7 +100,7 @@ pub const View = struct {
         self.chrome.behavior.interaction.a11y = .{ .role = .menu, .label = "新建会话" };
         self.chrome.behavior.events.capture_context = self;
         self.chrome.behavior.events.on_event_capture = onEvent;
-        const icons = [_]ui.SvgAsset{ ui.icons.terminal, ui.icons.server, ui.icons.folder, ui.icons.monitor, ui.icons.globe, ui.icons.notebook };
+        const icons = [_]ui.SvgAsset{ ui.icons.terminal, ui.icons.server, ui.icons.folder, ui.icons.monitor, ui.icons.globe, ui.icons.notebook, ui.icons.sparkles };
         for (labels, 0..) |label, index| {
             if (index == 1) {
                 const area = try ui.widgets.ScrollArea(.{}).mount(self.scope, cx);
@@ -121,6 +122,7 @@ pub const View = struct {
             const node = try ui.widgets.Button(.{ .a11y_label = label, .variant = .ghost, .disabled = index == 0 and callbacks.local == null, .base_style = S.row(), .hover_style = self.hover_style, .on_click = cx.on(Row, action, Row.choose) }).mount(self.scope, cx);
             node.setStyleInline(cx.allocator, S.row());
             if (action.action == .notes and callbacks.notes == null) node.setDisplay(.none);
+            if (action.action == .ai and callbacks.ai == null) node.setDisplay(.none);
             @import("sidebar_view.zig").setFocusRing(node);
             node.meta.ownership.meta.test_id = ids[index];
             if (node.behavior.interaction.a11y) |*a| a.role = .menuitem;
@@ -197,7 +199,7 @@ pub const View = struct {
             .escape => self.hide(),
             .up, .down => {
                 const more_index = self.saved_rows.items.len + 1;
-                const total = more_index + labels.len - @as(usize, @intFromBool(self.callbacks.notes == null));
+                const total = more_index + labels.len - @as(usize, @intFromBool(self.callbacks.notes == null)) - @as(usize, @intFromBool(self.callbacks.ai == null));
                 const current = if (self.selected_saved) |i| i + 1 else if (self.selected_more_trigger) more_index else if (self.selected == .local) 0 else more_index + @backingInt(self.selected);
                 var next = if (key == .down) (current + 1) % total else (current + total - 1) % total;
                 if (next == 0 and self.callbacks.local == null) next = if (key == .down) 1 else total - 1;
@@ -219,7 +221,7 @@ pub const View = struct {
         return .stop;
     }
     fn activate(self: *View, action: Action) void {
-        if (!self.isOpen() or self.chosen or (action == .local and self.callbacks.local == null) or (action == .notes and self.callbacks.notes == null)) return;
+        if (!self.isOpen() or self.chosen or (action == .local and self.callbacks.local == null) or (action == .notes and self.callbacks.notes == null) or (action == .ai and self.callbacks.ai == null)) return;
         self.chosen = true;
         self.hide();
         switch (action) {
@@ -228,6 +230,7 @@ pub const View = struct {
             .new_sftp => if (self.callbacks.new_sftp) |create| create(self.callbacks.context),
             .new_kvm => if (self.callbacks.new_kvm) |create| create(self.callbacks.context),
             .notes => self.callbacks.notes.?(self.callbacks.context),
+            .ai => self.callbacks.ai.?(self.callbacks.context),
             .new_web => self.callbacks.new_web(self.callbacks.context),
         }
     }

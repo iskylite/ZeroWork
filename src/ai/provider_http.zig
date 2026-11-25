@@ -64,7 +64,33 @@ pub const RequestPlan = struct {
     timeout_ms: u32 = 60_000,
     idle_timeout_ms: ?u32 = null,
     cancel: ?*provider.CancelToken = null,
+    workspace_body_gate: ?provider.WorkspaceBodyGate = null,
 };
+
+pub fn isWorkspaceFixture(config: provider_config.ProviderConfig) bool {
+    if (config.kind != .openai_compat or config.auth != .none or config.credential_ref != null or !isLoopbackHttp(config.endpoint)) return false;
+    const uri = std.Uri.parse(config.endpoint) catch return false;
+    const host = uri.host orelse return false;
+    const value = switch (host) {
+        .raw, .percent_encoded => |name| name,
+    };
+    return uri.port != null and std.mem.eql(u8, value, "127.0.0.1");
+}
+
+test "workspace reference transport is limited to a numeric keyless local fixture" {
+    const make = struct {
+        fn config(endpoint: []const u8) provider_config.ProviderConfig {
+            return .{ .kind = .openai_compat, .endpoint = endpoint, .model = "fixture", .auth = .none };
+        }
+    };
+    try std.testing.expect(isWorkspaceFixture(make.config("http://127.0.0.1:12345/v1")));
+    for ([_][]const u8{ "http://localhost:12345", "http://127.0.0.1", "https://127.0.0.1:12345", "http://127.0.0.1:12345/#remote", "http://a@127.0.0.1:12345", "http://127.0.0.1.example.invalid:12345" }) |endpoint| {
+        try std.testing.expect(!isWorkspaceFixture(make.config(endpoint)));
+    }
+    var authenticated = make.config("http://127.0.0.1:12345/v1");
+    authenticated.auth = .{ .bearer_memory = "fake-key" };
+    try std.testing.expect(!isWorkspaceFixture(authenticated));
+}
 
 pub fn validateEndpoint(config: provider_config.ProviderConfig) !void {
     try config.validate();

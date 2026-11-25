@@ -52,6 +52,12 @@ pub const RemoteMetadata = struct {
 
     target_stat: *const fn (?*anyopaque, *ssh_session.Session, [:0]const u8) anyerror!ssh_session.SftpAttributes = targetStat,
 
+    canonical: ?*const fn (?*anyopaque, *ssh_session.Session, [:0]const u8, []u8) anyerror![]const u8 = null,
+
+    fn canonicalPath(_: ?*anyopaque, session: *ssh_session.Session, path: [:0]const u8, output: []u8) ![]const u8 {
+        try session.sftpInit();
+        return session.sftpRealpath(path, output);
+    }
     fn targetStat(_: ?*anyopaque, session: *ssh_session.Session, path: [:0]const u8) !ssh_session.SftpAttributes {
         try session.sftpInit();
         return session.sftpStat(path, false);
@@ -77,6 +83,8 @@ pub const RemoteFiles = struct {
     open_read: *const fn (?*anyopaque, *ssh_session.Session, [:0]const u8, ReadPurpose) anyerror!ssh_session.SftpHandle = openRead,
     stat_handle: *const fn (?*anyopaque, *ssh_session.Session, *ssh_session.SftpHandle) anyerror!ssh_session.SftpAttributes = handleStat,
     open_write: *const fn (?*anyopaque, *ssh_session.Session, [:0]const u8, u64, bool) anyerror!ssh_session.SftpHandle = openWrite,
+    open_resume: *const fn (?*anyopaque, *ssh_session.Session, [:0]const u8) anyerror!ssh_session.SftpHandle = openResume,
+    seek: *const fn (?*anyopaque, *ssh_session.SftpHandle, u64) anyerror!void = nativeSeek,
     create_exclusive: *const fn (?*anyopaque, *ssh_session.Session, [:0]const u8) anyerror!ssh_session.SftpHandle = createExclusive,
     truncate: *const fn (?*anyopaque, *ssh_session.Session, *ssh_session.SftpHandle) anyerror!void = truncateHandle,
     read: *const fn (?*anyopaque, *ssh_session.SftpHandle, []u8) anyerror!usize = nativeRead,
@@ -95,6 +103,12 @@ pub const RemoteFiles = struct {
     }
     fn openWrite(_: ?*anyopaque, session: *ssh_session.Session, path: [:0]const u8, offset: u64, preserve: bool) !ssh_session.SftpHandle {
         return if (offset == 0 and !preserve) session.sftpOpenWrite(path) else session.sftpOpenAppend(path, offset);
+    }
+    fn openResume(_: ?*anyopaque, session: *ssh_session.Session, path: [:0]const u8) !ssh_session.SftpHandle {
+        return session.sftpOpenResume(path);
+    }
+    fn nativeSeek(_: ?*anyopaque, handle: *ssh_session.SftpHandle, offset: u64) !void {
+        return handle.seek(offset);
     }
     fn createExclusive(_: ?*anyopaque, session: *ssh_session.Session, path: [:0]const u8) !ssh_session.SftpHandle {
         return session.sftpOpenExclusive(path);
@@ -303,6 +317,8 @@ const Job = struct {
 
     // —— 控制面 ——
     pause_flag: std.atomic.Value(bool) = .init(false),
+    // Under the engine lock; never mistake a manual pause for a network outage.
+    network_interrupted: bool = false,
     cancel_flag: std.atomic.Value(bool) = .init(false),
     // Retained by this exact accepted ID, including after a paused receipt.
     owned_temp: ?OwnedTemp = null,
@@ -442,6 +458,7 @@ const Runtime = struct {
         fingerprint: ?Fingerprint = null,
         initial_stamp: ?FileStamp = null,
         target_stamp: ?FileStamp = null,
+        parent_digest: ?[32]u8 = null,
         original_target_path: ?[]u8 = null,
         last_checked_target: ?TargetStamp = null,
         observed_target: ?TargetStamp = null,
@@ -535,6 +552,7 @@ const CheckpointPayload = struct {
     skipped_bytes: u64,
     verification: ?manager.Verification,
     remaining_policy: ?conflict.Choice,
+    network_interrupted: bool = false,
 };
 
 /// Unique owned continuation. Move this value exactly once and clear the old
@@ -546,6 +564,16 @@ pub const OwnedCheckpoint = struct {
     pub fn describe(self: *const OwnedCheckpoint) ?CheckpointInfo {
         const p = if (self._payload) |*payload| payload else return null;
         return .{ .spec = p.spec.view(), .original_engine_job = p.original_engine_job, .source_index = p.continuation.source_index, .done_bytes = p.done_bytes, .total_bytes = p.total_bytes, .skipped_files = p.skipped_files, .skipped_bytes = p.skipped_bytes, .temp_path = if (p.temp) |temp| if (temp.created) temp.path else null else null, .verification = p.verification };
+    }
+
+    pub fn automaticRecovery(self: *const OwnedCheckpoint) enum { manual, verify, missing_upload_evidence } {
+        const p = if (self._payload) |*value| value else return .manual;
+        if (!p.network_interrupted or !p.spec.resume_transfer) return .manual;
+        const file = &p.continuation.file;
+        if (p.spec.direction == .upload and file.upload_opened and
+            (file.parent_digest == null or file.target_stamp == null or file.target_stamp.?.size < @max(file.offset, p.continuation.prefix_length)))
+            return .missing_upload_evidence;
+        return .verify;
     }
 
     /// Explicit local IO: call only on a background owner, never a UI safeTick.
@@ -847,7 +875,7 @@ pub const SftpEngine = struct {
     /// driver in a transfer thread. V0.1.4 supplies its real authorization key.
     exec_service: ?exec_api.ExecBridge = null,
     exec_key: ?OperationKey = null,
-    remote_metadata: RemoteMetadata = .{},
+    remote_metadata: RemoteMetadata = .{ .canonical = RemoteMetadata.canonicalPath },
     remote_files: RemoteFiles = .{},
     owner_thread: ?std.Thread = null,
     owner_done: std.atomic.Value(bool) = .init(true),
@@ -928,7 +956,7 @@ pub const SftpEngine = struct {
         defer self.mutex.unlock();
         self.transport_failed = true;
         for (self.jobs.items) |job| if (!job.handed_off and !job.terminal.load(.acquire) and !job.cancel_flag.load(.acquire)) {
-            job.pause_flag.store(true, .release);
+            if (!job.pause_flag.swap(true, .acq_rel)) job.network_interrupted = true;
         };
     }
 
@@ -1219,7 +1247,7 @@ pub const SftpEngine = struct {
             var continuation = saved;
             continuation.file.execution = null;
             continuation.file.approved_target = null;
-            const exported: OwnedCheckpoint = .{ ._payload = .{ .spec = owned, .original_engine_job = job.id, .continuation = continuation, .temp = job.owned_temp, .done_bytes = job.done.load(.acquire), .total_bytes = job.total.load(.acquire), .total_ready = job.total_ready.load(.acquire), .skipped_files = job.skipped_files.load(.acquire), .skipped_bytes = job.skipped_bytes.load(.acquire), .verification = job.verification.get().value, .remaining_policy = job.conflicts.policy } };
+            const exported: OwnedCheckpoint = .{ ._payload = .{ .spec = owned, .original_engine_job = job.id, .continuation = continuation, .temp = job.owned_temp, .done_bytes = job.done.load(.acquire), .total_bytes = job.total.load(.acquire), .total_ready = job.total_ready.load(.acquire), .skipped_files = job.skipped_files.load(.acquire), .skipped_bytes = job.skipped_bytes.load(.acquire), .verification = job.verification.get().value, .remaining_policy = job.conflicts.policy, .network_interrupted = job.network_interrupted } };
             job.checkpoint = null;
             job.owned_temp = null;
             job.handed_off = true;
@@ -1874,9 +1902,7 @@ pub const SftpEngine = struct {
 
     fn observeTransportFailure(self: *SftpEngine, job: *Job) bool {
         const session = job.session orelse return false;
-        if (session.socket_fd < 0) return false;
-        var descriptor = [_]std.c.pollfd{.{ .fd = session.socket_fd, .events = std.c.POLL.IN, .revents = 0 }};
-        if (std.c.poll(&descriptor, 1, 0) <= 0 or descriptor[0].revents & (std.c.POLL.ERR | std.c.POLL.HUP | std.c.POLL.NVAL) == 0) return false;
+        if (!@import("../proto/ssh/socket_state.zig").disconnected(session.socket_fd)) return false;
         self.transportFailed();
         return true;
     }
@@ -1986,6 +2012,19 @@ pub const SftpEngine = struct {
                 if (rt.resume_validation and file.restoring and has_partial) {
                     rt.phase = .prefix_open;
                 } else {
+                    if (rt.resume_validation and file.restoring and job.spec.direction == .upload and file.upload_opened) {
+                        // Missing handle evidence does not authorize reusing an
+                        // existing target, even if the old conflict choice was
+                        // "overwrite all". Restart only an absent exact path.
+                        try verifyUploadParent(job);
+                        switch (try observeTarget(io, job, file.remote_path.?)) {
+                            .absent => {
+                                file.target_action = .exclusive_create;
+                                job.conflicts.policy = null;
+                            },
+                            else => return error.PrefixChanged,
+                        }
+                    }
                     file.restoring = false;
                     rt.resume_validation = false;
                     file.offset = 0;
@@ -2011,7 +2050,7 @@ pub const SftpEngine = struct {
             .prefix_open => try prefixOpen(io, job),
             .prefix_scan => try self.prefixTurn(io, job),
             .prefix_close => {
-                if (!self.closeFileHandle(io, job)) return .waiting;
+                if (job.spec.direction == .download and !self.closeFileHandle(io, job)) return .waiting;
                 const file = &rt.file;
                 if (job.spec.direction == .download) {
                     file.local.?.close(io);
@@ -2026,10 +2065,26 @@ pub const SftpEngine = struct {
                 file.skipped = 0;
                 file.window = try transfer_window.Window.init(file.size, try window_policy.chunkBytes(job.spec.chunk_kb), job.spec.window_chunks);
                 try file.window.?.resumeAt(file.resume_offset);
-                rt.phase = .open_remote;
+                if (job.spec.direction == .upload) {
+                    // Retain the exact descriptor whose bytes we verified. A name swap
+                    // after verification must never redirect our next write.
+                    try verifyUploadParent(job);
+                    const current = try FileStamp.remote(try job.remote_metadata.target_stat(job.remote_metadata.context, session, file.remote_path.?));
+                    if (!current.same(file.target_stamp.?)) return error.PrefixChanged;
+                    try job.remote_files.seek(job.remote_files.context, &file.remote.?, file.resume_offset);
+                    try stopCheckpoint(job);
+                    file.target_capture_needed = true;
+                    rt.resume_validation = false;
+                    rt.phase = .transfer;
+                } else rt.phase = .open_remote;
             },
             .open_remote => {
                 const file = &rt.file;
+                if (job.spec.direction == .upload) {
+                    if (file.restoring) try verifyUploadParent(job) else if (job.spec.resume_transfer and job.remote_metadata.canonical != null) {
+                        file.parent_digest = parentDigest(job) catch null;
+                    }
+                }
                 if (job.spec.direction == .upload and !file.restoring) {
                     if (try targetChangedBeforeWrite(io, job)) return .advanced;
                     if (file.target_action == .exclusive_create) {
@@ -2053,19 +2108,15 @@ pub const SftpEngine = struct {
                         try stopCheckpoint(job);
                         try job.remote_files.truncate(job.remote_files.context, session, &file.remote.?);
                     }
-                } else file.remote = if (job.spec.direction == .upload)
-                    try job.remote_files.open_write(job.remote_files.context, session, file.remote_path.?, file.resume_offset, true)
-                else
-                    job.remote_files.open_read(job.remote_files.context, session, file.remote_path.?, .transfer) catch |err| return sourcePathError(err);
+                } else {
+                    if (job.spec.direction == .upload) return error.PrefixChanged;
+                    file.remote = job.remote_files.open_read(job.remote_files.context, session, file.remote_path.?, .transfer) catch |err| return sourcePathError(err);
+                }
                 if (job.spec.direction == .download) {
                     const current = try FileStamp.remote(try job.remote_files.stat_handle(job.remote_files.context, session, &file.remote.?));
                     if (file.fingerprint == null or !current.same(file.fingerprint.?.stamp)) return error.SourceChanged;
                 }
                 if (job.spec.direction == .upload) file.upload_opened = true;
-                if (job.spec.direction == .upload and file.restoring) {
-                    const current = try FileStamp.remote(try job.remote_files.stat_handle(job.remote_files.context, session, &file.remote.?));
-                    if (file.target_stamp == null or !current.same(file.target_stamp.?)) return error.PrefixChanged;
-                }
                 if (job.spec.direction == .upload) {
                     file.target_capture_needed = true;
                     rt.resume_validation = false;
@@ -2109,6 +2160,11 @@ pub const SftpEngine = struct {
                 if (job.spec.direction == .upload and file.target_capture_needed) {
                     const target = try FileStamp.remote(try job.remote_files.stat_handle(job.remote_files.context, session, &file.remote.?));
                     if (target.size != @max(file.offset, rt.prefix_length)) return error.PrefixChanged;
+                    if (file.restoring) {
+                        try verifyUploadParent(job);
+                        const visible = try FileStamp.remote(try job.remote_metadata.target_stat(job.remote_metadata.context, session, file.remote_path.?));
+                        if (!visible.same(target)) return error.PrefixChanged;
+                    }
                     file.target_stamp = target;
                     file.target_capture_needed = false;
                 }
@@ -2203,6 +2259,28 @@ pub const SftpEngine = struct {
         rt.phase = .source_open;
     }
 
+    // Bind partial writes to the original canonical parent; the same
+    // displayed path can resolve elsewhere after a symlink or mount change.
+    fn parentDigest(job: *Job) ![32]u8 {
+        const resolve = job.remote_metadata.canonical orelse return error.OperationUnsupported;
+        const path = job.runtime.file.remote_path orelse return error.PrefixChanged;
+        const parent = try std.heap.c_allocator.dupeSentinel(u8, std.fs.path.dirname(path) orelse ".", 0);
+        defer std.heap.c_allocator.free(parent);
+        var buffer: [4096]u8 = undefined;
+        const canonical = try resolve(job.remote_metadata.context, job.session.?, parent, &buffer);
+        if (!std.fs.path.isAbsolute(canonical)) return error.PrefixChanged;
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(canonical, &digest, .{});
+        return digest;
+    }
+
+    fn verifyUploadParent(job: *Job) !void {
+        if (job.remote_metadata.canonical == null) return; // controlled in-memory adapters only
+        const expected = job.runtime.file.parent_digest orelse return error.PrefixChanged;
+        const current = try parentDigest(job);
+        if (!std.mem.eql(u8, &expected, &current)) return error.PrefixChanged;
+    }
+
     fn sourceScanOpen(io: std.Io, job: *Job) !void {
         const rt = &job.runtime;
         const file = &rt.file;
@@ -2283,7 +2361,10 @@ pub const SftpEngine = struct {
             rt.prefix_length = stamp.size;
             file.target_stamp = stamp;
         } else {
-            const current = try FileStamp.remote(try job.remote_metadata.stat(job.remote_metadata.context, job.session.?, file.remote_path.?));
+            try verifyUploadParent(job);
+            // lstat the destination itself: a link substituted between
+            // attempts does not inherit the old permission to write.
+            const current = try FileStamp.remote(try job.remote_metadata.target_stat(job.remote_metadata.context, job.session.?, file.remote_path.?));
             const original = file.target_stamp orelse return error.PrefixChanged;
             // libssh2 may have sent a trailing packet before pause returned
             // its final write count. Accept only the captured target stamp;
@@ -2293,7 +2374,10 @@ pub const SftpEngine = struct {
             rt.prefix_length = current.size;
         }
         if (rt.prefix_length > file.size) return error.PrefixChanged;
-        file.remote = try job.remote_files.open_read(job.remote_files.context, job.session.?, file.remote_path.?, .prefix);
+        file.remote = if (job.spec.direction == .upload)
+            try job.remote_files.open_resume(job.remote_files.context, job.session.?, file.remote_path.?)
+        else
+            try job.remote_files.open_read(job.remote_files.context, job.session.?, file.remote_path.?, .prefix);
         const actual = try FileStamp.remote(try job.remote_files.stat_handle(job.remote_files.context, job.session.?, &file.remote.?));
         const expected = if (job.spec.direction == .download) file.fingerprint.?.stamp else file.target_stamp.?;
         if (!actual.same(expected)) return error.PrefixChanged;
@@ -2385,6 +2469,18 @@ pub const SftpEngine = struct {
         }
         file.chunk_done += n;
         file.offset += n;
+        if (job.spec.direction == .upload and job.spec.resume_transfer and !rt.repairing and
+            (file.target_stamp == null or file.chunk_done == chunk.len))
+        {
+            // Save handle evidence while connected. Losing the socket later
+            // cannot manufacture a new stamp. A stale stamp never authorizes
+            // continuation if the peer has advanced or changed since then.
+            if (job.remote_files.stat_handle(job.remote_files.context, job.session.?, &file.remote.?)) |attrs| {
+                if (FileStamp.remote(attrs)) |stamp| {
+                    if (stamp.size == @max(file.offset, rt.prefix_length)) file.target_stamp = stamp;
+                } else |_| {}
+            } else |_| {}
+        }
         updateProgress(job, @max(job.done.load(.acquire), rt.base + file.offset));
         if (file.chunk_done == chunk.len) {
             try file.window.?.ack(chunk.index);
@@ -2609,10 +2705,11 @@ pub const SftpEngine = struct {
         }
         if (rt.file.remote != null) {
             if (rt.outcome == .paused and job.spec.direction == .upload and rt.file.target_capture_needed) {
-                rt.file.target_stamp = if (job.remote_files.stat_handle(job.remote_files.context, job.session.?, &rt.file.remote.?)) |value|
-                    FileStamp.remote(value) catch null
-                else |_|
-                    null;
+                if (job.remote_files.stat_handle(job.remote_files.context, job.session.?, &rt.file.remote.?)) |value| {
+                    if (FileStamp.remote(value)) |stamp| {
+                        rt.file.target_stamp = stamp;
+                    } else |_| {}
+                } else |_| {} // retain the last acknowledged handle stamp; never invent one
                 rt.file.target_capture_needed = false;
             }
             if (!self.closeFileHandle(io, job)) return .waiting;
@@ -4096,6 +4193,8 @@ test "sftp engine cancel refuses a replaced owned temp and publishes cleanup unk
 const ResumePeer = struct {
     const Handle = struct { file: ?std.Io.File = null, offset: u64 = 0, purpose: ReadPurpose = .transfer, name: u8 = 'a', writing: bool = false, preserve: bool = false };
     dir: std.Io.Dir,
+    parent_name: []const u8 = "/fixture",
+    link_lost: std.atomic.Value(bool) = .init(false),
     corrupt_offsets: [2]?u64 = .{ null, null },
     deny_checksum_read: bool = false,
     deny_repair_read: bool = false,
@@ -4113,6 +4212,7 @@ const ResumePeer = struct {
     open_blocked: std.atomic.Value(bool) = .init(false),
     open_release: std.atomic.Value(bool) = .init(false),
     unknown_prefix_close: bool = false,
+    replace_after_check: bool = false,
     block_upload_close: bool = false,
     close_blocked: std.atomic.Value(bool) = .init(false),
     close_release: std.atomic.Value(bool) = .init(false),
@@ -4171,6 +4271,7 @@ const ResumePeer = struct {
     fn statHandle(raw: ?*anyopaque, _: *ssh_session.Session, value: *ssh_session.SftpHandle) !ssh_session.SftpAttributes {
         const self = of(raw);
         self.check();
+        if (self.link_lost.load(.acquire)) return error.TransferTransportClosed;
         return attrs(try handle(value).file.?.stat(std.testing.io));
     }
     fn allocate(self: *ResumePeer, file: std.Io.File, offset: u64, purpose: ReadPurpose, filename: u8, writing: bool) !ssh_session.SftpHandle {
@@ -4201,6 +4302,31 @@ const ResumePeer = struct {
         if (purpose == .fingerprint) _ = self.fingerprint_opens.fetchAdd(1, .acq_rel);
         const file = try self.dir.openFile(std.testing.io, std.fs.path.basename(path), .{});
         return self.allocate(file, 0, purpose, filename, false);
+    }
+    fn openResume(raw: ?*anyopaque, _: *ssh_session.Session, path: [:0]const u8) !ssh_session.SftpHandle {
+        const self = of(raw);
+        if (self.deny_preserve_write) return error.AccessDenied;
+        const f = try self.dir.openFile(std.testing.io, std.fs.path.basename(path), .{ .mode = .read_write });
+        return self.allocate(f, 0, .prefix, try name(path), true);
+    }
+    fn seek(raw: ?*anyopaque, value: *ssh_session.SftpHandle, offset: u64) !void {
+        const self = of(raw);
+        const slot = handle(value);
+        // Fixture gate now marks the same transition without reopening a path.
+        if (self.block_transfer_open and !self.open_release.load(.acquire)) {
+            self.open_blocked.store(true, .release);
+            try awaitWorker(&self.open_release);
+        }
+        slot.purpose = .transfer;
+        slot.offset = offset;
+        slot.preserve = true;
+        _ = self.transfer_opens[slot.name - 'a'].fetchAdd(1, .acq_rel);
+        _ = self.preserve_opens.fetchAdd(1, .acq_rel);
+        if (offset == 0) _ = self.preserve_zero.fetchAdd(1, .acq_rel);
+        if (self.replace_after_check) {
+            try self.dir.rename("a", self.dir, "original", std.testing.io);
+            try self.dir.writeFile(std.testing.io, .{ .sub_path = "a", .data = "unrelated replacement" });
+        }
     }
     fn openWrite(raw: ?*anyopaque, _: *ssh_session.Session, path: [:0]const u8, offset: u64, preserve: bool) !ssh_session.SftpHandle {
         const self = of(raw);
@@ -4274,6 +4400,7 @@ const ResumePeer = struct {
         self.check();
         const slot = handle(value);
         try self.gate(slot);
+        if (self.link_lost.load(.acquire)) return error.TransferTransportClosed;
         if (bytes.len > chunk_bytes) self.oversize.store(true, .release);
         const count = @min(bytes.len, 4093);
         var chunk: [4093]u8 = undefined;
@@ -4311,11 +4438,16 @@ const ResumePeer = struct {
         self.context_blocked.store(true, .release);
         return if (self.context_release.load(.acquire)) .released else .awaiting;
     }
+    fn canonical(raw: ?*anyopaque, _: *ssh_session.Session, _: [:0]const u8, buffer: []u8) ![]const u8 {
+        const path = of(raw).parent_name;
+        @memcpy(buffer[0..path.len], path);
+        return buffer[0..path.len];
+    }
     fn bind(self: *ResumePeer, engine: *SftpEngine) void {
         self.caller = std.Thread.getCurrentId();
-        engine.remote_metadata = .{ .context = self, .size = size, .stat = stat, .target_stat = stat };
+        engine.remote_metadata = .{ .context = self, .size = size, .stat = stat, .target_stat = stat, .canonical = canonical };
         // Fault-injection peers exercise the uncached remote-read fallback.
-        engine.remote_files = .{ .stage_download = false, .context = self, .open_read = openRead, .open_write = openWrite, .create_exclusive = createExclusive, .truncate = truncate, .stat_handle = statHandle, .read = read, .write = write, .close = close, .release = releaseContext };
+        engine.remote_files = .{ .stage_download = false, .context = self, .open_read = openRead, .open_write = openWrite, .open_resume = openResume, .seek = seek, .create_exclusive = createExclusive, .truncate = truncate, .stat_handle = statHandle, .read = read, .write = write, .close = close, .release = releaseContext };
     }
     fn unblock(self: *ResumePeer) void {
         self.release.store(true, .release);
@@ -6389,4 +6521,82 @@ test "source read publishes changing progress before any destination bytes witho
     try std.testing.expect(saving.source_read == null);
     try std.testing.expectEqual(@as(u64, 0), saving.done_bytes);
     try std.testing.expect(engine.poll() == null);
+}
+
+test "SFTP interrupted upload restores a verified prefix after the old connection cannot stat; protects replacement and changed parent" {
+    const A = std.testing.allocator;
+    const bytes = resumeBytes();
+    for ([_]enum { unchanged, replaced, changed_parent, stale_stamp, manual, swapped_after_check }{ .unchanged, .replaced, .changed_parent, .stale_stamp, .manual, .swapped_after_check }) |scenario| {
+        var local = std.testing.tmpDir(.{});
+        defer local.cleanup();
+        var remote = std.testing.tmpDir(.{});
+        defer remote.cleanup();
+        try local.dir.writeFile(std.testing.io, .{ .sub_path = "a", .data = &bytes });
+        const root = try local.dir.realPathFileAlloc(std.testing.io, ".", A);
+        defer A.free(root);
+        const saved_at: u64 = 16 * 1024;
+        var peer: ResumePeer = .{ .dir = remote.dir, .block_at = if (scenario == .stale_stamp) 8000 else saved_at };
+        var session: ssh_session.Session = .{};
+        const before = try SftpEngine.init(A);
+        defer {
+            peer.unblock();
+            before.deinit();
+        }
+        before.attachSession(&session);
+        peer.bind(before);
+        const spec: JobSpec = .{ .direction = .upload, .sources = &.{"a"}, .remote_dir = "/original", .local_dir = root, .chunk_kb = 16, .resume_transfer = true };
+        const id = try before.open(spec);
+        try awaitWorker(&peer.blocked);
+        if (scenario == .manual) try before.pause(id);
+        before.transportFailed();
+        peer.link_lost.store(true, .release);
+        peer.unblock();
+        try awaitWorker(&before.owner_done);
+        var checkpoint = try before.exportPaused(id);
+        defer {
+            _ = checkpoint.cancel(std.testing.io);
+            checkpoint.deinit() catch {};
+        }
+        if (scenario == .manual) {
+            try std.testing.expect(checkpoint.automaticRecovery() == .manual);
+            continue;
+        }
+        if (scenario == .stale_stamp) {
+            try std.testing.expect(checkpoint.automaticRecovery() == .missing_upload_evidence);
+            continue;
+        }
+        try std.testing.expect(checkpoint.automaticRecovery() == .verify);
+        try std.testing.expectEqual(saved_at, checkpoint.describe().?.done_bytes);
+        // Prevent accepting a replacement by length (or coarse mtime).
+        var foreign = bytes;
+        foreign[14] ^= 0xff;
+        if (scenario == .replaced) try remote.dir.writeFile(std.testing.io, .{ .sub_path = "a", .data = foreign[0..saved_at] });
+        var after_peer: ResumePeer = .{ .dir = remote.dir, .replace_after_check = scenario == .swapped_after_check, .parent_name = if (scenario == .changed_parent) "/different" else "/fixture", .block_at = null };
+        var fresh_session: ssh_session.Session = .{};
+        const after = try SftpEngine.init(A);
+        defer after.deinit();
+        after.attachSession(&fresh_session);
+        after_peer.bind(after);
+        const resumed = try after.importPaused(&checkpoint, spec);
+        try awaitWorker(&after.owner_done);
+        if (scenario == .unchanged) {
+            try std.testing.expectEqual(@as(u64, bytes.len - saved_at), after_peer.preserve_bytes.load(.acquire));
+            try expectFileBytes(remote.dir, "a", &bytes);
+            try std.testing.expect(after.poll().?.state == .succeeded);
+        } else {
+            if (scenario != .swapped_after_check) try std.testing.expectEqual(@as(usize, 0), after_peer.writes.load(.acquire));
+            try expectFileBytes(remote.dir, "a", if (scenario == .swapped_after_check) "unrelated replacement" else if (scenario == .replaced) foreign[0..saved_at] else bytes[0..saved_at]);
+            const e = after.poll().?;
+            try std.testing.expect(e.failure == .conflict);
+            if (scenario == .swapped_after_check) {
+                // The authenticated handle was still safe to write, but its
+                // original name disappeared. Never report that as a delivery.
+                try std.testing.expectEqual(manager.EngineState.failed, e.state);
+            } else {
+                try std.testing.expectEqual(manager.EngineState.paused, e.state);
+                after.cancel(resumed);
+                try awaitWorker(&after.owner_done);
+            }
+        }
+    }
 }

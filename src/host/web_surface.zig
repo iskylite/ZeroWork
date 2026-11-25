@@ -77,6 +77,11 @@ extern fn zw_web_surface_cancel_requests(*NativeSurface) void;
 extern fn zw_web_surface_state(*NativeSurface) NativeState;
 extern fn zw_web_surface_copy_url(*NativeSurface) ?[*:0]u8;
 extern fn zw_web_surface_copy_title(*NativeSurface) ?[*:0]u8;
+extern fn zw_web_surface_popup_count(*NativeSurface) usize;
+extern fn zw_web_surface_focus_popup(*NativeSurface, usize) c_int;
+extern fn zw_web_surface_copy_popup_title(*NativeSurface, usize) ?[*:0]u8;
+extern fn zw_web_surface_close_popups(*NativeSurface) void;
+extern fn zw_web_surface_set_popup_context(*NativeSurface, [*]const u8, usize) c_int;
 
 pub fn supportsProxy() bool {
     return zw_web_surface_supports_proxy() != 0;
@@ -122,6 +127,10 @@ pub const Snapshot = struct {
     committed_get: bool,
     tls_failed: bool = false,
 };
+
+/// Native child windows allowed for one browser session. Keep in sync with
+/// `zw_max_popups_per_session` in macos_web_surface.m.
+pub const max_popups: usize = 8;
 
 pub const Mount = struct {
     owner: identity.SessionHandle,
@@ -313,6 +322,33 @@ pub const Surface = struct {
         const value = zw_web_surface_copy_title(try self.nativeOnMain()) orelse return null;
         defer std.c.free(value);
         return try allocator.dupe(u8, std.mem.span(value));
+    }
+
+    /// Popup badge text owned by the native window: parent connection name and
+    /// route mode, e.g. "关联自: BMC 控制台 · SSH 代理".
+    pub fn setPopupContext(self: *Surface, label: []const u8) !void {
+        if (zw_web_surface_set_popup_context(try self.nativeOnMain(), label.ptr, label.len) == 0)
+            return error.WebPopupContextRejected;
+    }
+
+    pub fn popupCount(self: *const Surface) !usize {
+        return zw_web_surface_popup_count(try self.nativeOnMain());
+    }
+
+    pub fn focusPopup(self: *const Surface, index: usize) !bool {
+        return zw_web_surface_focus_popup(try self.nativeOnMain(), index) != 0;
+    }
+
+    pub fn copyPopupTitle(self: *const Surface, index: usize, allocator: std.mem.Allocator) !?[]u8 {
+        const value = zw_web_surface_copy_popup_title(try self.nativeOnMain(), index) orelse return null;
+        defer std.c.free(value);
+        return try allocator.dupe(u8, std.mem.span(value));
+    }
+
+    /// Retire popup admission and synchronously settle every native child and
+    /// its WebKit callbacks before tearing down the proxy generation.
+    pub fn closePopups(self: *Surface) !void {
+        zw_web_surface_close_popups(try self.nativeOnMain());
     }
 
     fn nativeOnMain(self: *const Surface) !*NativeSurface {

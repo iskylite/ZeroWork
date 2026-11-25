@@ -83,6 +83,9 @@ pub const View = struct {
     /// V0.7 §14.1-14.3: panel page tabs. The default page keeps the member
     /// list; Board/Graph/Rounds pages appear only with delegated children.
     page: Page = .members,
+    /// V0.8 §3.2.2: hosted inline by the standalone AI page inspector. An
+    /// inline host keeps its rows alive even though the popover is closed.
+    hosted_inline: bool = false,
     tab_members: ?*ui.Node = null,
     tab_board: ?*ui.Node = null,
     tab_graph: ?*ui.Node = null,
@@ -239,6 +242,18 @@ pub const View = struct {
     }
     fn closeGraph(self: *View) void {
         self.graph_open.set(false);
+    }
+
+    /// Switches the retained page without opening the popover; the inline
+    /// inspector drives page selection itself.
+    pub fn showPage(self: *View, page: Page) void {
+        if (page == .graph) return;
+        self.page = page;
+        self.applyPageVisibility();
+    }
+
+    pub fn setInline(self: *View, value: bool) void {
+        self.hosted_inline = value;
     }
 
     fn selectPage(self: *View, page: Page) void {
@@ -636,7 +651,7 @@ pub const View = struct {
         try Header.updateCountBadge(self.cx, self.badge, waiting_approval);
         // The approval number keeps priority over the ambient running dot.
         Header.updateDotBadge(self.cx, self.running_badge, waiting_approval == 0 and active_count != 0);
-        if (!self.open.peek()) {
+        if (!self.open.peek() and !self.hosted_inline) {
             self.fingerprint = 0;
             var index = self.rows.items.len;
             while (index != 0) {

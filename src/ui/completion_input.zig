@@ -5,6 +5,16 @@ const vt = @import("../vt/snapshot.zig");
 
 pub const Anchor = struct { row: vt.RowId, col: u16 };
 
+/// DECCKM selects the encoding of arrow keys, not which host is editing.
+/// Primary-screen readline/zle can enable it alongside bracketed paste or
+/// prompt markers. Do not opt raw application input into history on DECCKM
+/// alone. Callers also verify the actual locally typed text against its echo.
+pub fn observable(projection: vt.Projection) bool {
+    const m = projection.modes;
+    return !m.alternate_screen and !m.keyboard_disabled and m.mouse_tracking == .none and
+        (!m.application_cursor or m.bracketed_paste or projection.at_prompt);
+}
+
 pub fn anchor(projection: vt.Projection) ?Anchor {
     if (!atLiveEnd(projection) or !projection.cursor.visible) return null;
     for (projection.visible_rows) |row| {
@@ -38,6 +48,16 @@ pub fn echoed(projection: vt.Projection, start: Anchor, text: []const u8) bool {
 /// Verify the known draft immediately before the live cursor. Wide cells and
 /// soft wraps are compared as graphemes; no prompt syntax or DEL counts.
 pub fn atCursor(projection: vt.Projection, text: []const u8) bool {
+    return matchCursor(projection, null, text);
+}
+
+/// One contiguous range must connect the input's captured start to the live
+/// cursor. Two matching strings on different rows are not evidence of echo.
+pub fn anchoredAtCursor(projection: vt.Projection, start: Anchor, text: []const u8) bool {
+    return matchCursor(projection, start, text);
+}
+
+fn matchCursor(projection: vt.Projection, start: ?Anchor, text: []const u8) bool {
     if (text.len == 0 or !atLiveEnd(projection) or !projection.cursor.visible) return false;
     var row_index: ?usize = null;
     for (projection.visible_rows, 0..) |row, i| if (row.viewport_y == projection.cursor.row) {
@@ -70,6 +90,7 @@ pub fn atCursor(projection: vt.Projection, text: []const u8) bool {
         if (!std.mem.endsWith(u8, text[0..remaining], bytes)) return false;
         remaining -= bytes.len;
     }
+    if (start) |expected| return std.meta.eql(projection.visible_rows[index].id, expected.row) and col == expected.col;
     return true;
 }
 
@@ -78,7 +99,7 @@ pub fn atCursor(projection: vt.Projection, text: []const u8) bool {
 /// pre-completion draft at the cursor is not evidence of submission.
 pub fn completedLine(allocator: std.mem.Allocator, projection: vt.Projection, start: Anchor, prefix: []const u8, submitted: bool) !?[]u8 {
     if (prefix.len == 0 or !atLiveEnd(projection) or !projection.cursor.visible or
-        projection.modes.alternate_screen or projection.modes.application_cursor or projection.modes.mouse_tracking != .none) return null;
+        !observable(projection)) return null;
     var text: std.ArrayList(u8) = .empty;
     defer text.deinit(allocator);
     var found = false;
@@ -101,7 +122,7 @@ pub fn completedLine(allocator: std.mem.Allocator, projection: vt.Projection, st
         }
         if ((!submitted and at_cursor) or (submitted and !row.wraps)) {
             if (!std.mem.startsWith(u8, text.items, prefix) or
-                (!submitted and !atCursor(projection, text.items))) return null;
+                (!submitted and !anchoredAtCursor(projection, start, text.items))) return null;
             const command = std.mem.trimEnd(u8, text.items, " ");
             // A completion listing can leave the original partial line above
             // the cursor. Do not mistake that unchanged prefix for the result.

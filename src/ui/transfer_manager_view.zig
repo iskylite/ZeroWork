@@ -129,6 +129,7 @@ pub fn failureLabel(failure: backend.Failure) []const u8 {
         .not_found => "文件不存在",
         .source_not_found => "待传输文件不存在",
         .destination_directory_not_found => "目标目录不存在",
+        .unverified_upload_checkpoint => "断线前未能确认远端目录或最后写入位置，已停止自动续传，未覆盖文件。",
         .permission_denied => "没有文件访问权限",
         .conflict => "文件冲突或内容已变化",
         .connection => "连接不可用",

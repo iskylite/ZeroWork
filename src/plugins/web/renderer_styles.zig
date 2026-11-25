@@ -77,6 +77,18 @@ pub fn bookmark(width: f32, selected: bool) ui.BoxStyle {
     };
 }
 
+pub fn popupBadge() ui.BoxStyle {
+    const colors = theme.current();
+    return .{
+        .width = .{ .fit = .{} },
+        .height = .{ .px = 22 },
+        .flex_shrink = 0,
+        .padding = .{ .left = 8, .right = 8 },
+        .background = colors.well,
+        .border = .{ .radius = 11 },
+    };
+}
+
 pub fn menuRow() ui.BoxStyle {
     return .{
         .width = .fill(),

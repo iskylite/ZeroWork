@@ -21,11 +21,12 @@ pub const Message = struct {
     origin: @FieldType(provider.Message, "origin") = .user_or_tool,
     skill: ?provider.SkillReference = null,
     file_reference_spans: @FieldType(provider.Message, "file_reference_spans") = &.{},
+    workspace_reselect_required: bool = false,
 
     pub fn jsonStringify(self: Message, writer: *std.json.Stringify) !void {
         try writer.beginObject();
         inline for (@typeInfo(Message).@"struct".field_names) |name| {
-            const omit = if (comptime std.mem.eql(u8, name, "origin")) self.origin == .user_or_tool else if (comptime std.mem.eql(u8, name, "skill")) self.skill == null else if (comptime std.mem.eql(u8, name, "file_reference_spans")) self.file_reference_spans.len == 0 else false;
+            const omit = if (comptime std.mem.eql(u8, name, "origin")) self.origin == .user_or_tool else if (comptime std.mem.eql(u8, name, "skill")) self.skill == null else if (comptime std.mem.eql(u8, name, "file_reference_spans")) self.file_reference_spans.len == 0 else if (comptime std.mem.eql(u8, name, "workspace_reselect_required")) !self.workspace_reselect_required else false;
             if (!omit) {
                 try writer.objectField(name);
                 try writer.write(@field(self, name));
@@ -395,7 +396,7 @@ pub const Journal = struct {
             (event.initial_input != null and event.initial_input.?.workspace_revision != null);
     }
     fn hasMessageProvenance(messages: anytype) bool {
-        for (messages) |message| if (message.origin != .user_or_tool or message.skill != null or message.file_reference_spans.len != 0) return true;
+        for (messages) |message| if (message.origin != .user_or_tool or message.skill != null or message.file_reference_spans.len != 0 or message.workspace_reselect_required) return true;
         return false;
     }
     pub fn decode(allocator: std.mem.Allocator, a: std.mem.Allocator, source: []const Message, refs: *std.ArrayList(images.ContentRef)) ![]provider.Message {
@@ -422,7 +423,7 @@ pub const Journal = struct {
                 };
                 if (value.offloaded) try offloaded.append(a, .{ .reference = ref, .owner = value.owner }) else try normal.append(a, ref);
             }
-            decoded.* = .{ .role = message.role, .content = message.content, .tool_calls = message.tool_calls, .tool_call_id = message.tool_call_id, .images = normal.items, .offloaded_images = offloaded.items, .image_owner = message.image_owner, .image_transform = message.image_transform, .origin = message.origin, .skill = message.skill, .file_reference_spans = message.file_reference_spans };
+            decoded.* = .{ .role = message.role, .content = message.content, .tool_calls = message.tool_calls, .tool_call_id = message.tool_call_id, .images = normal.items, .offloaded_images = offloaded.items, .image_owner = message.image_owner, .image_transform = message.image_transform, .origin = message.origin, .skill = message.skill, .file_reference_spans = message.file_reference_spans, .workspace_reselect_required = message.workspace_reselect_required };
         }
         return messages;
     }
@@ -561,7 +562,7 @@ pub const Journal = struct {
                 _ = std.base64.standard.Encoder.encode(encoded, content.bytes);
                 value.* = .{ .path = content.path, .encoded = encoded, .captured_at = content.captured_at_ms, .offloaded = i >= message.images.len, .owner = if (i >= message.images.len) message.offloaded_images[i - message.images.len].owner else message.image_owner };
             }
-            out.* = .{ .role = message.role, .content = message.content, .tool_calls = message.tool_calls, .tool_call_id = message.tool_call_id, .images = image_values, .image_owner = message.image_owner, .image_transform = message.image_transform, .origin = message.origin, .skill = message.skill, .file_reference_spans = message.file_reference_spans };
+            out.* = .{ .role = message.role, .content = message.content, .tool_calls = message.tool_calls, .tool_call_id = message.tool_call_id, .images = image_values, .image_owner = message.image_owner, .image_transform = message.image_transform, .origin = message.origin, .skill = message.skill, .file_reference_spans = message.file_reference_spans, .workspace_reselect_required = message.workspace_reselect_required };
         }
         return messages;
     }

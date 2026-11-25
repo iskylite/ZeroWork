@@ -218,7 +218,7 @@ pub const Context = struct {
         const controller = try self.current(invocation.context, true);
         if (std.mem.eql(u8, invocation.tool_id, "host.run_in_terminal") or std.mem.eql(u8, invocation.tool_id, "host.attach_shell")) {
             const handle = try parseSession(invocation.context, try string(invocation.arguments, "session_ref"));
-            if (!controller.inBinding(handle)) return error.TargetNotAuthorized;
+            if (!controller.inExecutionBinding(handle)) return error.TargetNotAuthorized;
             if (std.mem.eql(u8, invocation.tool_id, "host.attach_shell")) try self.app.checkReconnectSuccessor(invocation.context, handle);
             return;
         }
@@ -232,7 +232,7 @@ pub const Context = struct {
                 if (!record.context.conversation_id.eql(invocation.context.conversation_id)) continue;
             } else if (!sameTask(record.context, invocation.context)) continue;
             const owner = record.boundary.handle;
-            if (!controller.inBinding(owner) and !(observing and (controller.permitsHistoricalOwner(owner) or controller.permitsReconnectedExecution(owner)))) return error.TargetNotAuthorized;
+            if (!controller.inExecutionBinding(owner) and !(observing and (controller.permitsHistoricalOwner(owner) or controller.permitsReconnectedExecution(owner)))) return error.TargetNotAuthorized;
             return;
         };
         return error.TargetNotAuthorized;
@@ -263,7 +263,7 @@ pub const Context = struct {
         const controller = try self.current(context, true);
         for (self.admissions.items) |item| if (item) |record| {
             if (!record.authorized or !record.context.eql(original) or !record.boundary.handle.eql(handle) or record.execution_id == null or !record.execution_id.?.eql(id)) continue;
-            if (!controller.inBinding(handle) and !controller.permitsHistoricalOwner(handle) and !controller.permitsReconnectedExecution(handle)) return error.TargetNotAuthorized;
+            if (!controller.inExecutionBinding(handle) and !controller.permitsHistoricalOwner(handle) and !controller.permitsReconnectedExecution(handle)) return error.TargetNotAuthorized;
             return;
         };
         return error.TargetNotAuthorized;
@@ -657,7 +657,7 @@ pub const Context = struct {
         return self.captureBoundaryMode(controller, handle, idle, command_hash, false);
     }
     fn captureBoundaryMode(self: *Context, controller: *Controller, handle: identity.SessionHandle, idle: bool, command_hash: [32]u8, attaching: bool) !Boundary {
-        if (!controller.inBinding(handle)) return error.TargetNotAuthorized;
+        if (!controller.inExecutionBinding(handle)) return error.TargetNotAuthorized;
         if (idle) if (self.app.domain.ai) |ai| {
             if (ai.service.childReservesSession(handle, controller.authority.task_id)) return error.TerminalBusy;
         };

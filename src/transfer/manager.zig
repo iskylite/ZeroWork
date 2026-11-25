@@ -51,6 +51,7 @@ pub const Failure = enum {
     io,
     source_not_found,
     destination_directory_not_found,
+    unverified_upload_checkpoint,
 };
 
 /// Value-owned startup diagnostics survive connection teardown and retry.
@@ -646,6 +647,15 @@ pub const Manager = struct {
         job.binding_wait = false;
         job.conflict_waiting = false;
         job.speed_bps = 0;
+    }
+
+    /// Advisory only: a verified release owns these bytes, but this saved
+    /// upload lacks an exact remote checkpoint for unattended continuation.
+    pub fn noteUnverifiedUpload(self: *Manager, id: JobId, attempt: u8) void {
+        const job = self.find(id) orelse return;
+        if (job.attempt != attempt or job.state != .paused or job.engine_job != null or job.retained_owner == null or job.job_cleanup != .released) return;
+        job.failure = .unverified_upload_checkpoint;
+        job.record();
     }
 
     pub fn queueRetainedResume(self: *Manager, id: JobId, attempt: u8, owner: identity.TransferOwner) !void {

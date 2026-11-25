@@ -15,6 +15,7 @@ pub const Command = union(enum) {
     navigate: []const u8,
     back,
     forward,
+    focus_popup: usize,
     reload,
     stop,
     reconnect,
@@ -61,6 +62,8 @@ pub const Snapshot = struct {
     error_message: ?[]const u8,
     bookmarks: []const bookmarks_api.Bookmark,
     hops: []const Hop,
+    popup_count: usize = 0,
+    popup_titles: []const []const u8 = &.{},
 
     pub fn deinit(self: *Snapshot) void {
         self.arena.deinit();

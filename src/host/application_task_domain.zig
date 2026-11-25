@@ -59,6 +59,8 @@ pub const JobOwner = struct {
     job: transfer.JobId,
     owner: identity.SessionHandle,
     verification_trace_attempt: u8 = 0,
+    /// One reconnect wake per real attempt; manual control takes precedence.
+    recovery_attempt: ?u8 = null,
     directory_refresh: @import("transfer_directory_refresh.zig").Completion = .{},
 };
 

@@ -11,6 +11,7 @@ const wakeup = @import("../../platform/presentation_wakeup.zig");
 const config = @import("config.zig");
 const bookmarks = @import("bookmarks.zig");
 const navigation = @import("navigation.zig");
+const popup = @import("popup.zig");
 const page_api = @import("page_service.zig");
 const ssh_challenges = @import("ssh_challenges.zig");
 const ssh_auth = @import("../../proto/ssh/auth_challenge.zig");
@@ -28,6 +29,7 @@ pub const Runtime = struct {
     route: ?resolver.FrozenRoute = null,
     bookmark_arena: std.heap.ArenaAllocator,
     bookmark_items: []const bookmarks.Bookmark = &.{},
+    popup_owner_label: ?[]u8 = null,
 
     proxy: ?*proxy_api.Proxy = null,
     ssh_prompts: ?*ssh_challenges.Bridge = null,
@@ -78,6 +80,8 @@ pub const Runtime = struct {
         errdefer self.controller.deinit();
         errdefer self.bookmark_arena.deinit();
         self.bookmark_items = try copyBookmarks(self.bookmark_arena.allocator(), payload.bookmarks);
+        errdefer if (self.popup_owner_label) |label| a.free(label);
+        self.popup_owner_label = try popup.ownerLabel(a, request.spec.plugin.name, payload.route.mode, payload.route.hop_asset_ids.len);
         if (payload.route.mode == .ssh) {
             const ctx = request.context orelse return error.HostContextUnavailable;
             const configs = ctx.connection_configs orelse return error.ConfigurationResolverUnavailable;
@@ -93,6 +97,7 @@ pub const Runtime = struct {
         std.debug.assert(self.stopping and self.proxy == null and self.surface == null);
         self.controller.deinit();
         if (self.route) |*route| route.deinit();
+        if (self.popup_owner_label) |label| self.allocator.free(label);
         self.bookmark_arena.deinit();
         self.allocator.destroy(self);
     }
@@ -153,8 +158,8 @@ pub const Runtime = struct {
             self.stopping = true;
             self.controller.close();
             self.presentation = null;
-            self.requestProxyStop();
             self.destroySurface();
+            self.requestProxyStop();
         }
         return self.cleanupProxy();
     }
@@ -272,6 +277,7 @@ pub const Runtime = struct {
             if (self.surface) |*surface| _ = self.pollSurface(surface) catch false;
         }
         if (!self.controller.routeFailed(attempt)) _ = self.controller.routeDisconnected(attempt);
+        if (self.surface) |*surface| surface.closePopups() catch {};
         self.cancelPagePrompts();
         self.unbindSurface();
         if (self.surface) |*surface| {
@@ -290,6 +296,7 @@ pub const Runtime = struct {
         errdefer surface.deinit();
         if (self.developer_mode) try surface.setInspectable(true);
         try surface.setChangeCallback(nativeChanged);
+        try surface.setPopupContext(self.popup_owner_label orelse "关联自: 浏览器");
         if (self.context) |ctx| if (ctx.challenges) |host| {
             self.page_prompts = page_requests.Bridge.init(self.owner, host, &self.ssh_prompt_ids);
             if (ctx.trust.tls) |trust| {
@@ -301,6 +308,7 @@ pub const Runtime = struct {
     }
 
     fn destroySurface(self: *Runtime) void {
+        if (self.surface) |*surface| surface.closePopups() catch {};
         self.cancelPagePrompts();
         self.page_prompts = null;
         self.unbindSurface();
@@ -478,6 +486,10 @@ pub const Runtime = struct {
                 }
             },
             .back => _ = try (try self.readySurface()).goBack(),
+            .focus_popup => |index| {
+                const surface = try self.readySurface();
+                if (!try surface.focusPopup(index)) return error.WebPopupUnavailable;
+            },
             .forward => _ = try (try self.readySurface()).goForward(),
             .reload => {
                 if (self.controller.path == .disconnected) {
@@ -555,6 +567,18 @@ pub const Runtime = struct {
         else
             self.path_error orelse self.page_error orelse generic_error;
         const proxy = if (self.proxy) |value| value.snapshot() else null;
+        var popup_count: usize = 0;
+        var popup_titles: []const []const u8 = &.{};
+        if (self.surface) |*surface| {
+            popup_count = surface.popupCount() catch 0;
+            if (popup_count != 0) {
+                const titles = try out.alloc([]const u8, popup_count);
+                for (titles, 0..) |*copy, index| {
+                    copy.* = (try surface.copyPopupTitle(index, out)) orelse "";
+                }
+                popup_titles = titles;
+            }
+        }
         var log_buffer: [4096]u8 = undefined;
         return .{
             .arena = arena,
@@ -583,6 +607,8 @@ pub const Runtime = struct {
             .error_message = error_message,
             .bookmarks = items,
             .hops = route_hops,
+            .popup_count = popup_count,
+            .popup_titles = popup_titles,
         };
     }
 

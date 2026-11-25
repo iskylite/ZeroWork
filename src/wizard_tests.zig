@@ -24,6 +24,13 @@ const SaveFixture = struct {
     assets: [1]mod.Draft,
 
     fn init(self: *SaveFixture, protocol: mod.Protocol) !void {
+        try self.initAtIdentity(protocol);
+        activate(self.wizard.next1_btn.?);
+        activate(self.wizard.next2_btn.?);
+        self.cx.layout();
+    }
+
+    fn initAtIdentity(self: *SaveFixture, protocol: mod.Protocol) !void {
         self.* = .{ .cx = undefined, .scope = undefined, .tmp = std.testing.tmpDir(.{}), .registry = undefined, .assets = undefined };
         var initial = try hosts.Registry.parse(a, "[[hosts]]\nconnection_id=41\nrevision=3\nname=\"jump\"\nhost=\"jump.example\"\nuser=\"ops\"\n");
         defer initial.deinit();
@@ -43,9 +50,6 @@ const SaveFixture = struct {
         try self.wizard.setAssets(&self.assets);
         self.wizard.loadDraft(.{ .name = "target", .host = "target.example", .port = 2222, .user = "deploy", .protocol = protocol, .auth = .key, .key_path = "/tmp/id_ed25519", .key_passphrase = "only current draft", .strict_host_key_checking = false, .keepalive = false, .compression = true, .route = &.{@fromBackingInt(41)}, .jump_chain = &.{"jump"}, .startup_commands = &.{"cd /srv"}, .terminal_type = "screen-256color", .scrollback = 1234 });
         self.wizard.show();
-        activate(self.wizard.next1_btn.?);
-        activate(self.wizard.next2_btn.?);
-        self.cx.layout();
     }
     fn deinit(self: *SaveFixture) void {
         self.wizard.hide();
@@ -1009,15 +1013,26 @@ test "SFTP wizard stepper uses current badges and completed checks after navigat
     defer theme.select(previous);
     theme.select(.dark);
     var f: SaveFixture = undefined;
-    try f.init(.sftp);
+    try f.initAtIdentity(.sftp);
     defer f.deinit();
     try f.cx.setTestFrameStep(100);
-    for (0..4) |_| {
-        f.cx.advanceFrameClock();
-        _ = f.cx.render();
+    feedbackFrames(&f);
+    try std.testing.expectEqual(mod.Step.protocol, f.wizard.step);
+    try std.testing.expectEqual(theme.popupSelection(), f.wizard.step_buttons[0].?.getBackground());
+    // Exercise real navigation after the initial frame, as in the native
+    // window; synthetic pre-mount callbacks can inherit another Cx's
+    // transition clock in the combined test runner.
+    for ([_]*ui.Node{ f.wizard.next1_btn.?, f.wizard.next2_btn.? }, [_]mod.Step{ .form, .confirm }) |next, expected| {
+        const rect = next.globalRect();
+        try std.testing.expect(rect.w > 0 and rect.h > 0);
+        f.cx.handleClick(rect.x + rect.w / 2, rect.y + rect.h / 2);
+        f.cx.handleMouseUp(rect.x + rect.w / 2, rect.y + rect.h / 2);
+        feedbackFrames(&f);
+        try std.testing.expectEqual(expected, f.wizard.step);
     }
     try std.testing.expectEqual(ui.Color.TRANSPARENT, f.wizard.step_buttons[0].?.getBackground());
     try std.testing.expectEqual(ui.Color.TRANSPARENT, f.wizard.step_buttons[1].?.getBackground());
+    try std.testing.expectEqual(theme.popupSelection(), f.wizard.step_buttons[2].?.getBackground());
     try std.testing.expectEqual(theme.current().action_accent, f.wizard.step_numbers[2].?.getBackground());
     for ([_][]const u8{ "wizard.step.identity.check", "wizard.step.route.check" }) |id| {
         const check = findId(f.wizard.root.?, id) orelse return error.CompletedStepCheckMissing;
