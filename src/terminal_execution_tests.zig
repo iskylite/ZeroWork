@@ -116,24 +116,42 @@ const Fixture = struct {
     }
     fn ready(self: *Fixture) !execution.Snapshot {
         const until = native.zw_local_monotonic_ms() + 5000;
+        var execution_busy: usize = 0;
+        var last_state: ?execution.State = null;
+        var last_interactive: ?bool = null;
+        var trusted_missing: usize = 0;
+        var trusted_error: ?anyerror = null;
+        var last_editable: ?bool = null;
+        var last_buffer_bytes: ?usize = null;
         while (native.zw_local_monotonic_ms() < until) {
             try self.tick();
             const snapshot = self.service.?.executionSnapshot() catch |err| {
                 if (err == error.WorkerBusy) {
+                    execution_busy += 1;
                     pause();
                     continue;
                 }
                 return err;
             };
+            last_state = snapshot.state;
+            last_interactive = snapshot.interactive_execution;
             if (snapshot.interactive_execution) {
-                if (self.service.?.trustedSnapshot(a) catch null) |value| {
+                const trusted = self.service.?.trustedSnapshot(a) catch |err| blk: {
+                    trusted_error = err;
+                    break :blk null;
+                };
+                if (trusted) |value| {
                     var edit = value;
                     defer edit.deinit(a);
-                    if (edit.editable() and edit.buffer.len == 0) return snapshot;
-                }
+                    const editable = edit.editable();
+                    last_editable = editable;
+                    last_buffer_bytes = edit.buffer.len;
+                    if (editable and edit.buffer.len == 0) return snapshot;
+                } else trusted_missing += 1;
             }
             pause();
         }
+        std.debug.print("Local readiness: state={?t} interactive={?} execution_busy={d} trusted_missing={d} trusted_last_error={?t} trusted_editable={?} buffer_bytes={?d}\n", .{ last_state, last_interactive, execution_busy, trusted_missing, trusted_error, last_editable, last_buffer_bytes });
         std.debug.print("PTY output: {s}\n", .{self.output.items});
         return error.ExecutionIntegrationTimeout;
     }
@@ -462,12 +480,14 @@ test "production host controller returns one real execution and preserves idempo
             const fixture: *Fixture = @ptrCast(@alignCast(raw));
             if (!std.mem.eql(u8, &execution.digest(command), &hash)) return error.CommandHashMismatch;
             const service = fixture.service.?;
-            return .{ .handle = (try service.executionSnapshot()).owner, .service = service, .ownership_revision = 1 };
+            // The fixture's observed owner is a snapshot read, never an
+            // authorization to redispatch. Only WorkerBusy may be retried.
+            return .{ .handle = (try fixture.awaitSnapshot()).owner, .service = service, .ownership_revision = 1 };
         }
         fn resolve(raw: *anyopaque, _: host_tools.Context, owner: @import("host/identity.zig").SessionHandle) !terminal.Service {
             const fixture: *Fixture = @ptrCast(@alignCast(raw));
             const service = fixture.service.?;
-            const actual = try service.executionSnapshot();
+            const actual = try fixture.awaitSnapshot();
             if (!owner.eql(actual.owner)) return error.StaleGeneration;
             return service;
         }
@@ -602,7 +622,7 @@ test "production execution driver owns journal and renews a real Local lease whi
             const self: *@This() = @ptrCast(@alignCast(raw));
             try self.check();
             const service = self.fixture.service.?;
-            return .{ .handle = (try service.executionSnapshot()).owner, .service = service, .ownership_revision = 1 };
+            return .{ .handle = (try self.fixture.awaitSnapshot()).owner, .service = service, .ownership_revision = 1 };
         }
         fn resolve(raw: *anyopaque, _: host_tools.Context, _: @import("host/identity.zig").SessionHandle) !terminal.Service {
             const self: *@This() = @ptrCast(@alignCast(raw));
