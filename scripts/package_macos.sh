@@ -3,19 +3,37 @@ set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$ROOT"
-SIGNING_IDENTITY=$(python3 scripts/macos_signing.py identity)
-python3 scripts/update_manifest.py verify-key
-VERSION=$(python3 -c 'import pathlib,re; print(re.search(r"\.version\s*=\s*\"([^\"]+)\"", pathlib.Path("build.zig.zon").read_text()).group(1))')
+VERSION_INFO=$(python3 - <<'PY'
+import pathlib,re
+
+version=re.search(r'\.version\s*=\s*"([^"]+)"', pathlib.Path("build.zig.zon").read_text()).group(1)
+match=re.fullmatch(r'([0-9]+\.[0-9]+\.[0-9]+)(?:-(alpha|rc)([0-9]{1,3}))?',version)
+if match is None:
+    raise SystemExit("Unsupported package version; expected X.Y.Z, X.Y.Z-alphaNN or X.Y.Z-rcN")
+short_version,stage,ordinal=match.groups()
+build_version=short_version
+if stage:
+    number=int(ordinal)
+    spelling=f"{number:02d}" if stage == 'alpha' else str(number)
+    if not 1 <= number <= 255 or ordinal != spelling:
+        raise SystemExit("Invalid prerelease build number; expected alpha01..alpha255 or rc1..rc255")
+    build_version+=('a' if stage == 'alpha' else 'fc')+str(number)
+print(version,short_version,build_version,'0' if stage else '1')
+PY
+)
+read -r VERSION SHORT_VERSION BUILD_VERSION AUTOMATIC_UPDATE <<EOF
+$VERSION_INFO
+EOF
 OUT="${1:-$ROOT/dist}"
-AUTOMATIC_UPDATE=1
-case "$VERSION" in *-rc*) AUTOMATIC_UPDATE=0 ;; esac
 ZIP="$OUT/ZeroWork-$VERSION-arm64.zip"
 FEED="$OUT/update.json"
 if [ "$AUTOMATIC_UPDATE" -eq 1 ]; then
   [ ! -e "$ZIP" ] && [ ! -e "$FEED" ] || { echo "Refusing to overwrite automatic update artifacts" >&2; exit 1; }
+  python3 scripts/update_manifest.py verify-key
 fi
 DMG="$OUT/ZeroWork-$VERSION-arm64.dmg"
 [ ! -e "$DMG" ] || { echo "Refusing to overwrite $DMG" >&2; exit 1; }
+SIGNING_IDENTITY=$(python3 scripts/macos_signing.py identity)
 STAGING=$(mktemp -d "${TMPDIR:-/tmp}/zerowork-package.XXXXXX")
 trap 'rm -rf "$STAGING"' EXIT HUP INT TERM
 APP="$STAGING/image/ZeroWork.app"
@@ -48,14 +66,9 @@ python3 scripts/verify_release_environment.py "$APP/Contents/MacOS/zw_ipc.so"
 python3 scripts/verify_release_environment.py "$APP/Contents/MacOS/zw_execution.so"
 python3 scripts/verify_release_environment.py "$APP/Contents/MacOS/zw_secret_consume.so"
 python3 scripts/verify_release_environment.py "$APP/Contents/MacOS/zw_execution_guard"
-python3 - "$APP" "$VERSION" <<'PY'
-import pathlib,plistlib,re,subprocess,sys
-app=pathlib.Path(sys.argv[1]);version=sys.argv[2]
-match=re.fullmatch(r'([0-9]+\.[0-9]+\.[0-9]+)(?:-rc([1-9][0-9]{0,2}))?',version)
-if match is None or (match[2] is not None and int(match[2])>255):
-    raise SystemExit('Unsupported package version; expected X.Y.Z or X.Y.Z-rc1..rc255')
-short_version=match[1]
-build_version=short_version+('fc'+match[2] if match[2] is not None else '')
+python3 - "$APP" "$VERSION" "$SHORT_VERSION" "$BUILD_VERSION" <<'PY'
+import pathlib,plistlib,subprocess,sys
+app=pathlib.Path(sys.argv[1]);version,short_version,build_version=sys.argv[2:]
 info={'CFBundleExecutable':'ZeroWork','CFBundleIdentifier':'com.zerowork.app','CFBundleName':'ZeroWork','CFBundleDisplayName':'ZeroWork','CFBundleIconFile':'AppIcon','CFBundlePackageType':'APPL','CFBundleShortVersionString':short_version,'CFBundleVersion':build_version,'ZeroWorkReleaseVersion':version,'LSMinimumSystemVersion':'13.0','LSArchitecturePriority':['arm64']}
 # The browser can open user-configured HTTP services. Native app requests keep ATS.
 info['NSAppTransportSecurity']={'NSAllowsArbitraryLoadsInWebContent':True}
@@ -103,7 +116,7 @@ ZeroWork $VERSION · Apple Silicon · macOS 13 或更新版本
 
 本安装包不包含测试 Harness、测试插件、服务器密码或用户配置。
 应用数据存于 ~/Library/Application Support/com.zerowork.app，诊断日志与缓存存于 Library/Logs 和 Library/Caches 下同名目录。
-已保存的凭据默认存于 macOS 钥匙串。可在「数据与日志」中转为仅当前用户可读写的本地文件。
+可在「数据与日志」中选择仅当前用户可读写的本地凭据存储或 macOS 钥匙串。
 首次启动兼容迁移旧 ~/.zerowork。仅将 App 移到废纸篓会保留数据；彻底清理请在设置 → 数据中选择“清除全部应用数据…”。
 $SIGNING_NOTICE
 TXT
@@ -115,6 +128,6 @@ if [ "$AUTOMATIC_UPDATE" -eq 1 ]; then
   mv "$STAGING/update.json" "$FEED"
   echo "Created $ZIP and $FEED; upload all assets to a draft stable Release before publishing it as Latest."
 else
-  echo "RC package: automatic updates remain on the stable release channel."
+  echo "Prerelease DMG only: no ZIP or stable automatic update manifest was generated."
 fi
 echo "Created $DMG"
