@@ -54,6 +54,7 @@ pub const Snapshot = struct {
         errdefer arena.deinit();
         const owned = arena.allocator();
         var copy = value;
+        try copy.cloneUnknownFields(owned, value.unknown_fields);
         copy.ui.theme = try owned.dupe(u8, value.ui.theme);
         copy.ui.font_family = try owned.dupe(u8, value.ui.font_family);
         copy.ui.font_weight = try owned.dupe(u8, value.ui.font_weight);
@@ -186,9 +187,16 @@ pub const RuntimeConfig = struct {
             self.publish(&prepared, self.background_ready);
             self.external_provider_revision = self.value.config_revision;
         }
-        // The sidebar width is persisted by its resize action outside the
-        // settings editor's field list.
-        if (fields.count() == 0 and self.value.ui.sidebar_width == loaded.value.ui.sidebar_width) self.disk_baseline = baseline;
+        // Layout preferences are persisted outside the settings editor's
+        // field list. Keep the old baseline when any changed on disk so a
+        // later save cannot silently overwrite an external edit.
+        const current_ui = self.value.ui;
+        const disk_ui = loaded.value.ui;
+        if (fields.count() == 0 and current_ui.sidebar_width == disk_ui.sidebar_width and
+            current_ui.ai_dock_width == disk_ui.ai_dock_width and
+            current_ui.ai_dock_preferred == disk_ui.ai_dock_preferred and
+            current_ui.mascot_anchor_x == disk_ui.mascot_anchor_x and
+            current_ui.mascot_anchor_y == disk_ui.mascot_anchor_y) self.disk_baseline = baseline;
         self.observed_disk = baseline;
         self.observed_stamp = stamp;
         return provider_fields.count() != 0;
@@ -338,6 +346,73 @@ test "runtime config defaults when file is absent" {
     var runtime = try RuntimeConfig.loadOrDefault(std.testing.io, tmp.dir, std.testing.allocator, "config.toml");
     defer runtime.deinit();
     try std.testing.expectEqual(@as(u16, 64), runtime.value.log.ring_mb);
+}
+
+test "workspace layout updates and unrelated settings survive each other and restart" {
+    const Controller = @import("settings_controller.zig").Controller;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.testing.io;
+    var target = try RuntimeConfig.loadOrDefault(io, tmp.dir, std.testing.allocator, "config.toml");
+    defer target.deinit();
+    var draft = try Controller.init(std.testing.allocator, target.value);
+    defer draft.deinit();
+    try draft.editKey("ui", "font_size", .{ .unsigned = 18 });
+    // Each window/action takes the latest shared snapshot before its own edit.
+    var candidate = target.value;
+    candidate.ui.ai_dock_preferred = true;
+    try target.save(io, tmp.dir, candidate);
+    candidate = target.value;
+    candidate.ui.ai_dock_width = 512.5;
+    try target.save(io, tmp.dir, candidate);
+    candidate = target.value;
+    candidate.ui.mascot_anchor_x = 0.2;
+    candidate.ui.mascot_anchor_y = 0.8;
+    try target.save(io, tmp.dir, candidate);
+    try draft.save(io, tmp.dir, &target);
+    candidate = target.value;
+    candidate.ui.ai_dock_preferred = false;
+    try target.save(io, tmp.dir, candidate);
+    var restarted = try RuntimeConfig.loadOrDefault(io, tmp.dir, std.testing.allocator, "config.toml");
+    defer restarted.deinit();
+    try std.testing.expectEqual(@as(u8, 18), restarted.value.ui.font_size);
+    try std.testing.expect(!restarted.value.ui.ai_dock_preferred);
+    try std.testing.expectEqual(@as(f32, 512.5), restarted.value.ui.ai_dock_width);
+    try std.testing.expectEqual(@as(f32, 0.2), restarted.value.ui.mascot_anchor_x);
+    try std.testing.expectEqual(@as(f32, 0.8), restarted.value.ui.mascot_anchor_y);
+    const bytes = (try store.readConfigSource(io, tmp.dir, std.testing.allocator, "config.toml")).?;
+    defer std.testing.allocator.free(bytes);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "ai_dock_preferred = false") != null);
+    candidate = target.value;
+    candidate.ui.mascot_anchor_x = std.math.inf(f32);
+    try std.testing.expectError(error.OutOfRange, target.save(io, tmp.dir, candidate));
+}
+
+test "workspace layout external edits keep the runtime save conflict guard" {
+    inline for (.{ "ai_dock_width", "ai_dock_preferred", "mascot_anchor_x", "mascot_anchor_y" }) |field| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const io = std.testing.io;
+        try store.save(io, tmp.dir, "config.toml", .{});
+        var target = try RuntimeConfig.loadOrDefault(io, tmp.dir, std.testing.allocator, "config.toml");
+        defer target.deinit();
+        var outside = target.value;
+        if (comptime std.mem.eql(u8, field, "ai_dock_preferred")) {
+            @field(outside.ui, field) = true;
+        } else if (comptime std.mem.eql(u8, field, "ai_dock_width")) {
+            @field(outside.ui, field) = 700;
+        } else {
+            @field(outside.ui, field) = 0.4;
+        }
+        try store.save(io, tmp.dir, "config.toml", outside);
+        try std.testing.expect(!try target.reloadProviders(io, tmp.dir));
+        var candidate = target.value;
+        candidate.ui.font_size = 18;
+        try std.testing.expectError(error.ConfigFileConflict, target.save(io, tmp.dir, candidate));
+        var restarted = try RuntimeConfig.loadOrDefault(io, tmp.dir, std.testing.allocator, "config.toml");
+        defer restarted.deinit();
+        try std.testing.expectEqual(@field(outside.ui, field), @field(restarted.value.ui, field));
+    }
 }
 
 test "AI defaults persist across restart while existing agents keep their choices and policy fence" {

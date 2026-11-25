@@ -31,7 +31,7 @@ test "BMC composition includes Web and notes, and acceptance adds its fixture" {
     defer production.deinit() catch unreachable;
     var normal = try linked.initRegistry(a, &.{}, production.manifests(), production.renderers());
     defer normal.deinit();
-    try T.expectEqual(@as(usize, 3), normal.manifests().len);
+    try T.expectEqual(@as(usize, 4), normal.manifests().len);
     const manifest = normal.find("bmc_ikvm").?;
     try T.expect(normal.find("fixture_probe") == null);
     const web = normal.find("web").?;
@@ -48,7 +48,7 @@ test "BMC composition includes Web and notes, and acceptance adds its fixture" {
     defer acceptance.deinit() catch unreachable;
     var combined = try linked.initRegistry(a, &.{}, acceptance.manifests(), acceptance.renderers());
     defer combined.deinit();
-    try T.expectEqual(@as(usize, 4), combined.manifests().len);
+    try T.expectEqual(@as(usize, 5), combined.manifests().len);
     try T.expect(combined.find("bmc_ikvm") != null);
     try T.expect(combined.find("fixture_probe") != null);
     try T.expect(combined.find("web") != null);

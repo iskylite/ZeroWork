@@ -1946,9 +1946,20 @@ pub const ApplicationHost = struct {
             const value = self.sessions.connectionEnvelope(attempt.handle) orelse continue;
             if (std.mem.eql(u8, value.protocol_id, protocol_id)) return;
         }
+        _ = try self.openQuickContent(protocol_id, payload);
+    }
+
+    /// The renderer is bound to a new SessionHandle; never retarget an
+    /// unrelated existing page when a user starts another AI or group pane.
+    pub fn openQuickContent(self: *ApplicationHost, protocol_id: []const u8, payload: []const u8) !session.Accepted {
+        if (self.workspace.shutting_down or self.windowClosePending()) return error.WorkspaceClosed;
+        const manifest = self.sessions.registry.find(protocol_id) orelse return error.UnknownPlugin;
+        const renderer = self.sessions.registry.renderer(manifest.content_renderer) orelse return error.ContentRendererUnavailable;
+        if (renderer.mount == null) return error.ContentRendererUnavailable;
         try self.plugin_attempts.ensureUnusedCapacity(self.allocator, 1);
         const accepted = try self.sessions.openQuick(protocol_id, payload, .{ .request_key = try self.dispatcher.issue(), .target = self.target() });
         self.plugin_attempts.appendAssumeCapacity(accepted);
+        return accepted;
     }
 
     /// A content-only presentation can reserve its ordinary session identity

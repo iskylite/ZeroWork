@@ -20,6 +20,17 @@ pub const Controller = struct {
         self.* = undefined;
     }
 
+    pub fn clearOwnerData(self: *Controller) void {
+        self.dismiss();
+        var i = self.candidates.items.len;
+        while (i != 0) {
+            i -= 1;
+            if (self.candidates.items[i].source == .builtin) continue;
+            _ = self.candidates.swapRemove(i);
+            self.allocator.free(self.owned_text.swapRemove(i));
+        }
+    }
+
     pub fn add(self: *Controller, text: []const u8, source: completion.Source, frequency: u32, last_used_ms: i64) !void {
         const owned = try self.allocator.dupe(u8, text);
         errdefer self.allocator.free(owned);
@@ -55,8 +66,10 @@ pub const Controller = struct {
         if (!self.enabled or query.len == 0) return output[0..0];
         var count: usize = 0;
         for (self.candidates.items) |candidate| {
-            if (candidate.source != .history or std.mem.indexOf(u8, candidate.text, query) == null or std.mem.eql(u8, candidate.text, query)) continue;
-            if (prefix_only and !std.mem.startsWith(u8, candidate.text, query)) continue;
+            if (candidate.source != .history or candidate.text.len <= query.len) continue;
+            if (prefix_only) {
+                if (!std.mem.startsWith(u8, candidate.text, query)) continue;
+            } else if (std.mem.indexOf(u8, candidate.text, query) == null) continue;
             const score = @as(f64, @floatFromInt(candidate.frequency)) + 1.0 / (1.0 + @as(f64, @floatFromInt(@max(0, now_ms - candidate.last_used_ms))));
             if (output.len == 0) break;
             var index = @min(count, output.len - 1);

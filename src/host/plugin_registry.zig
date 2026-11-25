@@ -86,6 +86,12 @@ pub const PreferenceField = struct {
     apply_timing: enum { immediate, next_connection } = .next_connection,
 };
 pub const SettingsSection = struct { fields: []const PreferenceField };
+/// V0.8 shell policy: a full-page plugin may own the left column itself.
+pub const WorkspaceChrome = struct {
+    /// false hides the global host sidebar while this plugin's tab is active
+    /// and hands ⌘B to the plugin's own left rail.
+    show_host_sidebar: bool = true,
+};
 pub const ConnectionContribution = struct {
     create_kind: enum { saved, saved_or_temporary } = .saved,
     payload_version: u32 = 1,
@@ -127,6 +133,7 @@ pub const PluginManifest = struct {
     provides: []const ApiDefinition = &.{},
     icons: Icons = .{},
     integration: Integration = .{},
+    workspace_chrome: WorkspaceChrome = .{},
     connection: ?ConnectionContribution = null,
     quick_create: ?QuickCreateContribution = null,
     settings_section: ?SettingsSection = null,

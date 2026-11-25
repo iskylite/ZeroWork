@@ -180,6 +180,7 @@ LIBSSH2_SFTP_HANDLE *zw_libssh2_sftp_open_exclusive(LIBSSH2_SFTP *sftp, const ch
 int zw_libssh2_sftp_truncate(LIBSSH2_SFTP_HANDLE *handle, unsigned long long size);
 LIBSSH2_SFTP_HANDLE *zw_libssh2_sftp_open_append(LIBSSH2_SFTP *sftp, const char *path, unsigned long long offset);
 LIBSSH2_SFTP_HANDLE *zw_libssh2_sftp_open_read(LIBSSH2_SFTP *sftp, const char *path);
+LIBSSH2_SFTP_HANDLE *zw_libssh2_sftp_open_resume(LIBSSH2_SFTP *sftp, const char *path);
 void zw_libssh2_sftp_seek(LIBSSH2_SFTP_HANDLE *handle, unsigned long long offset);
 long zw_libssh2_sftp_read(LIBSSH2_SFTP_HANDLE *handle, unsigned char *buffer, size_t len);
 long zw_libssh2_sftp_write(LIBSSH2_SFTP_HANDLE *handle, const unsigned char *buffer, size_t len);

@@ -31,7 +31,7 @@ pub const Controls = struct {
     pub fn ensureDefaults(self: *Controls, ai: @import("../config/config.zig").Ai) void {
         if (self.permission == null) self.permission = ai.permission_mode;
         if (self.execution_mode == null) self.execution_mode = ai.execution_mode;
-        if (self.swarm_mode == null) self.swarm_mode = @enumFromInt(@intFromEnum(ai.swarm_mode_default));
+        if (self.swarm_mode == null) self.swarm_mode = @fromBackingInt(@intCast(@backingInt(ai.swarm_mode_default)));
     }
 
     pub fn ensureEffort(self: *Controls, ai: @import("../config/config.zig").Ai) void {
@@ -427,13 +427,26 @@ pub const Store = struct {
     pub fn commitHandoff(self: *Store, plan: Handoff) !void {
         return self.commitHandoffImpl(plan, false);
     }
+    /// Return a grouped standalone conversation to its original AI tab.
+    /// This is never a general group-to-session export.
+    pub fn prepareReturnToSession(self: *Store, id: ConversationId, from_group: u64, to_session: u64) !Handoff {
+        const state = self.findConversation(id) orelse return error.ConversationNotFound;
+        const from: scope.Owner = .{ .group = from_group };
+        const to: scope.Owner = .{ .session = to_session };
+        if (from_group == 0 or to_session == 0 or state.child_agent != null or state.closed or state.ended or !state.owner.eql(from) or state.initial_owner == null or !state.initial_owner.?.eql(to)) return error.InvalidBindingHandoff;
+        if (self.authority) |service| if (service.store.hasBoundChildren(id)) return error.ChildSettlementRequired;
+        for (self.states.items) |other| if (other.child_agent == null and !other.closed and other.owner.eql(to)) return error.BindingConflict;
+        return .{ .id = id, .runtime_id = state.id, .from = from, .to = to, .revision = state.binding_revision, .next_revision = try @import("../host/identity.zig").advance(state.binding_revision) };
+    }
     pub fn commitLifecycleHandoff(self: *Store, plan: Handoff) !void {
         return self.commitHandoffImpl(plan, true);
     }
     fn commitHandoffImpl(self: *Store, plan: Handoff, preserve_route: bool) !void {
         const state = self.findConversation(plan.id) orelse return error.ConversationNotFound;
         if (state.child_agent != null or state.id != plan.runtime_id or state.closed or state.ended or !state.owner.eql(plan.from) or state.binding_revision != plan.revision) return error.BindingChanged;
-        if (plan.from != .session or plan.to != .group or plan.to.group == 0 or plan.next_revision != try @import("../host/identity.zig").advance(plan.revision)) return error.InvalidBindingHandoff;
+        const forward = plan.from == .session and plan.to == .group and plan.to.group != 0;
+        const returning = !preserve_route and plan.from == .group and plan.to == .session and plan.to.session != 0 and state.initial_owner != null and state.initial_owner.?.eql(plan.to);
+        if ((!forward and !returning) or plan.next_revision != try @import("../host/identity.zig").advance(plan.revision)) return error.InvalidBindingHandoff;
         for (self.states.items) |other| if (other.child_agent == null and !other.closed and other.owner.eql(plan.to)) return error.BindingConflict;
         if (self.authority) |service| if (service.store.find(plan.id)) |record| {
             const ticket = try service.store.fence(record.id);
@@ -711,6 +724,23 @@ test "owner controls own callback model strings and keep session and group overr
     try std.testing.expectEqualStrings("quiet", group_restored.model.?.model_id);
     try std.testing.expectEqual(PermissionMode.confirm, group_restored.permission.?);
     try std.testing.expectEqual(Effort.low, group_restored.effort.?);
+}
+
+test "grouped standalone conversation can only return to its own original tab" {
+    const a = std.testing.allocator;
+    var store = Store.init(a);
+    defer store.deinit();
+    const initial: scope.Owner = .{ .session = 7 };
+    const state = try store.create(initial);
+    state.draft = try a.dupe(u8, "same conversation draft");
+    const id = state.conversation_id;
+    try store.commitHandoff(try store.prepareHandoff(id, initial, state.binding_revision, 13));
+    try std.testing.expectError(error.InvalidBindingHandoff, store.prepareReturnToSession(id, 13, 8));
+    try store.commitHandoff(try store.prepareReturnToSession(id, 13, 7));
+    const returned = store.findConversation(id).?;
+    try std.testing.expect(returned.owner.eql(initial));
+    try std.testing.expectEqual(@as(u64, 3), returned.binding_revision);
+    try std.testing.expectEqualStrings("same conversation draft", returned.draft.?);
 }
 
 test "owner controls fall back to supported effort across models and providers" {

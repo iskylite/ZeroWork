@@ -44,6 +44,11 @@ const ai_tab_grouping = @import("../ai/tab_grouping.zig");
 var tab_ids: identity.Allocator(identity.TabId) = .{};
 var history_ids: identity.Allocator(identity.HistoryId) = .{};
 
+pub const MascotOcclusion = struct {
+    context: *anyopaque,
+    rect: *const fn (*anyopaque) ?ui.ComputedRect,
+};
+
 pub const Palette = struct {
     bg: ui.Color,
     chrome: ui.Color,
@@ -147,6 +152,9 @@ pub const SessionTab = struct {
     plugin_presentation: plugin_ui.ContentPresentation = .hidden,
     plugin_floating_root: ?*ui.Node = null,
     plugin_protocol_id: []const u8 = "",
+    /// Explicit AI target selections belong to the retained plugin tab. The
+    /// generation prevents a reopened connection from inheriting authority.
+    ai_associated_targets: @import("../ai/tool_scope.zig").ExplicitTargets = .{},
     local_bound: bool = false,
     local_state: LocalState = .starting,
     local_banner: ?*ui.Node = null,
@@ -393,6 +401,8 @@ pub const Workspace = struct {
     dismiss_notes_float: ?ui.HandlerRef = null,
     settings_backdrop: ?*ui.Node = null,
     notes_float_key: ?ui.events.KeyCode = null,
+    /// V0.8: mascot island owns a live rect that must occlude native WebViews.
+    mascot_occlusion: ?MascotOcclusion = null,
 
     font_family_resolver: ?*const fn ([]const u8) u16 = null,
     terminal_typography_resolver: ?*const fn (*TerminalViewNode, TerminalTypographyConfig) anyerror!void = null,
@@ -510,6 +520,8 @@ pub const Workspace = struct {
     } = null,
     command_output: ?*TerminalViewNode = null,
     creation_group: ?u32 = null,
+    /// V0.8 §3.2.1: newly created AI tab waiting to join this tab's group.
+    pending_ai_group: ?struct { handle: identity.SessionHandle, target: identity.TabId } = null,
     owned_creation_pending: bool = false,
     prepared_group_views: usize = 0,
     creation_tab_color: ?u32 = null,
@@ -2549,6 +2561,7 @@ pub const Workspace = struct {
     }
 
     fn groupMemberKind(self: *Workspace, tab: *const SessionTab) []const u8 {
+        if (std.mem.eql(u8, tab.plugin_protocol_id, @import("../plugins/ai/plugin.zig").id)) return "AI";
         if (tab.local) return "Local Terminal";
         const protocol = if (tab.plugin_protocol_id.len != 0) tab.plugin_protocol_id else if (tab.host_snapshot) |snapshot| snapshot.value.protocolId() else if (tab.terminal != null) "ssh" else "sftp";
         if (self.plugins.find(protocol)) |manifest| return manifest.display_name;
@@ -2806,7 +2819,7 @@ pub const Workspace = struct {
         self.cx.requestRedraw();
     }
 
-    fn groupView(self: *Workspace, id: u32) ?*group_view.View {
+    pub fn groupView(self: *Workspace, id: u32) ?*group_view.View {
         for (self.group_views.items) |view| if (view.id == id) return view;
         return null;
     }
@@ -5063,6 +5076,15 @@ pub const Workspace = struct {
     /// activation creates a new session with its own immutable snapshot.
     pub fn openSession(self: *Workspace, index: usize) !void {
         try self.newSession(index);
+    }
+
+    /// V0.8 §3.2.1: joins an already-created tab to `target`'s group using the
+    /// same deferred membership transaction as a tab drop.
+    pub fn groupTabWith(self: *Workspace, source: identity.TabId, target: identity.TabId) !void {
+        if (source == target) return error.InvalidGroupTarget;
+        try self.validateGroupCreation(target);
+        self.pending_tab_drop = .{ .source = source, .target = target };
+        self.cx.requestRedraw();
     }
 
     fn validateGroupCreation(self: *Workspace, target: identity.TabId) !void {

@@ -2,7 +2,10 @@ const std = @import("std");
 const Io = std.Io;
 
 pub const dirname = "credentials";
+/// Local private storage is the product default. The keychain marker is only
+/// written after an explicit switch, so a fresh install never prompts.
 const selected_marker = ".local-storage";
+const keychain_marker = ".keychain-storage";
 const private_dir: Io.File.Permissions = @fromBackingInt(0o700);
 const private_file: Io.File.Permissions = @fromBackingInt(0o600);
 const max_bytes = 8 * 1024 * 1024;
@@ -54,27 +57,54 @@ pub fn get(self: Store, allocator: std.mem.Allocator, reference: []const u8) ![]
     return bytes;
 }
 
-pub fn isSelected(self: Store) !bool {
-    const marker = self.get(std.heap.page_allocator, selected_marker) catch |err| switch (err) {
-        error.CredentialMissing => return false,
+fn marker(self: Store, name: []const u8) !?bool {
+    const value = self.get(std.heap.page_allocator, name) catch |err| switch (err) {
+        error.CredentialMissing => return null,
         else => return err,
     };
-    defer std.heap.page_allocator.free(marker);
-    if (!std.mem.eql(u8, marker, "1")) return error.CredentialStorageFailure;
+    defer std.heap.page_allocator.free(value);
+    if (!std.mem.eql(u8, value, "1")) return error.CredentialStorageFailure;
+    return true;
+}
+
+/// Local private files are the default; only an explicit Keychain switch
+/// flips the backend.
+pub fn isSelected(self: Store) !bool {
+    if (try self.marker(keychain_marker) != null) return false;
+    if (try self.marker(selected_marker) != null) return true;
     return true;
 }
 
 pub fn select(self: Store) !void {
     try self.add(selected_marker, "1");
+    try self.clearMarker(keychain_marker);
 }
 
-/// Once the marker is removed the active store is Keychain. Local data may
-/// only be deleted after the directory entry has been synced.
+/// Switching to Keychain records the choice, so the next launch does not fall
+/// back to the local default. Local data may only be deleted after the
+/// directory entry has been synced.
 pub fn deselect(self: Store) !bool {
+    try self.add(keychain_marker, "1");
     var dir = try self.open(false);
     defer dir.close(self.io);
-    try dir.deleteFile(self.io, selected_marker);
+    dir.deleteFile(self.io, selected_marker) catch |err| switch (err) {
+        error.FileNotFound => {},
+        else => return err,
+    };
     return std.c.fsync(dir.handle) == 0;
+}
+
+fn clearMarker(self: Store, name: []const u8) !void {
+    var dir = self.open(false) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+    defer dir.close(self.io);
+    dir.deleteFile(self.io, name) catch |err| switch (err) {
+        error.FileNotFound => {},
+        else => return err,
+    };
+    _ = std.c.fsync(dir.handle);
 }
 
 pub fn references(self: Store, allocator: std.mem.Allocator, comptime valid: fn ([]const u8) bool) ![][68]u8 {
@@ -158,17 +188,19 @@ test "local credentials persist across opens and reject non-private storage" {
     const path = try tmp.dir.realPathFileAlloc(io, ".", allocator);
     defer allocator.free(path);
     const store: Store = .{ .io = io, .directory = path };
-    try std.testing.expect(!try store.isSelected());
+    // V0.8: local private storage is the default; Keychain only after an
+    // explicit switch.
+    try std.testing.expect(try store.isSelected());
     try std.testing.expectError(error.CredentialMissing, store.get(allocator, "first"));
     try store.add("first", "fixture value");
     try std.testing.expectError(error.CredentialAlreadyExists, store.add("first", "replacement"));
     try store.importValue("first", "fixture value");
     try std.testing.expectError(error.CredentialStorageFailure, store.importValue("first", "different"));
-    try std.testing.expect(!try store.isSelected());
-    try store.select();
     try std.testing.expect(try store.isSelected());
     try std.testing.expect(try store.deselect());
     try std.testing.expect(!try store.isSelected());
+    try store.select();
+    try std.testing.expect(try store.isSelected());
     const secret = try store.get(allocator, "first");
     defer allocator.free(secret);
     try std.testing.expectEqualStrings("fixture value", secret);

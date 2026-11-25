@@ -2,6 +2,7 @@
 //! transport target: every call is checked against its captured owner scope.
 const std = @import("std");
 const permission = @import("permission.zig");
+const identity = @import("../host/identity.zig");
 
 pub const Owner = union(enum) {
     session: u64,
@@ -14,6 +15,34 @@ pub const Owner = union(enum) {
     }
 };
 pub const max_targets = 16;
+pub const ExplicitTargets = struct {
+    handles: [max_targets]identity.SessionHandle = undefined,
+    len: usize = 0,
+
+    pub fn slice(self: *const ExplicitTargets) []const identity.SessionHandle {
+        return self.handles[0..self.len];
+    }
+
+    pub fn contains(self: *const ExplicitTargets, handle: identity.SessionHandle) bool {
+        for (self.slice()) |entry| if (entry.eql(handle)) return true;
+        return false;
+    }
+
+    pub fn add(self: *ExplicitTargets, handle: identity.SessionHandle) !void {
+        if (self.contains(handle)) return;
+        if (self.len == max_targets) return error.TooManyTargets;
+        self.handles[self.len] = handle;
+        self.len += 1;
+    }
+
+    pub fn remove(self: *ExplicitTargets, id: u64) void {
+        for (self.slice(), 0..) |handle, index| if (@backingInt(handle.session_id) == id) {
+            std.mem.copyForwards(identity.SessionHandle, self.handles[index .. self.len - 1], self.handles[index + 1 .. self.len]);
+            self.len -= 1;
+            return;
+        };
+    }
+};
 pub const Targets = struct {
     ids: [max_targets]u64 = @splat(0),
     len: usize = 0,
@@ -29,6 +58,9 @@ pub const Scope = struct {
     inventory: ?[]const u64 = null,
     /// The controller may add sessions created for this exact child task.
     child_inventory: bool = false,
+    /// User-chosen targets on the independent AI's retained tab; not a child
+    /// grant and never sufficient without membership in this exact snapshot.
+    explicit_inventory: bool = false,
 
     pub fn memberIds(self: *const Scope) []const u64 {
         return self.inventory orelse self.members.slice();
@@ -44,7 +76,7 @@ pub const Scope = struct {
             if (id == 0 or std.mem.indexOfScalar(u64, self.memberIds(), id) == null) return error.TargetOutsideAssistant;
             if (std.mem.indexOfScalar(u64, ids[0..i], id) != null) return error.DuplicateTarget;
             switch (self.owner) {
-                .session => |session| if (id != session and !self.child_inventory) return error.TargetOutsideAssistant,
+                .session => |session| if (id != session and !self.child_inventory and !self.explicit_inventory) return error.TargetOutsideAssistant,
                 .group => {},
             }
         }
@@ -60,6 +92,26 @@ pub const Scope = struct {
         return result;
     }
 };
+
+test "standalone selections are tab-local, exact-generation and explicitly scoped" {
+    const terminal: identity.SessionHandle = .{ .session_id = @fromBackingInt(7), .generation = 1 };
+    const successor: identity.SessionHandle = .{ .session_id = terminal.session_id, .generation = 2 };
+    var first: ExplicitTargets = .{};
+    var second: ExplicitTargets = .{};
+    try first.add(terminal);
+    try first.add(terminal);
+    try second.add(successor);
+    try std.testing.expectEqual(@as(usize, 1), first.slice().len);
+    try std.testing.expect(first.contains(terminal) and !first.contains(successor));
+    try std.testing.expect(second.contains(successor) and !second.contains(terminal));
+    var capture: Scope = .{ .owner = .{ .session = 42 }, .members = .{}, .inventory = &.{7} };
+    try std.testing.expectError(error.TargetOutsideAssistant, capture.validate(&.{7}));
+    capture.explicit_inventory = true;
+    _ = try capture.validate(&.{7});
+    try std.testing.expectError(error.TargetOutsideAssistant, capture.validate(&.{6}));
+    first.remove(7);
+    try std.testing.expect(!first.contains(terminal) and second.contains(successor));
+}
 
 test "frozen directory exceeds one call without granting extra call targets" {
     var ids: [300]u64 = undefined;

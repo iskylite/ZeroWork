@@ -1,6 +1,6 @@
 #import "macos_notifications.h"
+#import "macos_notification_content.h"
 #import <AppKit/AppKit.h>
-#import <UserNotifications/UserNotifications.h>
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
@@ -58,12 +58,8 @@ static UNMutableNotificationContent *notification_content(uint64_t event_id, ZW_
         NSString *instance, const uint8_t *summary, size_t length) {
     NSString *text = [[NSString alloc] initWithBytes:summary length:length encoding:NSUTF8StringEncoding];
     if (!text) return nil;
-    UNMutableNotificationContent *content = [UNMutableNotificationContent new];
-    content.title = @"ZeroWork";
-    content.body = text;
+    UNMutableNotificationContent *content = zw_notification_content(text);
     content.userInfo = target_info(event_id, target, instance);
-    /* System event alerts are silent. The VT Bell policy has its own sound path. */
-    content.sound = nil;
     return content;
 }
 
@@ -124,7 +120,7 @@ static BOOL decode_info(NSDictionary *info, NSString *instance, ZW_NOTIFICATION_
     if (bundle.bundleIdentifier.length && [bundle.bundleURL.pathExtension.lowercaseString isEqualToString:@"app"]) {
         @try {
             _center = UNUserNotificationCenter.currentNotificationCenter;
-            if (_center.delegate) {
+            if (_center.delegate && ![_center.delegate isKindOfClass:ZWStartupNotificationDelegate.class]) {
                 _center = nil;
                 _capabilities.unavailable_reason = ZW_NOTIFY_DELEGATE_IN_USE;
             } else if (_center) {
@@ -199,8 +195,9 @@ static BOOL decode_info(NSDictionary *info, NSString *instance, ZW_NOTIFICATION_
         withCompletionHandler:(void (^)(UNNotificationPresentationOptions))completionHandler {
     (void)center;
     ZW_NOTIFICATION_EVENT value = {0};
-    BOOL own = [notification.request.identifier hasPrefix:ZWNotificationPrefix] &&
-        decode_info(notification.request.content.userInfo, self.instance, &value) && value.current_instance;
+    BOOL own = [notification.request.identifier isEqualToString:ZWStartupFailureNotification] ||
+        ([notification.request.identifier hasPrefix:ZWNotificationPrefix] &&
+        decode_info(notification.request.content.userInfo, self.instance, &value) && value.current_instance);
     completionHandler(own && ![self isClosed] ?
         UNNotificationPresentationOptionBanner | UNNotificationPresentationOptionList : UNNotificationPresentationOptionNone);
 }

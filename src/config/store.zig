@@ -1,5 +1,6 @@
 const std = @import("std");
 const config = @import("config.zig");
+const workspace_layout = @import("workspace_layout.zig");
 pub const credentials = @import("credential_store.zig");
 pub const plugin_credential_references = @import("plugin_credential_references.zig");
 pub const CleanupStatus = plugin_credential_references.CleanupStatus;
@@ -72,7 +73,10 @@ pub fn saveWithCredentialRefsWithOptions(io: std.Io, dir: std.Io.Dir, sub_path: 
     if (options.expected_config) |expected| {
         if (!std.meta.eql(expected, ConfigBaseline.fromSource(baseline_source))) return error.ConfigFileConflict;
     }
-    const baseline = if (baseline_source) |source| try config.Config.parseWithAllocator(a, source) else null;
+    const baseline = if (baseline_source) |source| try parseConfig(a, source, null) else null;
+    // Preserve unsupported assignments from the exact on-disk revision being
+    // replaced, including for direct store callers without a loaded snapshot.
+    if (baseline) |old| try disk.cloneUnknownFields(allocator, old.unknown_fields);
     var tx = try credentials.Transaction.init();
     defer tx.deinit();
     for (disk.ai.providers[0..disk.ai.provider_count], 0..) |*provider, index| {
@@ -157,6 +161,220 @@ pub fn readConfigSource(io: std.Io, dir: std.Io.Dir, allocator: std.mem.Allocato
     };
 }
 
+/// Validate the authoritative configuration and, once, import any missing
+/// layout fields from the old sidecar. The original TOML bytes (including
+/// comments and credential references) are preserved around the insertion.
+pub fn prepareWorkspaceLayout(io: std.Io, dir: std.Io.Dir, config_path: []const u8, config_line: *?usize) !void {
+    config_line.* = null;
+    var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const source = try readConfigSource(io, dir, a, config_path);
+    var details: config.ParseDetails = .{};
+    var loaded: ?LoadedConfig = null;
+    defer if (loaded) |*value| value.deinit(a);
+    if (source) |bytes| {
+        loaded = decodeWithDetails(a, bytes, false, &details) catch |err| {
+            config_line.* = details.line;
+            return err;
+        };
+    }
+    // A fully populated TOML is authoritative, even if an old sidecar remains.
+    if (details.layout.complete()) return;
+    const saved = (workspace_layout.load(io, dir, config_path) catch |err| {
+        std.log.warn("old workspace layout could not be imported: {s}", .{@errorName(err)});
+        return;
+    }) orelse return;
+    const defaults: config.Ui = .{};
+    const bytes = source orelse "";
+    const insert_at = details.ui_insert_offset orelse bytes.len;
+    var output: std.Io.Writer.Allocating = .init(a);
+    defer output.deinit();
+    const writer = &output.writer;
+    try writer.writeAll(bytes[0..insert_at]);
+    if (insert_at != 0 and bytes[insert_at - 1] != '\n') try writer.writeByte('\n');
+    if (details.ui_insert_offset == null) try writer.writeAll("[ui]\n");
+    if (!details.layout.ai_dock_width) try writer.print("ai_dock_width = {d}\n", .{saved.ai_dock_width orelse defaults.ai_dock_width});
+    if (!details.layout.ai_dock_preferred) try writer.print("ai_dock_preferred = {}\n", .{saved.ai_dock_preferred});
+    if (!details.layout.mascot_anchor_x) try writer.print("mascot_anchor_x = {d}\n", .{saved.mascot_anchor_x orelse defaults.mascot_anchor_x});
+    if (!details.layout.mascot_anchor_y) try writer.print("mascot_anchor_y = {d}\n", .{saved.mascot_anchor_y orelse defaults.mascot_anchor_y});
+    try writer.writeAll(bytes[insert_at..]);
+    if (output.written().len >= max_config_bytes) return error.ConfigTooLarge;
+    try replaceLayoutImport(io, dir, a, config_path, source, output.written());
+}
+
+fn replaceLayoutImport(io: std.Io, dir: std.Io.Dir, allocator: std.mem.Allocator, config_path: []const u8, source: ?[]const u8, updated: []const u8) !void {
+    var parent = try dir.openDir(io, std.fs.path.dirname(config_path) orelse ".", .{ .follow_symlinks = false });
+    defer parent.close(io);
+    const name = std.fs.path.basename(config_path);
+    var atomic = try parent.createFileAtomic(io, name, .{ .permissions = private_permissions, .replace = true });
+    defer atomic.deinit(io);
+    try atomic.file.writeStreamingAll(io, updated);
+    try atomic.file.sync(io);
+    const current_file: ?std.Io.File = parent.openFile(io, name, .{ .follow_symlinks = false, .allow_directory = false }) catch |err| switch (err) {
+        error.FileNotFound => null,
+        else => return err,
+    };
+    if (current_file) |file| {
+        defer file.close(io);
+        const stat = try file.stat(io);
+        if (stat.kind != .file or stat.nlink != 1) return error.ConfigFileConflict;
+        var reader = file.reader(io, &.{});
+        const current = try reader.interface.allocRemaining(allocator, .limited(max_config_bytes));
+        defer allocator.free(current);
+        const expected = source orelse return error.ConfigFileConflict;
+        if (!std.mem.eql(u8, current, expected)) return error.ConfigFileConflict;
+    } else if (source != null) return error.ConfigFileConflict;
+    try atomic.replace(io);
+    try workspace_layout.syncParent(parent);
+}
+
+test "workspace layout import keeps TOML values comments and credential references" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.testing.io;
+    const tail = "# preserve comment\r\nai_dock_preferred = false; mascot_anchor_y = 0.25 # chosen\r\nfont_size = 17\r\n[[ai.providers]]\r\nid = \"fixture\"\r\napi_key_ref = \"zw1_0000000000000000000000000000000000000000000000000000000000000000\"\r\n";
+    const source = "[ui]\r\n" ++ tail;
+    const old = "{\"version\":1,\"preferences\":{\"ai_dock_width\":520,\"ai_dock_preferred\":true,\"mascot_anchor_x\":0.3,\"mascot_anchor_y\":0.9}}";
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.toml", .data = source });
+    try tmp.dir.writeFile(io, .{ .sub_path = workspace_layout.filename, .data = old });
+    var line: ?usize = null;
+    try prepareWorkspaceLayout(io, tmp.dir, "config.toml", &line);
+    const updated = (try readConfigSource(io, tmp.dir, std.testing.allocator, "config.toml")).?;
+    defer std.testing.allocator.free(updated);
+    try std.testing.expect(std.mem.startsWith(u8, updated, "[ui]\r\n"));
+    try std.testing.expect(std.mem.endsWith(u8, updated, tail));
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const parsed = try config.Config.parseWithAllocator(arena.allocator(), updated);
+    try std.testing.expectEqual(@as(f32, 520), parsed.ui.ai_dock_width);
+    try std.testing.expect(!parsed.ui.ai_dock_preferred);
+    try std.testing.expectEqual(@as(f32, 0.3), parsed.ui.mascot_anchor_x);
+    try std.testing.expectEqual(@as(f32, 0.25), parsed.ui.mascot_anchor_y);
+    try std.testing.expectEqual(@as(u8, 17), parsed.ui.font_size);
+    try std.testing.expectEqualStrings("zw1_0000000000000000000000000000000000000000000000000000000000000000", parsed.ai.providers[0].api_key_ref.?);
+    var old_buffer: [256]u8 = undefined;
+    try std.testing.expectEqualStrings(old, try tmp.dir.readFile(io, workspace_layout.filename, &old_buffer));
+    // A complete TOML is authoritative even if the retained sidecar changes.
+    try tmp.dir.writeFile(io, .{ .sub_path = workspace_layout.filename, .data = "invalid old backup" });
+    try prepareWorkspaceLayout(io, tmp.dir, "config.toml", &line);
+    const again = (try readConfigSource(io, tmp.dir, std.testing.allocator, "config.toml")).?;
+    defer std.testing.allocator.free(again);
+    try std.testing.expectEqualStrings(updated, again);
+}
+
+test "workspace layout import persists defaults and startup reports bad TOML lines" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.testing.io;
+    const old = "{\"version\":1,\"preferences\":{\"ai_dock_width\":null,\"ai_dock_preferred\":false,\"mascot_anchor_x\":null,\"mascot_anchor_y\":0.7}}";
+    try tmp.dir.writeFile(io, .{ .sub_path = workspace_layout.filename, .data = old });
+    var line: ?usize = null;
+    try prepareWorkspaceLayout(io, tmp.dir, "config.toml", &line);
+    const bytes = (try readConfigSource(io, tmp.dir, std.testing.allocator, "config.toml")).?;
+    defer std.testing.allocator.free(bytes);
+    const parsed = try config.Config.parse(bytes);
+    try std.testing.expectEqual(@as(f32, 468), parsed.ui.ai_dock_width);
+    try std.testing.expect(!parsed.ui.ai_dock_preferred);
+    try std.testing.expectEqual(@as(f32, 1), parsed.ui.mascot_anchor_x);
+    try std.testing.expectEqual(@as(f32, 0.7), parsed.ui.mascot_anchor_y);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "ai_dock_preferred = false") != null);
+    const invalid = "[ui]\nai_dock_width = 480\nmascot_anchor_y = 2\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.toml", .data = invalid });
+    try std.testing.expectError(error.OutOfRange, prepareWorkspaceLayout(io, tmp.dir, "config.toml", &line));
+    try std.testing.expectEqual(@as(?usize, 3), line);
+    const unchanged = (try readConfigSource(io, tmp.dir, std.testing.allocator, "config.toml")).?;
+    defer std.testing.allocator.free(unchanged);
+    try std.testing.expectEqualStrings(invalid, unchanged);
+}
+
+test "workspace layout import detects conflicts and refuses an oversized configuration" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.testing.io;
+    const changed = "[ui]\nfont_size=18\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.toml", .data = changed });
+    try std.testing.expectError(error.ConfigFileConflict, replaceLayoutImport(io, tmp.dir, std.testing.allocator, "config.toml", "[ui]\nfont_size=17\n", "replacement"));
+    var buf: [128]u8 = undefined;
+    try std.testing.expectEqualStrings(changed, try tmp.dir.readFile(io, "config.toml", &buf));
+    const large = try std.testing.allocator.alloc(u8, max_config_bytes - 32);
+    defer std.testing.allocator.free(large);
+    @memset(large, 'x');
+    large[0] = '#';
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.toml", .data = large });
+    const old = "{\"version\":1,\"preferences\":{}}";
+    try tmp.dir.writeFile(io, .{ .sub_path = workspace_layout.filename, .data = old });
+    var line: ?usize = null;
+    try std.testing.expectError(error.ConfigTooLarge, prepareWorkspaceLayout(io, tmp.dir, "config.toml", &line));
+    const unchanged = (try readConfigSource(io, tmp.dir, std.testing.allocator, "config.toml")).?;
+    defer std.testing.allocator.free(unchanged);
+    try std.testing.expectEqualStrings(large, unchanged);
+    try std.testing.expectEqualStrings(old, try tmp.dir.readFile(io, workspace_layout.filename, &buf));
+}
+
+test "workspace layout import ignores unusable old backups and preserves TOML" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.testing.io;
+    const source = "[ui]\nai_dock_preferred = false\nfont_size = 17\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.toml", .data = source });
+    var line: ?usize = null;
+    for ([_][]const u8{ "bad json", "{\"version\":2,\"preferences\":{}}" }) |backup| {
+        try tmp.dir.writeFile(io, .{ .sub_path = workspace_layout.filename, .data = backup });
+        try prepareWorkspaceLayout(io, tmp.dir, "config.toml", &line);
+        var buf: [128]u8 = undefined;
+        try std.testing.expectEqualStrings(source, try tmp.dir.readFile(io, "config.toml", &buf));
+        try std.testing.expectEqualStrings(backup, try tmp.dir.readFile(io, workspace_layout.filename, &buf));
+        try std.testing.expectEqual(@as(?usize, null), line);
+    }
+}
+
+test "unknown configuration fields warn at startup and survive ordinary saves" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.testing.io;
+    const source = "[ui]\nfont_size=17\nfuture_width = 480\n[notify]\nfuture_alert = true\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.toml", .data = source });
+    var line: ?usize = null;
+    try prepareWorkspaceLayout(io, tmp.dir, "config.toml", &line);
+    try std.testing.expectEqual(@as(?usize, null), line);
+    var loaded = try loadWithOptions(io, tmp.dir, std.testing.allocator, "config.toml", .{ .defer_credentials = true });
+    defer loaded.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u8, 17), loaded.value.ui.font_size);
+    try std.testing.expectEqual(@as(usize, 2), loaded.value.unknown_fields.len);
+    try std.testing.expectEqual(@as(usize, 3), loaded.value.unknown_fields[0].line);
+    // A direct save should also retain assignments from the on-disk revision.
+    var candidate: config.Config = .{};
+    candidate.ui.font_size = 18;
+    try save(io, tmp.dir, "config.toml", candidate);
+    var reopened = try loadWithOptions(io, tmp.dir, std.testing.allocator, "config.toml", .{ .defer_credentials = true });
+    defer reopened.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u8, 18), reopened.value.ui.font_size);
+    try std.testing.expectEqual(@as(usize, 2), reopened.value.unknown_fields.len);
+    try std.testing.expect(std.mem.indexOf(u8, reopened.source, "future_width = 480") != null);
+    try std.testing.expect(std.mem.indexOf(u8, reopened.source, "future_alert = true") != null);
+    var refs = plugin_credential_references.References.init(std.testing.allocator);
+    defer refs.deinit();
+    try addConfigReferences(&refs, reopened.value);
+    try std.testing.expectEqual(CleanupStatus.deferred, refs.status);
+}
+
+test "startup validation still reports malformed or invalid known fields" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.testing.io;
+    var line: ?usize = null;
+    const bad = "[ui]\nfuture_width = 480\nfont_size = \"wrong\"\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.toml", .data = bad });
+    try std.testing.expectError(error.InvalidValue, prepareWorkspaceLayout(io, tmp.dir, "config.toml", &line));
+    try std.testing.expectEqual(@as(?usize, 3), line);
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.toml", .data = "[ui]\nfuture_width\n" });
+    try std.testing.expectError(error.InvalidAssignment, prepareWorkspaceLayout(io, tmp.dir, "config.toml", &line));
+    try std.testing.expectEqual(@as(?usize, 2), line);
+    try prepareWorkspaceLayout(io, tmp.dir, "missing.toml", &line);
+    try std.testing.expectEqual(@as(?usize, null), line);
+}
+
 /// Decode owned file bytes without rewriting the file or migrating credentials.
 /// On success the returned snapshot owns the bytes; on failure the caller does.
 pub fn decodeConfig(allocator: std.mem.Allocator, source: []u8) !LoadedConfig {
@@ -164,9 +382,20 @@ pub fn decodeConfig(allocator: std.mem.Allocator, source: []u8) !LoadedConfig {
 }
 
 pub fn decodeConfigWithCredentials(allocator: std.mem.Allocator, source: []u8, resolve: bool) !LoadedConfig {
+    return decodeWithDetails(allocator, source, resolve, null);
+}
+
+fn parseConfig(allocator: std.mem.Allocator, source: []const u8, details: ?*config.ParseDetails) !config.Config {
+    var local: config.ParseDetails = .{};
+    const diagnostic = details orelse &local;
+    diagnostic.allow_unknown = true;
+    return config.Config.parseWithDetails(allocator, source, diagnostic);
+}
+
+fn decodeWithDetails(allocator: std.mem.Allocator, source: []u8, resolve: bool, details: ?*config.ParseDetails) !LoadedConfig {
     var arena: std.heap.ArenaAllocator = .init(allocator);
     errdefer arena.deinit();
-    var value = try config.Config.parseWithAllocator(arena.allocator(), source);
+    var value = try parseConfig(arena.allocator(), source, details);
     for (value.ai.providers[0..value.ai.provider_count]) |*provider| {
         if (provider.api_key_ref) |reference| {
             if (provider.api_key.len != 0) return error.AmbiguousCredential;
@@ -427,7 +656,7 @@ pub fn prepareCredentialsWithOptions(io: std.Io, dir: std.Io.Dir, allocator: std
             error.FileNotFound => null,
             else => return err,
         };
-        const raw_config: config.Config = if (source) |text| try config.Config.parseWithAllocator(a, text) else .{};
+        const raw_config: config.Config = if (source) |text| try parseConfig(a, text, null) else .{};
         const host_source = try readHostBaseline(io, dir, hosts_path);
         sources_complete = source != null and host_source != null;
         var raw_hosts = host_source orelse try config.hosts.Registry.parse(allocator, "");
@@ -466,6 +695,9 @@ fn siblingPath(allocator: std.mem.Allocator, path: []const u8, sibling: []const 
 }
 
 fn addConfigReferences(references: *plugin_credential_references.References, value: config.Config) !void {
+    // Unsupported assignments may reference credentials understood by a
+    // newer build. Preserve them and defer collection until we know the full scope.
+    if (value.unknown_fields.len != 0) references.deferCleanup();
     for (value.ai.providers[0..value.ai.provider_count]) |provider| if (provider.api_key_ref) |reference| try references.add(reference);
     for (value.ai.extensions.servers) |server| inline for (.{ "environment", "headers" }) |key| for (@field(server, key)) |entry| if (entry.secret_ref) |reference| try references.add(reference);
 }
@@ -495,7 +727,7 @@ fn addConfigFileReferences(io: std.Io, dir: std.Io.Dir, path: []const u8, refere
     defer allocator.free(source);
     var arena: std.heap.ArenaAllocator = .init(allocator);
     defer arena.deinit();
-    const value = config.Config.parseWithAllocator(arena.allocator(), source) catch |err| switch (err) {
+    const value = parseConfig(arena.allocator(), source, null) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => {
             references.deferCleanup();

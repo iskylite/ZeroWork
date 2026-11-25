@@ -34,13 +34,15 @@ pub const Service = struct {
     written_bytes: std.atomic.Value(u64) = .init(0),
 
     const File = struct { native: ?ssh.SftpHandle, consumed: ?ssh.ReleaseReceipt = null };
-    const Open = struct { path: [:0]const u8, kind: enum { read, write, append, exclusive }, offset: u64 = 0 };
+    const Open = struct { path: [:0]const u8, kind: enum { read, write, append, exclusive, resume_partial }, offset: u64 = 0 };
     const Operation = union(enum) {
         stat: struct { path: [:0]const u8, follow: bool },
         open: Open,
+        canonical: struct { path: [:0]const u8, output: []u8 },
         fstat: *File,
         read: struct { file: *File, bytes: []u8 },
         write: struct { file: *File, bytes: []const u8 },
+        seek: struct { file: *File, offset: u64 },
         truncate: *File,
         close: *File,
         release_context,
@@ -68,7 +70,7 @@ pub const Service = struct {
         errdefer allocator.destroy(self);
         const backend = try engine_mod.SftpEngine.init(allocator);
         self.* = .{ .allocator = allocator, .session = session, .backend = backend, .origin = if (session.resource_key) |key| if (key.owner == .session) key.owner.session else null else null };
-        backend.attachRemoteService(.{ .context = self, .size = size, .stat = stat, .target_stat = targetStat }, .{ .context = self, .open_read = openRead, .open_write = openWrite, .create_exclusive = createExclusive, .truncate = truncate, .stat_handle = fstat, .read = read, .write = write, .close = closeFile, .release = releaseContext });
+        backend.attachRemoteService(.{ .context = self, .size = size, .stat = stat, .target_stat = targetStat, .canonical = canonical }, .{ .context = self, .open_read = openRead, .open_write = openWrite, .open_resume = openResume, .seek = seek, .create_exclusive = createExclusive, .truncate = truncate, .stat_handle = fstat, .read = read, .write = write, .close = closeFile, .release = releaseContext });
         return self;
     }
 
@@ -204,6 +206,10 @@ pub const Service = struct {
     fn stat(raw: ?*anyopaque, _: *ssh.Session, path: [:0]const u8) !ssh.SftpAttributes {
         return (try context(raw).call(.{ .stat = .{ .path = path, .follow = true } })).attributes;
     }
+    fn canonical(raw: ?*anyopaque, _: *ssh.Session, path: [:0]const u8, output: []u8) ![]const u8 {
+        const len = (try context(raw).call(.{ .canonical = .{ .path = path, .output = output } })).number;
+        return output[0..len];
+    }
     fn targetStat(raw: ?*anyopaque, _: *ssh.Session, path: [:0]const u8) !ssh.SftpAttributes {
         return (try context(raw).call(.{ .stat = .{ .path = path, .follow = false } })).attributes;
     }
@@ -212,6 +218,12 @@ pub const Service = struct {
     }
     fn openWrite(raw: ?*anyopaque, _: *ssh.Session, path: [:0]const u8, offset: u64, preserve: bool) !ssh.SftpHandle {
         return token((try context(raw).call(.{ .open = .{ .path = path, .kind = if (preserve or offset != 0) .append else .write, .offset = offset } })).file);
+    }
+    fn openResume(raw: ?*anyopaque, _: *ssh.Session, path: [:0]const u8) !ssh.SftpHandle {
+        return token((try context(raw).call(.{ .open = .{ .path = path, .kind = .resume_partial } })).file);
+    }
+    fn seek(raw: ?*anyopaque, handle: *ssh.SftpHandle, offset: u64) !void {
+        _ = try context(raw).call(.{ .seek = .{ .file = file(handle), .offset = offset } });
     }
     fn createExclusive(raw: ?*anyopaque, _: *ssh.Session, path: [:0]const u8) !ssh.SftpHandle {
         return token((try context(raw).call(.{ .open = .{ .path = path, .kind = .exclusive } })).file);
@@ -276,7 +288,14 @@ pub const Service = struct {
                     _ = self.would_block_count.fetchAdd(1, .monotonic);
                     return;
                 },
-                else => Result{ .failure = err },
+                else => if (@import("socket_state.zig").disconnected(self.session.socket_fd)) closed: {
+                    // The engine has a mailbox token, not this socket. Publish
+                    // the fault before delivering the failed RPC; otherwise its
+                    // ordinary IO error path discards the partial transfer.
+                    self.faulted.store(true, .release);
+                    self.backend.transportFailed();
+                    break :closed Result{ .failure = error.TransferTransportClosed };
+                } else Result{ .failure = err },
             };
             request.result = result;
             self.pending = null;
@@ -335,6 +354,7 @@ pub const Service = struct {
     fn nativeStep(self: *Service, request: *Request) !Result {
         if (request.operation != .release_context and request.operation != .close) try self.session.sftpReadonlyInit();
         switch (request.operation) {
+            .canonical => |op| return .{ .number = (try self.session.sftpRealpath(op.path, op.output)).len },
             .stat => |op| {
                 const rc = c.zw_libssh2_sftp_stat_attributes(self.session.sftp.?, op.path.ptr, @intFromBool(op.follow), &request.attributes);
                 if (rc != 0) return self.nativeError(rc);
@@ -354,6 +374,7 @@ pub const Service = struct {
                     .read => c.zw_libssh2_sftp_open_read(self.session.sftp.?, op.path.ptr),
                     .write => c.zw_libssh2_sftp_open_write(self.session.sftp.?, op.path.ptr),
                     .append => c.zw_libssh2_sftp_open_append(self.session.sftp.?, op.path.ptr, op.offset),
+                    .resume_partial => c.zw_libssh2_sftp_open_resume(self.session.sftp.?, op.path.ptr),
                     .exclusive => c.zw_libssh2_sftp_open_exclusive(self.session.sftp.?, op.path.ptr),
                 };
                 const handle = native orelse return self.nativeError(c.zw_libssh2_session_last_error(self.session.handle.?));
@@ -384,6 +405,10 @@ pub const Service = struct {
                 if (count == 0 and op.bytes.len != 0) return error.WouldBlock;
                 _ = self.written_bytes.fetchAdd(@intCast(count), .monotonic);
                 return .{ .number = @intCast(count) };
+            },
+            .seek => |op| {
+                try (try nativeFile(op.file)).seek(op.offset);
+                return .success;
             },
             .truncate => |value| {
                 const handle = try nativeFile(value);
@@ -498,7 +523,7 @@ pub const Service = struct {
         self.released.store(false, .release);
         self.cleanup_unknown.store(false, .release);
         self.faulted.store(false, .release);
-        self.backend.attachRemoteService(.{ .context = self, .size = size, .stat = stat, .target_stat = targetStat }, .{ .context = self, .open_read = openRead, .open_write = openWrite, .create_exclusive = createExclusive, .truncate = truncate, .stat_handle = fstat, .read = read, .write = write, .close = closeFile, .release = releaseContext });
+        self.backend.attachRemoteService(.{ .context = self, .size = size, .stat = stat, .target_stat = targetStat, .canonical = canonical }, .{ .context = self, .open_read = openRead, .open_write = openWrite, .open_resume = openResume, .seek = seek, .create_exclusive = createExclusive, .truncate = truncate, .stat_handle = fstat, .read = read, .write = write, .close = closeFile, .release = releaseContext });
     }
     /// No native operations here. The old Session owner must have settled
     /// every accepted request and local checkpoint before its storage is freed.

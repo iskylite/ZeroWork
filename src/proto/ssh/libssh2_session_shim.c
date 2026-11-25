@@ -1081,6 +1081,10 @@ LIBSSH2_SFTP_HANDLE *zw_libssh2_sftp_open_append(LIBSSH2_SFTP *sftp, const char 
     return handle;
 }
 LIBSSH2_SFTP_HANDLE *zw_libssh2_sftp_open_read(LIBSSH2_SFTP *sftp, const char *path) { return libssh2_sftp_open(sftp, path, LIBSSH2_FXF_READ, 0); }
+/* Open an existing partial once for verification and continuation, never create or truncate. */
+LIBSSH2_SFTP_HANDLE *zw_libssh2_sftp_open_resume(LIBSSH2_SFTP *sftp, const char *path) {
+    return libssh2_sftp_open(sftp, path, LIBSSH2_FXF_READ | LIBSSH2_FXF_WRITE, 0);
+}
 void zw_libssh2_sftp_seek(LIBSSH2_SFTP_HANDLE *handle, unsigned long long offset) { libssh2_sftp_seek64(handle, (libssh2_uint64_t)offset); }
 long zw_libssh2_sftp_read(LIBSSH2_SFTP_HANDLE *handle, unsigned char *buffer, size_t len) { return (long)libssh2_sftp_read(handle, (char *)buffer, len); }
 long zw_libssh2_sftp_write(LIBSSH2_SFTP_HANDLE *handle, const unsigned char *buffer, size_t len) { return (long)libssh2_sftp_write(handle, (const char *)buffer, len); }

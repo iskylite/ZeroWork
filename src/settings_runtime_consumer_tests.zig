@@ -82,7 +82,11 @@ test "settings runtime completion disables an already open real terminal menu an
     view.refreshCompletionState();
     try std.testing.expect(view.completion.state.menu_open);
     try std.testing.expectEqual(@as(usize, 1), view.completion_count);
-    try std.testing.expectEqualStrings("git st", view.line.content.items);
+    // Rendering history must preserve the trusted buffer, not overwrite the
+    // separate record of what the user actually typed into this terminal.
+    try std.testing.expectEqualStrings("git st", view.trusted_snapshot.?.buffer);
+    try std.testing.expectEqualStrings("git status", view.completion_matches[0].candidate.text);
+    try std.testing.expectEqualStrings("", view.line.content.items);
     try std.testing.expectEqualStrings("", source.base.written.items);
 }
 

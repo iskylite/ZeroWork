@@ -47,6 +47,11 @@ async function scenario(kind: 'ssh' | 'ai', response: Response = 'cancel', archi
         await writeFile(marker, '1', { mode: 0o600 });
         await writeFile(localEntry, 'fixture-only-secret', { mode: 0o600 });
         if (response.startsWith('reverse-')) await writeFile(join(credentials, otherReference), 'other-fixture-secret', { mode: 0o600 });
+    } else {
+        // V0.8: local files are the default, so Keychain scenarios must record
+        // the explicit backend choice first.
+        await mkdir(credentials, { mode: 0o700 });
+        await writeFile(join(credentials, '.keychain-storage'), '1', { mode: 0o600 });
     }
     let contacts = 0;
     let authenticatedPosts = 0;

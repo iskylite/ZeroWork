@@ -474,9 +474,7 @@ pub const Runtime = struct {
 /// The Runtime owns its fd until the sole engine IO owner has been detached.
 fn transportClosed(fd: c_int) bool {
     if (fd < 0) return true;
-    var descriptor = [_]std.c.pollfd{.{ .fd = fd, .events = std.c.POLL.IN, .revents = 0 }};
-    if (std.c.poll(&descriptor, 1, 0) <= 0) return false;
-    return descriptor[0].revents & (std.c.POLL.ERR | std.c.POLL.HUP | std.c.POLL.NVAL) != 0;
+    return @import("../proto/ssh/socket_state.zig").disconnected(fd);
 }
 
 fn bindingOwner(binding: sessions.ServiceHandle, key: operations.OperationKey, auxiliary: bool) !identity.SessionHandle {

@@ -308,6 +308,7 @@ const Entry = struct {
     available_bindings: std.ArrayList(typed.Binding) = .empty,
     capability_states: std.ArrayList(@import("capability_snapshot.zig").ServiceState) = .empty,
     capability_revision: u64 = 1,
+    transfer_selection_revision: u64 = 1,
 };
 
 pub const RetainedTransferStart = struct { binding: ServiceHandle, key: OperationKey, spec: SessionCreateSpec };
@@ -774,6 +775,12 @@ pub const SessionHost = struct {
         }
         return .{ .owner = owner, .revision = entry.capability_revision, .services = entry.capability_states.items, .closed = entry.state == .closing or entry.state == .closed or entry.state == .cleanup_unknown };
     }
+    // A native file chooser can stay open while a preceding upload's data
+    // channel becomes ready. Only replacing/revoking its transfer authority,
+    // not readiness of another channel, invalidates that user's selection.
+    pub fn transferSelectionRevision(self: *SessionHost, owner: SessionHandle) ?u64 {
+        return (self.find(owner) orelse return null).transfer_selection_revision;
+    }
     pub fn capabilityRevisionFor(self: *SessionHost, handle: SessionHandle) ?u64 {
         const entry = self.find(handle) orelse return null;
         return entry.capability_revision;
@@ -809,6 +816,7 @@ pub const SessionHost = struct {
         binding.revision = revision;
         if (slot) |index| entry.typed_bindings.items[index] = binding else entry.typed_bindings.appendAssumeCapacity(binding);
         entry.capability_revision = revision;
+        if (std.mem.eql(u8, proposed.definition.key.name, "transfer")) entry.transfer_selection_revision = revision;
         return binding;
     }
     pub fn revokeTypedService(self: *SessionHost, handle: SessionHandle, operation: OperationKey, service_key: typed.ServiceKey) !bool {
@@ -818,6 +826,7 @@ pub const SessionHost = struct {
             const revision = try identity.advance(entry.capability_revision);
             _ = entry.typed_bindings.orderedRemove(index);
             entry.capability_revision = revision;
+            if (std.mem.eql(u8, service_key.name, "transfer")) entry.transfer_selection_revision = revision;
             return true;
         };
         return false;
@@ -829,6 +838,7 @@ pub const SessionHost = struct {
             binding.revision = try identity.advance(binding.revision);
             binding.authorized = authorized;
             entry.capability_revision = try identity.advance(entry.capability_revision);
+            if (std.mem.eql(u8, service_key.name, "transfer")) entry.transfer_selection_revision = entry.capability_revision;
             return;
         };
         return error.ServiceNotBound;
@@ -2521,10 +2531,14 @@ test "shared transfer binds the original SSH operation and coexists with indepen
     try std.testing.expectError(error.LifecycleDoesNotAllowTransfer, host.beginSharedTransfer(original.handle));
     _ = try host.ready(original.handle, original.operation, plugins.requiredServices(.ssh));
     _ = try host.attached(original.handle, .{ .target = test_target, .tab_id = @fromBackingInt(1) });
+    const picker_epoch = host.transferSelectionRevision(original.handle).?;
+    const global_revision = host.capabilityRevisionFor(original.handle).?;
     const shared = try host.beginSharedTransfer(original.handle);
     try std.testing.expect(shared.key.eql(original.operation));
     try std.testing.expect(!host.bindingIsLive(shared.binding));
     try std.testing.expect(host.sharedTransferReady(shared.binding, shared.key));
+    try std.testing.expect(host.capabilityRevisionFor(original.handle).? != global_revision);
+    try std.testing.expectEqual(picker_epoch, host.transferSelectionRevision(original.handle).?);
     const auxiliary = try host.beginAuxiliaryTransfer(original.handle);
     try std.testing.expect(!auxiliary.binding.eql(shared.binding));
     try std.testing.expect(!auxiliary.key.eql(shared.key));
