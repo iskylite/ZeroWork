@@ -74,7 +74,7 @@ async function capture(name: string) {
 }
 try {
   await launch();
-  await click('workspace.empty.local'); await visible('terminal.surface'); await click('toolbar.ai');
+  await click('workspace.empty.local'); await visible('terminal.surface'); await click('ai.strip');
   await click('ai.prompt'); await h.type_('检查终端并说明后续步骤'); await click('ai.send');
   await visible('ai.turn.complete'); await visible('ai.turn.process.toggle');
   assert.equal((await h.query('ai.step_group')).filter(shown).length, 0, 'completed process initially folded');
@@ -108,7 +108,7 @@ try {
   await writeFile(journal, lines.map(line => JSON.stringify(line)).join('\n') + '\n');
   const originalCalls = modelCalls;
   await launch();
-  await click('workspace.empty.local'); await visible('terminal.surface'); await click('toolbar.ai');
+  await click('workspace.empty.local'); await visible('terminal.surface'); await click('ai.strip');
   await click('ai.sessions'); await click('ai.session.restore.2');
   if ((await h.query('ai.session.close.accept')).some(shown)) await click('ai.session.close.accept');
   await visible('ai.turn.interrupted'); await visible('ai.turn.process.toggle');

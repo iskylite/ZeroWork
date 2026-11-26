@@ -54,7 +54,7 @@ const launch = async () => {
     await h.waitForServerReady(60000);
     assert.equal(Number(JSON.parse(await readFile(join(rpc, 'owner.json'), 'utf8')).pid), app.pid);
     await h.resizeWindow(1440, 900);
-    await click('workspace.empty.local'); await visible('terminal.surface'); await click('toolbar.ai');
+    await click('workspace.empty.local'); await visible('terminal.surface'); await click('ai.strip');
 };
 const quit = async () => {
     assert((await h.request('POST', '/zerowork/windows', {action: 'quit'})).ok);
@@ -176,7 +176,7 @@ const run = async () => {
         await click('settings.ai.delete.confirm'); await click('settings.save');
         await h.waitFor(async () => !(await readFile(config, 'utf8')).includes('old-provider') || null, 12000);
         await click('settings.close'); await absent('settings.close');
-        if (!(await h.query('ai.prompt')).some(shown)) await click('toolbar.ai');
+        if (!(await h.query('ai.prompt')).some(shown)) await click('ai.strip');
     }
     await h.waitFor(async () => text(await visible('ai.composer.model')).includes('未选择模型') || null, 6000);
     await visible('ai.send');

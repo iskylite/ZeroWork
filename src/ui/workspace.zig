@@ -1793,10 +1793,11 @@ pub const Workspace = struct {
             tooltip.trigger.style.width = .fill();
             tooltip.trigger.style.height = .fill();
             const tab_box = try ui.box(self.cx, tab_styles.tab(width, active, ordinal == 0 and !overflow), .{});
-            const identity_color = if (group_id) |id| self.groupTabColor(id) orelse app_theme.current().accent else if (tab.?.tab_color) |color| ui.Color.hex(@intCast(color)) else app_theme.current().accent;
-            const marker = try ui.box(self.cx, tab_styles.groupMarker(identity_color), .{});
-            marker.meta.ownership.meta.test_id = if (group_id != null) "tabs.group_marker" else "tabs.color_marker";
-            try tab_box.appendChild(self.allocator, marker);
+            if (group_id) |id| {
+                const marker = try ui.box(self.cx, tab_styles.groupMarker(self.groupTabColor(id) orelse app_theme.current().accent), .{});
+                marker.meta.ownership.meta.test_id = "tabs.group_marker";
+                try tab_box.appendChild(self.allocator, marker);
+            }
             select_ctx.node = tab_box;
             tab_box.meta.ownership.meta.test_id = try std.fmt.bufPrint(&select_ctx.test_id, "tabs.tab.{d}", .{@backingInt(model_tab.id)});
             tab_box.behavior.interaction.focusable = true;
@@ -1824,7 +1825,7 @@ pub const Workspace = struct {
             try tab_box.appendChild(self.cx.allocator, icon_slot);
             var label_style = tab_styles.title();
             label_style.font_family = family;
-            label_style.color = if (active) app_theme.current().fg_1 else app_theme.current().fg_2;
+            label_style.color = tab_styles.titleInk(if (tab) |session| session.tab_color else null, active);
             const title = try ui.text(self.cx, self.model.tabs.items[index].name(), label_style);
             title.meta.ownership.meta.test_id = "tabs.title";
             title.setStyleInline(self.allocator, .{ .position = .absolute, .inset = .{ .left = .{ .px = 43 }, .top = .{ .px = (tab_styles.height - 18) / 2 } }, .width = .{ .px = width - 75 }, .height = .{ .px = 18 }, .overflow_hidden = true });
@@ -1841,13 +1842,6 @@ pub const Workspace = struct {
             close.setHitTestVisible(true);
             close.setFocusable(true);
             try tab_box.appendChild(self.cx.allocator, close);
-            if (active) {
-                const underline = try ui.box(self.cx, tab_styles.underline(width), .{});
-                underline.setBackground(identity_color);
-                underline.setDisplay(.none);
-                underline.meta.ownership.meta.test_id = "tabs.active_underline";
-                try tab_box.appendChild(self.cx.allocator, underline);
-            }
             try tooltip.trigger.appendChild(self.cx.allocator, tab_box);
             try holder.appendChild(self.cx.allocator, tooltip.wrapper);
             try content.appendChild(self.cx.allocator, holder);

@@ -46,7 +46,7 @@ const visible=(id:string)=>h.waitFor(async()=>(await h.query(id)).find(shown)??n
 const click=async(id:string)=>{await visible(id);assert((await h.clickTestId(id)).ok);};
 const report:any={status:'running',checks};
 try{
- await h.waitForServerReady(60000);await h.resizeWindow(1200,900);await click('workspace.empty.local');await visible('terminal.surface');await click('toolbar.ai');
+ await h.waitForServerReady(60000);await h.resizeWindow(1200,900);await click('workspace.empty.local');await visible('terminal.surface');await click('ai.strip');
  for(const [command,key]of [['@dots','dots'],['@help','help']]){
   await click('ai.prompt');await h.type_('请在当前终端执行 '+command);await click('ai.send');
   await h.waitFor(async()=>{if(failure)throw Error(failure);return text(await h.query('ai.panel')).includes('BUILTIN_DISPLAYED_'+key)||null;},30000);

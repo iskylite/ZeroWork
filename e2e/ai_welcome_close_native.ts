@@ -50,11 +50,11 @@ const closeWelcome=async()=>{
 try{
  await h.waitForServerReady(60000);
  assert.equal(Number(JSON.parse(await readFile(join(rpc,'owner.json'),'utf8')).pid),app.pid);
- await h.resizeWindow(1440,900);await click('workspace.empty.local');await visible('terminal.surface');await click('toolbar.ai');
+ await h.resizeWindow(1440,900);await click('workspace.empty.local');await visible('terminal.surface');await click('ai.strip');
  await capture('01-welcome');await closeWelcome();await visible('terminal.surface');await capture('02-welcome-closed');
- await click('toolbar.ai');await closeWelcome();assert.equal(streams,0);
+ await click('ai.strip');await closeWelcome();assert.equal(streams,0);
  report.checks.push('Blank welcome closes without confirmation or provider requests, including after reopening');
- await click('toolbar.ai');await click('ai.prompt');await h.type_('保留关闭测试草稿');
+ await click('ai.strip');await click('ai.prompt');await h.type_('保留关闭测试草稿');
  await click('ai.close');await visible('ai.close.confirmation');await click('ai.close.confirmation.cancel');await hidden('ai.close.confirmation');
  assert.equal((await h.inputState('ai.prompt')).buffer,'保留关闭测试草稿');
  report.checks.push('A bound draft still requires End confirmation; cancellation preserves the draft');
@@ -64,8 +64,8 @@ try{
  await click('ai.close.confirmation.confirm');await h.mouseMove(1,1);await hidden('ai.panel');await h.waitFor(()=>closed===1||null,15000);
  await visible('terminal.surface');
  report.checks.push('Existing streaming conversation: Cancel keeps the request alive; confirmed End releases it and preserves the terminal');
- await click('toolbar.ai');await click('ai.sessions');await visible('ai.session.row.1');await visible('ai.session.restore.1');await click('ai.sessions.close');
- await closeWelcome();await h.resizeWindow(860,480);await click('toolbar.ai');await closeWelcome();await capture('04-compact-closed');
+ await click('ai.strip');await click('ai.sessions');await visible('ai.session.row.1');await visible('ai.session.restore.1');await click('ai.sessions.close');
+ await closeWelcome();await h.resizeWindow(860,480);await click('ai.strip');await closeWelcome();await capture('04-compact-closed');
  assert.equal(streams,1);assert.equal(closed,1);
  report.checks.push('Ended history remains restorable; the fresh welcome closes at both window sizes without another request');
  report.status='passed';

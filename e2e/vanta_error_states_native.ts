@@ -49,7 +49,7 @@ try{for(const theme of themes){
   await capture('history-empty-wide',['history.panel','history.empty']);
   await resizeWindow(860,480);await capture('history-empty-compact',['history.panel','history.empty']);await click('history.close');
   assert(!(await query('history.panel')).some(shown));run.checks.push('History empty opens from production host menu and closes without creating a connection.');
-  await click('workspace.empty.local');await visible('terminal.surface');await click('toolbar.ai');await visible('ai.prompt');
+  await click('workspace.empty.local');await visible('terminal.surface');await click('ai.strip');await visible('ai.prompt');
   for(const state of ['network','429']){
    mode=state;await resizeWindow(1440,900);await click('ai.prompt');await key('a',{cmd:true});await type_('Visual recovery '+state);await click('ai.send');
    const reason=await visible('ai.recovery.reason',30000);assert(state==='429'?/受限/.test(reason.text):/中断/.test(reason.text),JSON.stringify(reason));

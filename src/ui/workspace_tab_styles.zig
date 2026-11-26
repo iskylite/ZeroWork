@@ -33,8 +33,13 @@ pub fn tab(width: f32, active: bool, at_capsule_start: bool) ui.BoxStyle {
     const c = theme.current();
     return .{ .cursor = .default, .width = .{ .px = width }, .height = .{ .px = height }, .direction = .row, .align_items = .center, .background = if (active) c.selection else ui.Color.TRANSPARENT, .border = .{ .radius = 7 }, .corner_radii = if (at_capsule_start) .{ .each = .{ 14, 7, 7, 14 } } else null, .flex_shrink = 0 };
 }
-pub fn underline(width: f32) ui.BoxStyle {
-    return .{ .position = .absolute, .inset = .{ .left = .{ .px = 12 }, .top = .{ .px = height - 5 } }, .width = .{ .px = width - 24 }, .height = .{ .px = 2 }, .background = theme.current().accent, .border = .{ .radius = 1.25 } };
+/// Keep user-assigned color in the title; selection belongs to the fill.
+pub fn titleInk(custom: ?u32, active: bool) ui.Color {
+    const c = theme.current();
+    const color = custom orelse return if (active) c.fg_1 else c.fg_2;
+    const surface = theme.patchPaint(c.overlay, c.app.withAlpha(255));
+    const selected = theme.patchPaint(c.selection, surface);
+    return theme.patchInk(ui.Color.hex(@intCast(color)), &.{ surface, selected });
 }
 pub fn title() ui.TextStyle {
     return .{ .font_size = title_font, .font_weight = title_weight, .color = theme.current().fg_1, .line_height = 1.5, .text_overflow = .ellipsis, .selectable = false };
@@ -139,7 +144,7 @@ pub fn groupTint(color: ui.Color) ui.Color {
     return color.withAlpha(20);
 }
 pub fn groupMarker(color: ui.Color) ui.BoxStyle {
-    return .{ .position = .absolute, .inset = .{ .left = .{ .px = 8 }, .top = .{ .px = (height - 18) / 2 } }, .width = .{ .px = 2.5 }, .height = .{ .px = 18 }, .background = color, .border = .{ .radius = 1 }, .flex_shrink = 0 };
+    return .{ .position = .absolute, .inset = .{ .left = .{ .px = 8 }, .top = .{ .px = (height - 5) / 2 } }, .width = .{ .px = 5 }, .height = .{ .px = 5 }, .background = color, .border = .{ .radius = 2.5 }, .flex_shrink = 0, .hit_behavior = .pass_through };
 }
 
 // V3 #tooltip: independent floating content, max-width300, inset7/10, radius7.

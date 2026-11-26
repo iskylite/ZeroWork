@@ -467,13 +467,14 @@ async function quitApp() {
   assert.equal(app!.exitCode, 0);
 }
 async function ensureGroupPanel() {
-  if (!(await h.query('ai.prompt')).some(shown)) await click('toolbar.ai');
+  if (!(await h.query('ai.prompt')).some(shown)) await click('ai.strip');
   await visible('ai.prompt');
 }
 
 async function restoreConversation() {
   if (group) await ensureGroupPanel();
-  else await click(unsupported ? 'toolbar.ai' : 'ai.strip');
+  else if (unsupported) assert((await h.key('j',{cmd:true})).ok);
+  else await click('ai.strip');
   await click('ai.sessions');
   await click('ai.session.restore.2');
   await visible('ai.prompt');

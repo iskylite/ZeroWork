@@ -77,16 +77,16 @@ const click=async(id:string)=>{await visible(id);assert((await h.clickTestId(id)
 
 try{
   await h.waitForServerReady(60000);await h.resizeWindow(1280,860);
-  // ③ 置顶按钮：application 组首位（AI 入口之前），可点击切换。
+  // The global toolbar starts with Pin and has no session-assistant action.
   const pin=await visible('toolbar.window_pin');
   assert(pin&&pin.rect.w>0,'置顶按钮可见');
-  const group=(await h.query('toolbar.group.application'))[0];
+  const group=(await h.query('toolbar.group.global'))[0];
   const ids=(group?.children??[]).map((c:any)=>c.test_id);
-  const pinIndex=ids.indexOf('toolbar.window_pin'), aiIndex=ids.indexOf('toolbar.ai');
-  assert(pinIndex>=0&&aiIndex>=0&&pinIndex<aiIndex,`置顶按钮在 AI 入口左侧（pin=${pinIndex}, ai=${aiIndex}）`);
+  assert.equal(ids[0],'toolbar.window_pin');
+  assert(!ids.includes('toolbar.ai'));
   await click('toolbar.window_pin');
   await h.sleep(300);
-  report.checks.push('置顶按钮位于 AI 入口左侧，点击切换两状态（图标形状与 a11y 标签随状态更新）');
+  report.checks.push('窗口置顶在全局工具区首位，AI 助手不占全局工具位');
   // ② 设置页三预算字段：可见、修改并持久化。
   await click('toolbar.settings');
   await visible('settings.nav.ai');
@@ -110,7 +110,7 @@ try{
   await click('settings.close');
   // ① auto-shell：交互模式下让模型在 Local PTY 执行写标记命令（PTy 初始未观察提示符→宿主自动恢复→真实执行）。
   await click('workspace.empty.local');await visible('terminal.surface');
-  await click('toolbar.ai');
+  await click('ai.strip');
   await click('ai.prompt');
   await h.type_(`在当前本地终端里执行命令：print -r -- v07-marker > '${marker}'，执行完成后告诉我完成。`);
   await click('ai.send');

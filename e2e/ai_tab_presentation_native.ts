@@ -64,7 +64,7 @@ const report: any = {status: 'running', isolation: iso, checks: []};
 const capture = async (name: string) => {await h.mouseMove(1, 1); assert((await h.screenshot(join(out, name + '.png'))).ok);};
 try {
     await h.waitForServerReady(60000); await h.resizeWindow(1200, 900);
-    await click('workspace.empty.local'); await visible('terminal.surface'); await click('toolbar.ai');
+    await click('workspace.empty.local'); await visible('terminal.surface'); await click('ai.strip');
     await input('FIRST_TASK'); await click('ai.send'); await h.waitFor(() => held || null, 15000);
     await input('FIRST_SESSION_DRAFT');
     await click('toolbar.new_session'); await click('session.menu.local'); await visible('terminal.surface');
@@ -73,7 +73,7 @@ try {
     await visible('ai.stop');
     await click('tabs.tab.2'); await absent('ai.panel');
     report.checks.push('new tab starts collapsed; returning to first session restores its open panel, draft and running task');
-    await click('toolbar.ai'); await input('SECOND_SESSION_DRAFT');
+    await click('ai.strip'); await input('SECOND_SESSION_DRAFT');
     await click('tabs.tab.1'); await draft('FIRST_SESSION_DRAFT'); await click('ai.collapse'); await absent('ai.panel');
     await click('tabs.tab.2'); await visible('ai.panel'); await draft('SECOND_SESSION_DRAFT');
     await absent('ai.stop'); await capture('second-open-first-collapsed');
@@ -81,7 +81,7 @@ try {
     await h.key('2', {cmd: true}); await visible('ai.panel'); await draft('SECOND_SESSION_DRAFT');
     report.checks.push('collapse is session-local; mouse and keyboard switching restore independent visibility without moving task or draft');
     await h.resizeWindow(860, 480); await click('ai.collapse'); await absent('ai.panel');
-    await h.key('1', {cmd: true}); await absent('ai.panel'); await click('toolbar.ai');
+    await h.key('1', {cmd: true}); await absent('ai.panel'); await click('ai.strip');
     await visible('ai.panel'); await draft('FIRST_SESSION_DRAFT'); await visible('ai.stop');
     await capture('first-open-compact');
     assert.equal(modelRequests, 1, 'switching/reopening never sends or cancels the original task');

@@ -121,7 +121,7 @@ const mode=async(value:'auto'|'confirm')=>{
 try{
  await h.waitForServerReady(60000);
  assert.equal(Number(JSON.parse(await readFile(join(rpc,'owner.json'),'utf8')).pid),app.pid);
- await h.resizeWindow(1440,900);await click('workspace.empty.local');await visible('terminal.surface');await click('toolbar.ai');await click('ai.maximize');
+ await h.resizeWindow(1440,900);await click('workspace.empty.local');await visible('terminal.surface');await click('ai.strip');await click('ai.maximize');
  await click('ai.prompt');await h.type_('验证回合中权限立即生效，仅执行测试工具调用。');await click('ai.send');
  await visible('ai.interaction.panel');await capture('01-confirm-pending');
  assert.equal(text(await visible('ai.interaction.command')),command);

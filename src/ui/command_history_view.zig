@@ -137,7 +137,9 @@ pub const View = struct {
         if (self.unavailable.peek() != (active == null)) self.unavailable.set(active == null);
         for (self.buttons, 0..) |button_node, index| button_node.setDisplay(if (active != null or (self.workspace_chrome and index == 0)) .flex else .none);
         if (active == null) self.mode = .closed;
-        const inside = self.contains(self.buttons[0]) or self.contains(self.buttons[1]);
+        // The workspace task strip drives its preview and exit delay. Do not
+        // let the old status-bar hook open another presentation on the same hover.
+        const inside = !self.workspace_chrome and (self.contains(self.buttons[0]) or self.contains(self.buttons[1]));
         const popup_open = self.mode == .closed and self.cx.overlay_stack.hasGroup(floating_surface.workspace_popup);
         if (!inside or popup_open) self.suppressed = inside;
         if (active != null and inside and self.mode == .closed and !self.suppressed) self.mode = .preview;
@@ -181,10 +183,12 @@ pub const View = struct {
         const content_height: f32 = if (self.visible_count == 0) 70 else self.virtual.totalContentHeight();
         const h = @min(@min(@as(f32, 475), @max(120, pane.h - 24)), 86 + content_height);
         const trigger = self.buttons[0].globalRect();
-        const left = if (self.workspace_chrome) std.math.clamp(trigger.x + trigger.w / 2 - w / 2, 8, @max(8, self.cx.viewport.width - w - 8)) else pane.x + pane.w - w - 12;
-        const top = if (self.workspace_chrome) trigger.y + trigger.h + 6 else pane.y + pane.h - h - 12;
         const parent = self.root.parent.?.globalRect();
-        self.root.setStyleInline(self.cx.allocator, .{ .inset = .{ .left = .{ .px = left - parent.x }, .top = .{ .px = top - parent.y } }, .width = .{ .px = w }, .height = .{ .px = h } });
+        const card: ui.ComputedRect = if (self.workspace_chrome)
+            @import("mascot_island.zig").panelRect(parent, trigger, w, h)
+        else
+            .{ .x = pane.x + pane.w - w - 12, .y = pane.y + pane.h - h - 12, .w = w, .h = h };
+        self.root.setStyleInline(self.cx.allocator, .{ .inset = .{ .left = .{ .px = card.x - parent.x }, .top = .{ .px = card.y - parent.y } }, .width = .{ .px = card.w }, .height = .{ .px = card.h } });
     }
     fn clearRecords(self: *View) void {
         for (self.records.items) |command| if (command.command) |text| self.cx.allocator.free(text);

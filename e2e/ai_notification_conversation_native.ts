@@ -40,11 +40,11 @@ const capture=async(name:string)=>{await h.sleep(200);assert((await h.screenshot
 const report:any={status:'running',binary,checks:[],limits:['Local SSE fixture, actual native Local session and approval/notification controllers; no remote model or SSH used in this routing test.']};
 try{
  await h.waitForServerReady(60000);assert.equal(Number(JSON.parse(await readFile(join(rpc,'owner.json'),'utf8')).pid),app.pid);
- await h.resizeWindow(1440,900);await click('workspace.empty.local');await visible('terminal.surface');await click('toolbar.ai');await click('ai.maximize');
+ await h.resizeWindow(1440,900);await click('workspace.empty.local');await visible('terminal.surface');await click('ai.strip');await click('ai.maximize');
  await click('ai.prompt');await h.type_('原对话：等待确认后再执行本地操作。');await click('ai.send');await h.waitFor(async()=>pending||null,10000);
  await click('toolbar.new_session');await click('session.menu.local');
  await absent('ai.panel');
- await click('toolbar.ai');
+ await click('ai.strip');
  await click('ai.prompt');await h.type_('另一段对话的独立草稿');assert.equal((await h.inputState('ai.prompt')).buffer,'另一段对话的独立草稿');
  const call=pending;pending=null;
  const requested=questionMode
@@ -86,7 +86,7 @@ try{
  await capture('03-query-and-rejected-results');
  await click('tabs.tab.2');
  await absent('ai.panel');
- await click('toolbar.ai');
+ await click('ai.strip');
  await visible('ai.prompt');
  assert.equal((await h.inputState('ai.prompt')).buffer,'另一段对话的独立草稿');
  assert.equal(requests,3);await assert.rejects(stat(join(iso,'should-not-be-created')),{code:'ENOENT'});

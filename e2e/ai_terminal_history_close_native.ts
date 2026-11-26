@@ -67,14 +67,14 @@ try{
  report.checks.push('Only host.read_terminal is advertised; real early and late terminal rows are read across distinct revision-bound pages');
  // Hover preview and @ai/context entry paths can start an unlisted conversation.
  // Closing must retain it even if the toolbar has never been clicked.
- await click('ai.close');await click('ai.close.confirmation.confirm');await absent('ai.panel');await click('toolbar.ai');await visible('ai.empty.configured');
- await click('ai.close');await absent('ai.panel');await absent('ai.close.confirmation');await click('toolbar.ai');await visible('ai.empty.configured');
+ await click('ai.close');await click('ai.close.confirmation.confirm');await absent('ai.panel');await click('ai.strip');await visible('ai.empty.configured');
+ await click('ai.close');await absent('ai.panel');await absent('ai.close.confirmation');await click('ai.strip');await visible('ai.empty.configured');
  report.checks.push('Configured welcome with retained history closes without confirmation and reopens without creating another conversation');
  await visible('ai.empty.recent');assert(text(await h.query('ai.empty.recent')).includes('READ_HISTORY'));
  await click('ai.sessions');await visible('ai.session.row.1');await click('ai.session.jump.1');await absent('ai.sessions.menu');
  assert(text(await h.query('ai.conversation')).includes('HISTORY_READ_COMPLETE'));
  report.checks.push('A conversation started through hover preview is retained in the list and welcome recent history after X');
- await click('ai.collapse');await absent('ai.panel');await click('toolbar.ai');
+ await click('ai.collapse');await absent('ai.panel');await click('ai.strip');
  assert(text(await h.query('ai.conversation')).includes('HISTORY_READ_COMPLETE'));
  report.checks.push('Minus preserves the current conversation');
  // Keep a second conversation to catch accidental clearing of the whole list.
@@ -86,7 +86,7 @@ try{
  await click('ai.close');await visible('ai.close.confirmation');await cap('02-close-confirmation');
  await click('ai.close.confirmation.cancel');await absent('ai.close.confirmation');
  assert(text(await h.query('ai.conversation')).includes('HISTORY_READ_COMPLETE'));assert.equal((await h.inputState('ai.prompt')).buffer,'UNSENT_DRAFT');
- await click('ai.close');await click('ai.close.confirmation.confirm');await absent('ai.panel');await click('toolbar.ai');await visible('ai.empty.configured');
+ await click('ai.close');await click('ai.close.confirmation.confirm');await absent('ai.panel');await click('ai.strip');await visible('ai.empty.configured');
  assert(!text(await h.query('ai.conversation')).includes('HISTORY_READ_COMPLETE'));assert.equal((await h.inputState('ai.prompt')).buffer,'');
  await visible('ai.empty.recent');assert(text(await h.query('ai.empty.recent')).includes('READ_HISTORY'));assert(text(await h.query('ai.empty.recent')).includes('SECOND_CONVERSATION'));
  await cap('03-welcome-with-history');
@@ -103,10 +103,10 @@ try{
  report.checks.push('A follow-up after X sends the original transcript back to the provider');
  await send('HOLD_CURRENT_TURN');await h.waitFor(async()=>held||null,10000);await visible('ai.stop');
  await click('ai.prompt');await h.type_('RUNNING_UNSENT_DRAFT');
- await click('ai.collapse');await absent('ai.panel');await click('toolbar.ai');await visible('ai.stop');
+ await click('ai.collapse');await absent('ai.panel');await click('ai.strip');await visible('ai.stop');
  assert(text(await h.query('ai.conversation')).includes('RUNNING_HISTORY_MARKER'));
  await click('ai.close');assert.equal(text(await visible('ai.close.confirmation.title')).trim(),'停止并结束当前会话？');
- await click('ai.close.confirmation.confirm');await absent('ai.panel');await click('toolbar.ai');await visible('ai.empty.configured');await absent('ai.stop');
+ await click('ai.close.confirmation.confirm');await absent('ai.panel');await click('ai.strip');await visible('ai.empty.configured');await absent('ai.stop');
  assert(!text(await h.query('ai.conversation')).includes('RUNNING_HISTORY_MARKER'));assert.equal((await h.inputState('ai.prompt')).buffer,'');
  await visible('ai.empty.recent');assert(text(await h.query('ai.empty.recent')).includes('HOLD_CURRENT_TURN'));await cap('05-welcome-after-stop');
  await click('ai.sessions');await visible('ai.session.row.1');await visible('ai.session.row.3');await click('ai.session.jump.1');await absent('ai.sessions.menu');

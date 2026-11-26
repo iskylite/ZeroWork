@@ -200,7 +200,7 @@ try {
   await click("sidebar.host"); await settleAuthentication(async () => !(await query("connection.progress")).some(shown) && text((await query("workspace.pane")).find(shown)).includes("ZW_AUX_SOURCE_READY"), "01-original-ssh");
   assert.equal((await tabs()).length, 2);
   await capture("01-original-owner");
-  await click("toolbar.ai"); await visible("ai.prompt");
+  await click("ai.strip"); await visible("ai.prompt");
   await click("ai.composer.attachment"); await click("ai.attachment.remote_file");
   await visible("ai.remote.picker");
   await settleAuthentication(async () => (await query("ai.remote.entry")).some(shown), "02-original-owner-readonly");

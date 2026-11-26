@@ -34,7 +34,7 @@ const report:any={status:'running',isolation:{directory:iso,data,rpc},checks:[],
 async function capture(name:string,keepPointer=false){if(!keepPointer)await h.mouseMove(1,1);const ids=['ai.sessions.menu','ai.session.first_line','ai.session.second_line','ai.session.phase_tag','ai.session.bound','ai.session.unbound','ai.history'];const geometry:any={};for(const id of ids){const node=(await h.query(id)).find(shown);if(node)geometry[id]=node.rect}report.geometry[name]=geometry;await writeFile(join(out,name+'.json'),JSON.stringify(geometry,null,2));assert((await h.screenshot(join(out,name+'.png'))).ok);report.screenshots.push(join(out,name+'.png'))}
 
 try{
- await h.waitForServerReady(60000);await h.resizeWindow(1200,900);await click('workspace.empty.local');await visible('terminal.surface');await click('toolbar.ai');await send('FIRST_TASK 检查当前服务器的运行状态');await h.waitFor(()=>held||null,15000);
+ await h.waitForServerReady(60000);await h.resizeWindow(1200,900);await click('workspace.empty.local');await visible('terminal.surface');await click('ai.strip');await send('FIRST_TASK 检查当前服务器的运行状态');await h.waitFor(()=>held||null,15000);
  const inspect=async()=>{
   const rows=(await h.query('ai.sessions.menu')).flatMap(flat).filter((n:any)=>/^ai.session.row.\d+$/.test(n.test_id??'')&&shown(n));
   assert(rows.length>0);

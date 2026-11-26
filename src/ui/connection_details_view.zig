@@ -108,7 +108,7 @@ pub const View = struct {
         // Scope children dispose in creation order. Release this view's focus
         // while all Button/Tooltip signals still exist.
         const focus_guard = try scope.childScope();
-        const popup = try ui.widgets.Popover(.{ .open = self.open, .group = @import("floating_surface.zig").workspace_popup, .trigger = .manual, .close_on_outside_click = false, .anchor = .{ .virtual = .{ .ctx = self, .getRect = anchor } }, .position = .top, .width = S.width, .max_width = S.width, .offset = .{ .static = S.anchor_gap }, .viewport_padding = S.margin, .constrain_width_to_viewport = true, .flip = true, .shift_main_axis = false, .on_open_change = cx.on(View, self, openChanged), .enter_transition = .none, .exit_transition = .none }).mount(scope, cx);
+        const popup = try ui.widgets.Popover(.{ .open = self.open, .group = @import("floating_surface.zig").workspace_popup, .trigger = .manual, .close_on_outside_click = false, .anchor = .{ .virtual = .{ .ctx = self, .getRect = anchor } }, .position = .top, .width = S.width, .max_width = S.width, .offset = .{ .static = S.anchor_gap }, .viewport_padding = S.margin, .constrain_width_to_viewport = true, .flip = true, .shift_main_axis = true, .on_open_change = cx.on(View, self, openChanged), .enter_transition = .none, .exit_transition = .none }).mount(scope, cx);
         self.scope = popup.scope;
         self.root = popup.wrapper;
         self.chrome = popup.chrome;
@@ -145,8 +145,8 @@ pub const View = struct {
         } else try self.update(snapshot);
         const rect = trigger.globalRect();
         self.anchor_id = trigger.id;
-        self.status_top = if (rect.y < self.cx.viewport.height / 2) rect.y else status_top;
-        self.anchor_rect = .{ .x = rect.x, .y = if (rect.y < self.cx.viewport.height / 2) rect.y else status_top, .w = rect.w, .h = if (rect.y < self.cx.viewport.height / 2) rect.h else 0 };
+        self.status_top = if (rect.h > 0) rect.y else status_top;
+        self.anchor_rect = .{ .x = rect.x, .y = if (rect.h > 0) rect.y else status_top, .w = rect.w, .h = rect.h };
         self.visible = true;
         self.open.set(true);
         self.dirty = true;
@@ -233,8 +233,8 @@ pub const View = struct {
             return;
         }
         const rect = trigger.globalRect();
-        const next: ui.widgets.popover.AnchorRect = .{ .x = rect.x, .y = if (rect.y < self.cx.viewport.height / 2) rect.y else status_top, .w = rect.w, .h = if (rect.y < self.cx.viewport.height / 2) rect.h else 0 };
-        self.status_top = if (rect.y < self.cx.viewport.height / 2) rect.y else status_top;
+        const next: ui.widgets.popover.AnchorRect = .{ .x = rect.x, .y = if (rect.h > 0) rect.y else status_top, .w = rect.w, .h = rect.h };
+        self.status_top = if (rect.h > 0) rect.y else status_top;
         if (!std.meta.eql(next, self.anchor_rect)) {
             self.anchor_rect = next;
             self.chrome.markLayoutDirty();
@@ -299,7 +299,7 @@ pub const View = struct {
         const self: *View = @ptrCast(@alignCast(raw));
         if (self.visible) if (self.cx.root) |root| if (self.anchor_id) |id| if (find(root, id)) |trigger| {
             const rect = trigger.globalRect();
-            if (trigger.isDisplayedInTree() and rect.w > 0) return .{ .x = rect.x, .y = rect.y, .w = rect.w, .h = if (rect.y < self.cx.viewport.height / 2) rect.h else 0 };
+            if (trigger.isDisplayedInTree() and rect.w > 0) return .{ .x = rect.x, .y = rect.y, .w = rect.w, .h = rect.h };
         };
         return self.anchor_rect;
     }

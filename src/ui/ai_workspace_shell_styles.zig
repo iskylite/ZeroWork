@@ -2,61 +2,35 @@
 //! Surfaces, radii and state colors reuse the application theme tokens.
 const ui = @import("ui");
 const theme = @import("app_theme.zig");
+const sidebar = @import("sidebar_styles.zig");
 pub const ButtonStyle = @FieldType(ui.widgets.ControlShellConfig, "style");
 
-pub const left_width: f32 = 220;
+pub const left_width = sidebar.expanded_width;
+pub const column_gap: f32 = 12;
 pub const inspector_width: f32 = 340;
 pub const center_min_width: f32 = 360;
 pub const compact_width: f32 = 780;
-pub const card_radius: f32 = 12;
 pub const header_height: f32 = 44;
 pub const rail_padding: f32 = 10;
 
-pub fn rootCard(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{
-        .width = .fill(),
-        .height = .fill(),
-        .direction = .row,
-        .background = theme.current().surface_1,
-        .border = .{ .width = 0, .radius = card_radius },
-        .overflow = .hidden,
-        .overflow_hidden = true,
-    };
+pub fn root(_: *const ui.ThemeTokens) ui.BoxStyle {
+    return .{ .width = .fill(), .height = .fill(), .min_width = 0, .min_height = 0, .direction = .row, .gap = column_gap, .background = ui.Color.TRANSPARENT, .overflow = .hidden };
 }
 
-pub fn rootPlain(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{
-        .width = .fill(),
-        .height = .fill(),
-        .direction = .row,
-        .background = ui.Color.TRANSPARENT,
-        .border = .{ .width = 0, .radius = 0 },
-        .overflow = .hidden,
-        .overflow_hidden = true,
-    };
-}
-
-pub fn leftRail(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{
-        .width = .{ .px = left_width },
-        .min_width = left_width,
-        .height = .fill(),
-        .flex_shrink = 0,
-        .direction = .column,
-        .padding = .{ .left = rail_padding, .right = rail_padding, .top = 8, .bottom = 10 },
-        .gap = 8,
-        .background = ui.Color.TRANSPARENT,
-        .border = .{ .width = 0 },
-        .border_right_width = 1,
-        .border_right_color = theme.current().border,
-    };
+pub fn leftRail(t: *const ui.ThemeTokens) ui.BoxStyle {
+    var panel = sidebar.panel(t);
+    panel.width = .{ .px = left_width };
+    panel.min_width = 0;
+    panel.gap = 10;
+    panel.padding = .{ .left = rail_padding, .right = rail_padding, .top = 8, .bottom = 10 };
+    return panel;
 }
 
 pub fn centerPane(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{
         .width = .fill(),
         .height = .fill(),
-        .min_width = center_min_width,
+        .min_width = 0,
         .min_height = 0,
         .flex = 1,
         .direction = .column,
@@ -66,72 +40,34 @@ pub fn centerPane(_: *const ui.ThemeTokens) ui.BoxStyle {
     };
 }
 
-pub fn inspector(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{
-        .width = .{ .px = inspector_width },
-        .min_width = inspector_width,
-        .height = .fill(),
-        .flex_shrink = 0,
-        .direction = .column,
-        .background = ui.Color.TRANSPARENT,
-        .border = .{ .width = 0 },
-        .border_left_width = 1,
-        .border_left_color = theme.current().border,
-        .overflow = .hidden,
-        .overflow_hidden = true,
-    };
+pub fn inspector(t: *const ui.ThemeTokens) ui.BoxStyle {
+    var panel = sidebar.panel(t);
+    panel.width = .{ .px = inspector_width };
+    panel.min_width = 0;
+    return panel;
 }
 
 pub fn railHeader(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 32 }, .flex_shrink = 0, .direction = .row, .align_items = .center, .gap = 4 };
+    var header = sidebar.header();
+    header.width = .fill();
+    header.height = .{ .px = header_height - 16 };
+    return header;
 }
 
 pub fn railTitle(_: *const ui.ThemeTokens) ui.TextStyle {
-    return .{ .font_size = 13, .font_weight = 700, .line_height = 18.0 / 13.0, .color = theme.current().fg_1, .text_overflow = .ellipsis };
-}
-
-pub fn newChatButton() ButtonStyle {
-    return .{
-        .height = .{ .px = 26 },
-        .padding = .{ .left = 7, .right = 8 },
-        .gap = 4,
-        .font_size = 11,
-        .font_weight = 500,
-        .text_color = theme.current().fg_1,
-        .background = theme.current().surface_2,
-        .corner_radius = 7,
-        .border = .{ .width = 0, .radius = 7 },
-        .flex_shrink = 0,
-    };
+    return sidebar.text(13, 600, false);
 }
 
 pub fn iconButton() ButtonStyle {
-    return .{
-        .width = .{ .px = 24 },
-        .height = .{ .px = 24 },
-        .padding = .{},
-        .gap = 0,
-        .corner_radius = 6,
-        .background = ui.Color.TRANSPARENT,
-        .text_color = theme.current().fg_2,
-        .flex_shrink = 0,
-    };
+    var button = sidebar.headerAction();
+    button.text_color = theme.current().fg_2;
+    return button;
 }
 
 pub fn searchField(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{
-        .width = .fill(),
-        .height = .{ .px = 30 },
-        .flex_shrink = 0,
-        .direction = .row,
-        .align_items = .center,
-        .padding = .{ .left = 8, .right = 8 },
-        .gap = 6,
-        .background = theme.popupInset(),
-        .border = .{ .width = 0, .radius = 8 },
-        .overflow = .hidden,
-        .overflow_hidden = true,
-    };
+    var search = sidebar.search();
+    search.width = .fill();
+    return search;
 }
 
 pub fn searchInput() ui.BoxStyle {
@@ -147,36 +83,22 @@ pub fn listContent(_: *const ui.ThemeTokens) ui.BoxStyle {
 }
 
 pub fn sessionRow(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{
-        .width = .fill(),
-        .min_height = 48,
-        .height = .{ .fit = .{} },
-        .flex_shrink = 0,
-        .direction = .column,
-        .justify = .center,
-        .align_items = .start,
-        .padding = .{ .left = 8, .right = 8, .top = 6, .bottom = 6 },
-        .gap = 2,
-        .background = ui.Color.TRANSPARENT,
-        .border = .{ .width = 0, .radius = 7 },
-        .corner_radius = 7,
-        .cursor = .pointer,
-    };
+    var row = sidebar.host(false, false);
+    row.height = .{ .fit = .{} };
+    row.min_height = sidebar.host_height;
+    row.padding = .{ .left = 9, .right = 9, .top = 5, .bottom = 5 };
+    row.cursor = .pointer;
+    return row;
 }
 
 pub fn sessionRowBackground(selected: bool, hovered: bool) ui.BoxStyle {
-    return .{
-        .background = if (selected) (if (hovered) theme.states().selected_hover else theme.states().selected) else if (hovered) theme.states().hover else ui.Color.TRANSPARENT,
-        .corner_radius = 7,
-    };
+    return .{ .background = sidebar.host(selected, hovered).background, .corner_radius = 9 };
 }
-
 pub fn sessionTitle(_: *const ui.ThemeTokens) ui.TextStyle {
-    return .{ .font_size = 12, .font_weight = 500, .line_height = 16.0 / 12.0, .color = theme.current().fg_1, .text_overflow = .ellipsis };
+    return sidebar.text(12, 500, false);
 }
-
 pub fn sessionSubtitle(_: *const ui.ThemeTokens) ui.TextStyle {
-    return .{ .font_size = 10.5, .font_weight = 400, .line_height = 14.0 / 10.5, .color = theme.current().fg_2, .text_overflow = .ellipsis };
+    return sidebar.text(10.5, 400, true);
 }
 
 pub fn railEmpty(_: *const ui.ThemeTokens) ui.TextStyle {
@@ -230,7 +152,7 @@ pub fn workspacePill(_: *const ui.ThemeTokens) ui.BoxStyle {
         .gap = 5,
         .padding = .{ .left = 9, .right = 8 },
         .background = theme.popupInset(),
-        .border = .{ .width = 0, .radius = 11 },
+        .border = .{ .width = 0, .radius = 14 },
         .overflow = .hidden,
         .overflow_hidden = true,
     };
@@ -264,32 +186,16 @@ pub fn composerSlot(_: *const ui.ThemeTokens) ui.BoxStyle {
 }
 
 pub fn inspectorHeader(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{
-        .width = .fill(),
-        .height = .{ .px = 40 },
-        .flex_shrink = 0,
-        .direction = .row,
-        .align_items = .center,
-        .gap = 2,
-        .padding = .{ .left = 8, .right = 8, .top = 2, .bottom = 2 },
-    };
+    return .{ .width = .fill(), .height = .{ .px = header_height }, .direction = .row, .align_items = .center, .gap = 6, .padding = .{ .left = 12, .right = 8 }, .flex_shrink = 0 };
+}
+
+pub fn inspectorTabs(_: *const ui.ThemeTokens) ui.BoxStyle {
+    return .{ .height = .{ .px = 32 }, .direction = .row, .align_items = .center, .gap = 2, .padding = ui.Padding.all(3), .margin = .{ .left = 8, .right = 8, .bottom = 6 }, .background = theme.current().well, .border = .{ .width = 0, .radius = 9 }, .flex_shrink = 0 };
 }
 
 pub fn tabButton(active: bool) ButtonStyle {
-    return .{
-        .height = .{ .px = 26 },
-        .padding = .{ .left = 7, .right = 7 },
-        .gap = 0,
-        .font_size = 11,
-        .font_weight = 500,
-        .text_color = if (active) theme.current().fg_1 else theme.current().fg_2,
-        .background = if (active) theme.popupSelection() else ui.Color.TRANSPARENT,
-        .corner_radius = 6,
-        .border = .{ .width = 0, .radius = 6 },
-        .flex_shrink = 0,
-    };
+    return .{ .width = .fill(), .flex = 1, .min_width = 0, .height = .{ .px = 26 }, .gap = 0, .padding = .{}, .font_size = 11, .font_weight = if (active) 600 else 500, .text_color = if (active) theme.current().fg_1 else theme.current().fg_2, .background = if (active) sidebar.hostSelection() else ui.Color.TRANSPARENT, .corner_radius = 7, .border = .{ .width = 0, .radius = 7 } };
 }
-
 pub fn inspectorBody(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .fill(), .flex = 1, .min_width = 0, .min_height = 0, .direction = .column };
 }
@@ -353,7 +259,7 @@ pub fn fileRow(depth: u16) ui.BoxStyle {
 
 pub fn fileRowBackground(selected: bool, hovered: bool) ui.BoxStyle {
     return .{
-        .background = if (selected) (if (hovered) theme.states().selected_hover else theme.states().selected) else if (hovered) theme.states().hover else ui.Color.TRANSPARENT,
+        .background = sidebar.host(selected, hovered).background,
         .corner_radius = 6,
     };
 }
@@ -396,7 +302,7 @@ pub fn previewTitle(_: *const ui.ThemeTokens) ui.TextStyle {
 }
 
 pub fn previewSegment(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .{ .fit = .{} }, .height = .{ .px = 24 }, .flex_shrink = 0, .direction = .row, .align_items = .center, .gap = 2, .padding = .{ .left = 2, .right = 2 }, .background = theme.current().surface_2, .border = .{ .width = 0, .radius = 6 } };
+    return .{ .width = .{ .fit = .{} }, .height = .{ .px = 24 }, .flex_shrink = 0, .direction = .row, .align_items = .center, .gap = 2, .padding = .{ .left = 2, .right = 2 }, .background = theme.popupInset(), .border = .{ .width = 0, .radius = 6 } };
 }
 
 pub fn previewSegmentButton(active: bool) ButtonStyle {
@@ -407,7 +313,7 @@ pub fn previewSegmentButton(active: bool) ButtonStyle {
         .font_size = 10,
         .font_weight = 500,
         .text_color = if (active) theme.current().fg_1 else theme.current().fg_2,
-        .background = if (active) theme.current().surface_1 else ui.Color.TRANSPARENT,
+        .background = if (active) sidebar.hostSelection() else ui.Color.TRANSPARENT,
         .corner_radius = 4,
         .border = .{ .width = 0, .radius = 4 },
         .flex_shrink = 0,

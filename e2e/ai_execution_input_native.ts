@@ -251,7 +251,7 @@ async function scanLeaks(){
  assert.deepEqual(leaks,[],'synthetic secure input persisted outside its private native consumer');return{files_checked:checked.length,provider_requests_checked:requests.length,original_calls_checked:emitted.size,matches:leaks.length};
 }
 try{
- await h.waitForServerReady(60000);assert.equal(Number(JSON.parse(await readFile(join(rpc,'owner.json'),'utf8')).pid),app.pid);await h.resizeWindow(1440,900);await click('workspace.empty.local');await visible('terminal.surface');await click('toolbar.ai');await click('ai.maximize');
+ await h.waitForServerReady(60000);assert.equal(Number(JSON.parse(await readFile(join(rpc,'owner.json'),'utf8')).pid),app.pid);await h.resizeWindow(1440,900);await click('workspace.empty.local');await visible('terminal.surface');await click('ai.strip');await click('ai.maximize');
  for(const stage of stages){
   currentStage=stage;activeCall=null;finalEmitted=false;const approved=new Set<string>();
   await click('ai.prompt');await h.key('a',{cmd:true});await h.type_(`[NATIVE-${stage}] 验收受控本机输入，仅按明确审批执行。`);await click('ai.send');
@@ -272,7 +272,7 @@ try{
    if(held?.kind==='takeover-before-user-input'){
     await visible('ai.stop');assert.equal(await exists(paths.takeoverDone),false);await click('ai.collapse');await absent('terminal.ai_control');const surface=await visible('terminal.surface');
     assert((await h.clickAt(surface.rect.x+surface.rect.w/2,surface.rect.y+surface.rect.h/2)).ok);assert((await h.type_(userInput)).ok);assert((await h.key('return')).ok);
-    await h.waitFor(async()=>{try{return await readFile(paths.takeoverDone,'utf8')===userInput+'\n'||null}catch{return null}},15000);await click('toolbar.ai');await visible('ai.stop');await capture('takeover-original-helper-ended-by-user');release('takeover-before-user-input',[get('takeover-finished',states.TAKEOVER.execution_ref)]);
+    await h.waitFor(async()=>{try{return await readFile(paths.takeoverDone,'utf8')===userInput+'\n'||null}catch{return null}},15000);await click('ai.strip');await visible('ai.stop');await capture('takeover-original-helper-ended-by-user');release('takeover-before-user-input',[get('takeover-finished',states.TAKEOVER.execution_ref)]);
    }
    if(held?.kind==='secret-awaiting-arm'){
     if(await exists(join(out,'collector-armed.json'))){const armed=JSON.parse(await readFile(join(out,'collector-armed.json'),'utf8'));assert.equal(armed.run_id,token);assert(armed.cua_bound===true||armed.cua_bound===false&&armed.bind_on_collector===true,'arming needs either a real bound app or explicit deferred binding to the collector');states.SECRET.cua_armed=true;states.SECRET.cua_arm_mode=armed.cua_bound?'bound_app':'bind_on_collector';release('secret-awaiting-arm',[{id:'secret-request',name:'host.send_execution_input',arguments:{execution_ref:states.SECRET.execution_ref,request_key:requestKey+'-secret',host_secret_request:true}}])}

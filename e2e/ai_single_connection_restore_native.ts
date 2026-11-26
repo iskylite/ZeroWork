@@ -117,7 +117,7 @@ async function boundCount(count: number) {
 try {
     await h.waitForServerReady(60000); await h.resizeWindow(1280, 960);
     assert.equal(Number(JSON.parse(await readFile(join(rpc, 'owner.json'), 'utf8')).pid), app.pid);
-    await click('workspace.empty.local'); await visible('terminal.surface'); await click('toolbar.ai');
+    await click('workspace.empty.local'); await visible('terminal.surface'); await click('ai.strip');
     if (legacyMode) {
         async function legacyHistory(index: number) {
             await h.waitFor(async () => text((await h.query('ai.message.user.text')).filter(shown)).includes('LEGACY_' + index) || null, 10000);
@@ -155,7 +155,7 @@ try {
     report.checks.push('New unbinds the prior conversation; restoring the original restores its own history and context, without the copy follow-up');
     // Close the AI window, reopen its welcome, and restore the other history.
     await click('ai.close'); await visible('ai.close.confirmation'); await click('ai.close.confirmation.confirm');
-    await absent('ai.panel'); await click('toolbar.ai'); await menu(); await boundCount(0);
+    await absent('ai.panel'); await click('ai.strip'); await menu(); await boundCount(0);
     await click('ai.session.restore.2'); await confirm(); await full(['ORIGINAL', 'COPY_FOLLOWUP']);
     await send('REOPEN_FOLLOWUP 重新打开后继续', ['ORIGINAL', 'COPY_FOLLOWUP', 'REOPEN_FOLLOWUP']);
     report.checks.push('Closing and reopening the AI window releases its old binding; another history restores and continues on the same connection');

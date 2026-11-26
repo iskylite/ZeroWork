@@ -89,7 +89,7 @@ try {
   assert((await resizeWindow(1440, 900)).ok);
   await click("workspace.empty.local");
   await visible("terminal.surface");
-  await click("toolbar.ai");
+  await click("ai.strip");
   await visible("ai.prompt");
   await capture("00-ai-ready");
   await submit(longPrompt);

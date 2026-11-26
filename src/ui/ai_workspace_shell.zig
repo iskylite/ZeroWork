@@ -74,9 +74,6 @@ pub const Config = struct {
     inspector_tab: InspectorTab = .files,
     inspector_open: bool = false,
     left_collapsed: bool = false,
-    /// Group panes already provide the rounded card shell; set this when the
-    /// page is mounted inside one so it does not paint a second card.
-    embedded: bool = false,
     /// Full-window hosts reserve the native traffic-light strip here; workspace
     /// content mounts already sit below the shell title bar and leave this zero.
     top_inset: f32 = 0,
@@ -246,7 +243,7 @@ pub fn mount(config: Config) !*View {
     });
 
     const mount_parent = config.parent orelse config.slot orelse return error.MountSlotRequired;
-    self.root = if (config.embedded) try ui.boxStyled(cx, S.rootPlain, .{}) else try ui.boxStyled(cx, S.rootCard, .{});
+    self.root = try ui.boxStyled(cx, S.root, .{});
     self.root.meta.ownership.meta.test_id = "ai.workspace.shell";
     if (config.top_inset != 0 or config.left_inset != 0) {
         self.root.setStyleInline(cx.allocator, .{ .padding = .{ .top = config.top_inset, .left = config.left_inset } });
@@ -286,6 +283,7 @@ fn buildLeftRail(self: *View) !void {
     const header = try ui.boxStyled(cx, S.railHeader, .{});
     header.meta.ownership.meta.test_id = "ai.workspace.left.header";
     try self.left_rail.appendChild(cx.allocator, header);
+    try header.appendChild(cx.allocator, try T.icon(cx, ui.icons.message_square, "accent_ink", .{ .width = .{ .px = 16 }, .height = .{ .px = 16 }, .flex_shrink = 0 }));
     const title = try ui.textStyled(cx, S.railTitle, "AI 对话");
     title.meta.ownership.meta.test_id = "ai.workspace.left.title";
     try header.appendChild(cx.allocator, title);
@@ -307,12 +305,12 @@ fn buildLeftRail(self: *View) !void {
         try header.appendChild(cx.allocator, history);
     }
     self.new_chat_button = try ui.widgets.Button(.{
-        .label = "新建",
+        .icon_only = true,
         .variant = .ghost,
         .icon_asset = ui.icons.plus,
         .icon_size = 13,
         .a11y_label = "新建 AI 对话",
-        .base_style = S.newChatButton(),
+        .base_style = S.iconButton(),
         .on_click = cx.on(View, self, newChat),
     }).mount(scope, cx);
     self.new_chat_button.meta.ownership.meta.test_id = "ai.workspace.new";
@@ -445,6 +443,25 @@ fn buildInspector(self: *View, files_unavailable_reason: ?[]const u8) !void {
     header.meta.ownership.meta.test_id = "ai.workspace.inspector.header";
     try self.inspector_root.appendChild(cx.allocator, header);
 
+    try header.appendChild(cx.allocator, try T.icon(cx, ui.icons.panel_right, "accent_ink", .{ .width = .{ .px = 16 }, .height = .{ .px = 16 }, .flex_shrink = 0 }));
+    try header.appendChild(cx.allocator, try ui.textStyled(cx, S.railTitle, "检查器"));
+    try header.appendChild(cx.allocator, try ui.spacer(cx));
+
+    self.close_button = try ui.widgets.Button(.{
+        .variant = .ghost,
+        .icon_only = true,
+        .icon_asset = ui.icons.x,
+        .icon_size = 14,
+        .a11y_label = "关闭检查器",
+        .base_style = S.iconButton(),
+        .on_click = cx.on(View, self, close_inspector),
+    }).mount(scope, cx);
+    self.close_button.meta.ownership.meta.test_id = "ai.workspace.inspector.close";
+    try header.appendChild(cx.allocator, self.close_button);
+
+    const tab_track = try ui.boxStyled(cx, S.inspectorTabs, .{});
+    tab_track.meta.ownership.meta.test_id = "ai.workspace.inspector.tabs";
+    try self.inspector_root.appendChild(cx.allocator, tab_track);
     const labels = [_][]const u8{ "文件", "成员", "留言板", "关系图", "轮次" };
     const test_ids = [_][]const u8{
         "ai.workspace.inspector.tab.files",
@@ -465,22 +482,8 @@ fn buildInspector(self: *View, files_unavailable_reason: ?[]const u8) !void {
         }).mount(scope, cx);
         button.meta.ownership.meta.test_id = test_ids[index];
         self.tab_buttons[index] = button;
-        try header.appendChild(cx.allocator, button);
+        try tab_track.appendChild(cx.allocator, button);
     }
-    try header.appendChild(cx.allocator, try ui.spacer(cx));
-
-    self.close_button = try ui.widgets.Button(.{
-        .variant = .ghost,
-        .icon_only = true,
-        .icon_asset = ui.icons.x,
-        .icon_size = 14,
-        .a11y_label = "关闭检查器",
-        .base_style = S.iconButton(),
-        .on_click = cx.on(View, self, close_inspector),
-    }).mount(scope, cx);
-    self.close_button.meta.ownership.meta.test_id = "ai.workspace.inspector.close";
-    try header.appendChild(cx.allocator, self.close_button);
-
     self.inspector_body = try ui.boxStyled(cx, S.inspectorBody, .{});
     self.inspector_body.meta.ownership.meta.test_id = "ai.workspace.inspector.body";
     try self.inspector_root.appendChild(cx.allocator, self.inspector_body);
@@ -751,28 +754,25 @@ pub fn set_files(self: *View, files: []const FileRow) !void {
     self.cx.requestRedraw();
 }
 
+fn fitsBothRails(width: f32) bool {
+    return width >= S.left_width + S.inspector_width + S.center_min_width + 2 * S.column_gap;
+}
+
 pub fn set_left_collapsed(self: *View, collapsed: bool) void {
-    if (self.left_collapsed == collapsed) {
-        self.left_rail.setDisplay(if (collapsed) .none else .flex);
-        self.expand_button.setDisplay(if (collapsed) .flex else .none);
-        return;
-    }
+    const w = self.root.globalRect().w;
+    if (!collapsed and self.inspector_open and w > 0 and !fitsBothRails(w)) set_inspector_open(self, false);
     self.left_collapsed = collapsed;
     self.left_rail.setDisplay(if (collapsed) .none else .flex);
     self.expand_button.setDisplay(if (collapsed) .flex else .none);
-    self.root.markLayoutDirty();
     self.cx.requestRedraw();
 }
 
 pub fn set_inspector_open(self: *View, open: bool) void {
-    if (self.inspector_open == open and (self.inspector_root.style.display == .flex) == open) {
-        applyInspectorToggleStyle(self);
-        return;
-    }
+    const w = self.root.globalRect().w;
+    if (open and !self.left_collapsed and w > 0 and !fitsBothRails(w)) set_left_collapsed(self, true);
     self.inspector_open = open;
     self.inspector_root.setDisplay(if (open) .flex else .none);
     applyInspectorToggleStyle(self);
-    self.root.markLayoutDirty();
     self.cx.requestRedraw();
 }
 
@@ -966,7 +966,6 @@ fn applyDynamicStyles(self: *View) !void {
     try applyTabStyles(self);
     try applyPreviewModeStyles(self);
     applyInspectorToggleStyle(self);
-    recolorButtonContents(self.inspector_toggle, if (self.inspector_open) T.current().accent_ink else T.current().fg_2);
     self.cx.requestRedraw();
 }
 
@@ -989,6 +988,7 @@ fn applyPreviewModeStyles(self: *View) !void {
 
 fn applyInspectorToggleStyle(self: *View) void {
     self.inspector_toggle_style.set(S.inspectorToggle(self.inspector_open));
+    recolorButtonContents(self.inspector_toggle, if (self.inspector_open) T.current().accent_ink else T.current().fg_2);
 }
 
 fn buildSessionRows(self: *View) !void {
@@ -1013,13 +1013,16 @@ fn buildSessionRows(self: *View) !void {
             }
         }.run);
         _ = ui.clickable(row, cx.on(SessionRowState, state, SessionRowState.select));
+        try row.appendChild(cx.allocator, try T.icon(cx, ui.icons.message_square, "fg_2", .{ .width = .{ .px = 14 }, .height = .{ .px = 14 }, .flex_shrink = 0 }));
+        const labels = try ui.box(cx, .{ .width = .fill(), .min_width = 0, .flex = 1, .direction = .column, .gap = 1 }, .{});
+        try row.appendChild(cx.allocator, labels);
         const title = try ui.textStyled(cx, S.sessionTitle, conversation.title);
         title.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0 });
-        try row.appendChild(cx.allocator, title);
+        try labels.appendChild(cx.allocator, title);
         if (conversation.subtitle.len != 0) {
             const subtitle = try ui.textStyled(cx, S.sessionSubtitle, conversation.subtitle);
             subtitle.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0 });
-            try row.appendChild(cx.allocator, subtitle);
+            try labels.appendChild(cx.allocator, subtitle);
         }
         try self.session_list.appendChild(cx.allocator, row);
         visible += 1;
@@ -1194,20 +1197,41 @@ fn afterLayout(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
     const width = self.root.globalRect().w;
     if (width <= 0) return if (relayout) .needs_layout else .done;
     const compact = width < S.compact_width;
-    if (compact == self.compact) return if (relayout) .needs_layout else .done;
-    self.compact = compact;
-    var changed = false;
-    if (compact) {
-        if (!self.left_collapsed) {
-            set_left_collapsed(self, true);
-            changed = true;
-        }
-        if (self.inspector_open) {
-            set_inspector_open(self, false);
-            changed = true;
+    if (compact != self.compact) {
+        self.compact = compact;
+        if (compact) {
+            if (!self.left_collapsed) set_left_collapsed(self, true);
+            if (self.inspector_open) set_inspector_open(self, false);
+            relayout = true;
         }
     }
-    return if (changed) .needs_layout else .done;
+    // A wide window can show both rails. At intermediate widths the user's
+    // last requested rail takes precedence; do not clip the opposite edge.
+    if (self.inspector_open and !self.left_collapsed and !fitsBothRails(width)) {
+        set_left_collapsed(self, true);
+        relayout = true;
+    }
+    // A small group pane need not be wide enough for even one rail next to
+    // the conversation. Its rail temporarily takes the full slot, with its
+    // own visible close/collapse button; the draft and transcript stay mounted.
+    const left_alone = !self.left_collapsed and width < S.left_width + S.column_gap + S.center_min_width;
+    const right_alone = self.inspector_open and width < S.inspector_width + S.column_gap + S.center_min_width;
+    const show_center = !left_alone and !right_alone;
+    if ((self.center.style.display != .none) != show_center) {
+        self.center.setDisplay(if (show_center) .flex else .none);
+        relayout = true;
+    }
+    const left_w: ui.Sizing = .{ .px = if (left_alone) width else S.left_width };
+    const right_w: ui.Sizing = .{ .px = if (right_alone) width else S.inspector_width };
+    if (!std.meta.eql(self.left_rail.style.width, left_w)) {
+        self.left_rail.setStyle(self.cx.allocator, .width, left_w);
+        relayout = true;
+    }
+    if (!std.meta.eql(self.inspector_root.style.width, right_w)) {
+        self.inspector_root.setStyle(self.cx.allocator, .width, right_w);
+        relayout = true;
+    }
+    return if (relayout) .needs_layout else .done;
 }
 
 fn cleanup(self: *View) void {

@@ -392,3 +392,46 @@ test "AI composer skill picker ignores stale rows after a draft edit or caret mo
     try std.testing.expectEqualStrings("/skill sample\nexisting task", f.value.peek());
     try std.testing.expectEqual(@as(usize, 1), probe.changes);
 }
+
+test "AI composer slash shortcuts select a local control without sending or clearing the rest of the draft" {
+    const Picker = @import("ui/ai_skill_picker.zig");
+    const Probe = struct {
+        gesture: ?Picker.Shortcut = null,
+        valid: bool = true,
+        fn changed(_: *@This(), _: []const u8) void {}
+        fn available(raw: *anyopaque, owner: u64, cmd: Picker.Shortcut) bool {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            return self.valid and owner == 1 and cmd == .model;
+        }
+        fn open(raw: *anyopaque, owner: u64, cmd: Picker.Shortcut) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (available(raw, owner, cmd)) self.gesture = cmd;
+        }
+    };
+    var f: Fixture = undefined;
+    try f.init(true);
+    defer f.deinit();
+    var probe: Probe = .{};
+    const picker = try Picker.View.mount(f.cx, f.scope, f.input, f.cx.on(Probe, &probe, Probe.changed));
+    picker.actions = .{ .context = &probe, .available = Probe.available, .open = Probe.open };
+    try f.cx.root.?.appendChild(a, picker.popup.wrapper);
+    f.cx.setFocus(f.input.input);
+    f.value.set("/mod\n保留草稿");
+    _ = f.input.state.setAccessibilitySelection(4, 4);
+    try picker.refresh(1, 1, &.{}, null);
+    try std.testing.expect(picker.popup.open.?.peek());
+    const enter: ui.events.KeyEvent = .{ .key = .@"return" };
+    // A permission/lease change between opening and choosing can't dispatch.
+    probe.valid = false;
+    try std.testing.expect(picker.handleKey(enter));
+    try std.testing.expectEqual(null, probe.gesture);
+    try std.testing.expectEqualStrings("/mod\n保留草稿", f.value.peek());
+    probe.valid = true;
+    try std.testing.expect(picker.handleKey(enter));
+    try std.testing.expectEqual(Picker.Shortcut.model, probe.gesture.?);
+    try std.testing.expectEqualStrings("保留草稿", f.value.peek());
+    try std.testing.expect(!picker.popup.open.?.peek());
+    try std.testing.expect(!Picker.isIncomplete("/usr/bin/env"));
+    try std.testing.expect(Picker.isIncomplete("/model"));
+    try std.testing.expect(!Picker.isIncomplete("/skill my-skill\n我的问题"));
+}

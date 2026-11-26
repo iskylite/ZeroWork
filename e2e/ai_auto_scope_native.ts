@@ -80,7 +80,7 @@ const capture=async(name:string)=>{
 };
 try{
  await h.waitForServerReady(60000);assert.equal(Number(JSON.parse(await readFile(join(rpc,'owner.json'),'utf8')).pid),app.pid);
- await h.resizeWindow(1440,900);await click('workspace.empty.local');await visible('terminal.surface');await click('toolbar.ai');await click('ai.maximize');
+ await h.resizeWindow(1440,900);await click('workspace.empty.local');await visible('terminal.surface');await click('ai.strip');await click('ai.maximize');
  await click('ai.prompt');await h.type_('验证自动模式下当前授权范围内的组写入和工具操作。');await click('ai.send');
  await visible('ai.host_approval');await capture('01-lifecycle-pending');
  await click('ai.composer.permission');await click('ai.permission.auto');

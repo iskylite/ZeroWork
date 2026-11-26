@@ -1,0 +1,80 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="440" height="236" viewBox="0 0 440 236" fill="none" role="img" aria-labelledby="title desc">
+<title id="title">工作区工具 · 端口转发</title><desc id="desc">工作区的吉祥物、快捷工具与端口转发面板。</desc>
+<defs><style>text{font-family:-apple-system,BlinkMacSystemFont,"Inter","PingFang SC",sans-serif;text-rendering:optimizeLegibility}</style>
+<filter id="surface-shadow" x="-50%" y="-60%" width="200%" height="240%"><feDropShadow dx="0" dy="5" stdDeviation="6" flood-color="#18181b" flood-opacity=".10"/></filter>
+<filter id="tool-shadow" x="-50%" y="-60%" width="200%" height="240%"><feDropShadow dx="0" dy="3" stdDeviation="4" flood-color="#18181b" flood-opacity=".07"/></filter>
+<symbol id="history" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 5H3" />
+  <path d="M7 12H3" />
+  <path d="M7 19H3" />
+  <path d="M12 18a5 5 0 0 0 9-3 4.5 4.5 0 0 0-4.5-4.5c-1.33 0-2.54.54-3.41 1.41L11 14" />
+  <path d="M11 10v4h4" /></g></symbol>
+<symbol id="network" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="16" y="16" width="6" height="6" rx="1" />
+  <rect x="2" y="16" width="6" height="6" rx="1" />
+  <rect x="9" y="2" width="6" height="6" rx="1" />
+  <path d="M5 16v-3a1 1 0 0 1 1-1h12a1 1 0 0 1 1 1v3" />
+  <path d="M12 12V8" /></g></symbol>
+<symbol id="radio" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M16.247 7.761a6 6 0 0 1 0 8.478" />
+  <path d="M19.075 4.933a10 10 0 0 1 0 14.134" />
+  <path d="M4.925 19.067a10 10 0 0 1 0-14.134" />
+  <path d="M7.753 16.239a6 6 0 0 1 0-8.478" />
+  <circle cx="12" cy="12" r="2" /></g></symbol>
+<symbol id="plug-zap" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6.3 20.3a2.4 2.4 0 0 0 3.4 0L12 18l-6-6-2.3 2.3a2.4 2.4 0 0 0 0 3.4Z" />
+  <path d="m2 22 3-3" />
+  <path d="M7.5 13.5 10 11" />
+  <path d="M10.5 16.5 13 14" />
+  <path d="m18 3-4 4h6l-4 4" /></g></symbol>
+<symbol id="arrow-down-up" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m3 16 4 4 4-4" />
+  <path d="M7 20V4" />
+  <path d="m21 8-4-4-4 4" />
+  <path d="M17 4v16" /></g></symbol>
+<symbol id="chevron-right" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6" /></g></symbol>
+</defs>
+<rect width="440" height="236" fill="#fff"/>
+<g id="forward-menu" transform="translate(27 33)"><rect width="320" height="138" rx="11" fill="#fff" filter="url(#surface-shadow)"/>
+<use href="#plug-zap" x="14" y="14" width="15" height="15" color="#4f5ed9"/>
+<text x="37" y="26" font-size="12.5" font-weight="600" fill="#18181b">端口转发</text>
+<g id="forward-row-0"><circle cx="21.5" cy="60" r="3.5" fill="#15b8a6"/>
+<text x="35" y="57" font-size="12" font-weight="500" fill="#18181b">当前会话转发</text>
+<text x="35" y="73" font-size="10.5" font-weight="400" fill="#5b5b65">运行中</text>
+<use href="#chevron-right" x="285" y="54" width="13" height="13" color="#676771"/>
+</g>
+<g id="forward-row-1"><circle cx="21.5" cy="108" r="3.5" fill="#15b8a6"/>
+<text x="35" y="105" font-size="12" font-weight="500" fill="#18181b">后台保持转发</text>
+<text x="35" y="121" font-size="10.5" font-weight="400" fill="#5b5b65">2 条后台转发</text>
+<use href="#chevron-right" x="285" y="102" width="13" height="13" color="#676771"/>
+</g>
+</g>
+<g id="tools"><rect x="197" y="179" width="164" height="36" rx="14" fill="#fff" filter="url(#tool-shadow)"/>
+<use href="#history" x="207" y="189" width="16" height="16" color="#5b5b65"/>
+<use href="#network" x="239" y="189" width="16" height="16" color="#5b5b65"/>
+<use href="#radio" x="271" y="189" width="16" height="16" color="#5b5b65"/>
+<rect x="297" y="183" width="28" height="28" rx="14" fill="#efeff2"/>
+<use href="#plug-zap" x="303" y="189" width="16" height="16" color="#4352c7"/>
+<circle cx="323" cy="184" r="3" fill="#15b8a6"/>
+<use href="#arrow-down-up" x="335" y="189" width="16" height="16" color="#5b5b65"/>
+</g>
+<g id="workspace-mascot"><circle cx="390" cy="197" r="22" fill="#f6f6f7" filter="url(#tool-shadow)"/>
+<svg x="373" y="180" width="34" height="34" viewBox="0 0 100 100" role="img" aria-label="ZeroWork 吉祥物">
+  <defs>
+    <linearGradient id="mascot-glass" x1=".1" x2=".8" y1="0" y2="1" gradientUnits="objectBoundingBox"><stop stop-color="#e2edf6"/><stop offset="1" stop-color="#738599"/></linearGradient>
+    <linearGradient id="mascot-suit" x1="0" y1="0" x2="1" y2="1" gradientUnits="objectBoundingBox"><stop stop-color="#ffbd32"/><stop offset="1" stop-color="#ef670b"/></linearGradient>
+    <linearGradient id="mascot-orb" x1="0" y1="0" x2="1" y2="1" gradientUnits="objectBoundingBox"><stop stop-color="#426da3"/><stop offset=".54" stop-color="#19334f"/><stop offset="1" stop-color="#111b2a"/></linearGradient>
+  </defs>
+  <g stroke="#292315" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <path fill="#85b647" d="M72 69c9-3 14-14 10-25l-4-5c12-2 19 13 15 25-3 13-11 17-24 16z"/>
+    <path fill="url(#mascot-suit)" d="M27 56c5-10 35-13 45-6l11 14c6 9 7 18 1 25-4 5-18 8-33 8-16 0-34-3-39-10-5-7 0-17 5-23z"/>
+    <path fill="url(#mascot-glass)" stroke="#fff" stroke-width="2.4" d="M14 28c4-18 24-28 42-24 18 4 30 19 27 36-2 16-20 24-40 22C24 60 10 46 14 28z"/>
+    <path fill="#93bc49" d="M18 37c6-7 16-6 21-11 5-6 11-9 17-7l9 5 11-3-4 7 8 1-6 6 5 1-5 4c0 10-13 17-27 17-14-1-24-4-29-13z"/>
+    <path fill="#ffd448" d="M31 57c16 6 34 0 45-10l4 4c-6 11-23 17-37 16-7-1-11-4-12-10z"/>
+    <path d="M20 42l6 3 3-2 1 3 4-2 8 1 4-2 2 2 2-3 6-1 3-3 2 1"/>
+    <ellipse cx="50" cy="30" rx="6.1" ry="5.2" fill="#ffe691" transform="rotate(-15 50 30)"/>
+    <ellipse cx="51" cy="30" rx="1.4" ry="3.4" fill="#292315" stroke="none"/>
+    <path d="M23 37l1.6 1.2"/>
+    <path fill="none" stroke="#fff" stroke-width="2.1" d="M20 24c4-7 10-11 16-13"/>
+    <circle cx="49" cy="76" r="19.5" fill="url(#mascot-orb)" stroke="#18253f" stroke-width="2.5"/>
+    <path fill="#fff1bc" stroke="none" d="M49 66c2 5 4 7 9 10-5 2-7 5-9 10-2-5-4-8-10-10 6-3 8-5 10-10zm8 2c2-1 3-2 4-5 1 3 2 4 5 5-3 1-4 3-5 5-1-2-2-4-4-5zm-19 15c1 2 2 3 5 4-3 1-4 2-5 5-1-3-2-4-5-5 3-1 4-2 5-4z"/>
+    <path fill="none" stroke="#d5e8ff" d="M34 72c2-5 7-8 11-9m-13 12.5h.05"/>
+    <path fill="#ffd42a" d="M32 73c4 0 4 4 1 6 4 0 4 4 0 5 2 2 1 6-3 6-8 0-13-4-11-10 1-5 6-8 13-7zm36 0c7-1 12 2 13 7 2 6-3 10-11 10-4 0-5-4-3-6-4-1-4-5 0-5-3-2-3-6 1-6z"/>
+  </g>
+</svg>
+</g></svg>

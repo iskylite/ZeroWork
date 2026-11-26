@@ -218,7 +218,7 @@ try {
   assert((await resizeWindow(viewport.w, viewport.h)).ok);
   await click("workspace.empty.local");
   await visible("terminal.surface");
-  await click("toolbar.ai");
+  await click("ai.strip");
   await visible("ai.prompt");
   await submit(1);
   const first = await latestVisible(1);

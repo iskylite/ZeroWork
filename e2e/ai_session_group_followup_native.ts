@@ -1046,14 +1046,14 @@ try {
   await visible('terminal.surface');
   await waitStrict(async () => { try { await readFile(join(peerDir, 'shell-ready')); return true; } catch { return null; } }, 15000);
   await h.sleep(500);
-  await click('toolbar.ai');
+  await click('ai.strip');
   if (!share) {
     await click('ai.composer.attachment'); await click('ai.attachment.remote_file');
     await visible('ai.remote.picker');
     await waitStrict(async () => { try { await readFile(join(peerDir, 'sftp-ready')); return true; } catch { return null; } }, 30000);
     if ((await h.query('ai.remote.close')).some(shown)) await click('ai.remote.close');
     await h.sleep(300);
-    if (!(await h.query('ai.prompt')).some(shown)) await click('toolbar.ai');
+    if (!(await h.query('ai.prompt')).some(shown)) await click('ai.strip');
   }
   if (reconnectGroup) {
     const joinGroup = async () => {
@@ -1085,7 +1085,7 @@ try {
     groupSiblingPane = panes.find((pane: any) => text(pane).includes(siblingName))?.test_id;
     assert(groupTargetPane && groupSiblingPane && groupTargetPane !== groupSiblingPane);
     report.group_panes = { target: groupTargetPane, sibling: groupSiblingPane };
-    if (!(await h.query('ai.prompt')).some(shown)) await click('toolbar.ai');
+    if (!(await h.query('ai.prompt')).some(shown)) await click('ai.strip');
   }
   if (longRecovery) {
     await click('ai.maximize');
@@ -1094,7 +1094,7 @@ try {
     await visible('ai.turn.complete');
     await send(recoveryRun);
     await waitStrict(async () => recovery.retained || null, 90000);
-    if (!(await h.query('ai.panel')).some(shown)) await click('toolbar.ai');
+    if (!(await h.query('ai.panel')).some(shown)) await click('ai.strip');
     await waitStrict(async () => text(await h.query('ai.response')).includes('断线前的终端记录已保留') || null, 15000);
     await visible('ai.turn.complete');
     await click('ai.composer.attachment');
@@ -1459,7 +1459,7 @@ try {
       await waitStrict(async () => (monitorRef && sizes && (natural ? monitorFinished : modelReported)) || (monitorBlocked && modelBlockedText) ? true : null, live ? 180000 : 45000);
       if (monitorBlocked && !monitorRef) throw Error(`Monitoring was not dispatched: ${JSON.stringify(monitorBlocked)}`);
       assert(sizes && sizes.end > sizes.start, `The monitored file must grow: ${JSON.stringify(sizes)}`);
-      if (!(await h.query('ai.prompt')).some(shown)) await click('toolbar.ai');
+      if (!(await h.query('ai.prompt')).some(shown)) await click('ai.strip');
       const displayed = natural ? null : await waitStrict(async () => {
         const value = text(await h.query('ai.response')).replaceAll(',', '');
         return value.includes(String(sizes!.start)) && value.includes(String(sizes!.end)) ? value : null;

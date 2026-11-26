@@ -88,7 +88,7 @@ const send=async(text:string)=>{await click('ai.prompt');await h.key('a',{cmd:tr
 const report:any={status:'running',isolated,binary,checks:[],limits:['Local SSE fixture verifies native event delivery and actual Local tool output; no external model was used.','Synthetic keyboard checks do not establish physical IME behavior.']};
 try{
  await h.waitForServerReady(60000);assert.equal(Number(JSON.parse(await readFile(join(rpc,'owner.json'),'utf8')).pid),app.pid);
- await h.resizeWindow(1440,1000);await click('workspace.empty.local');await visible('terminal.surface');await click('toolbar.ai');await visible('ai.prompt');await click('ai.maximize');
+ await h.resizeWindow(1440,1000);await click('workspace.empty.local');await visible('terminal.surface');await click('ai.strip');await visible('ai.prompt');await click('ai.maximize');
  // Attach a real image using the same drop path as the composer.
  const prompt=await visible('ai.prompt'),image=resolve('assets/macos/AppIcon.png');await h.dragAt(prompt.rect.x+20,prompt.rect.y+20,0,image);await h.dragAt(prompt.rect.x+20,prompt.rect.y+20,3,image);await visible('ai.image');
  const beforeSend=new Date();await send('第一回合：检查系统，并保留图片。');const afterSend=new Date();await visible('ai.turn.running');assert.equal(nodeText(await visible('ai.turn.label')),'～大浪淘金中～');

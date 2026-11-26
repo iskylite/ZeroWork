@@ -71,7 +71,7 @@ try {
     await h.waitForServerReady(60000);
     assert.equal(Number(JSON.parse(await readFile(join(rpc, 'owner.json'), 'utf8')).pid), app.pid);
     await h.resizeWindow(1440, 900);
-    await click('workspace.empty.local'); await visible('terminal.surface'); await click('toolbar.ai');
+    await click('workspace.empty.local'); await visible('terminal.surface'); await click('ai.strip');
     for (let turn = 1; turn <= 2; turn++) {
         await click('ai.prompt'); await h.type_(`第 ${turn} 轮：请用中文回答 🙂`); await click('ai.send');
         await h.waitFor(async () => (await h.query('ai.turn.complete')).filter(shown).length === turn || null, 15000);

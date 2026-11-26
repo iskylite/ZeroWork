@@ -58,7 +58,7 @@ async function send(prompt:string,answer:number){await click('ai.prompt');assert
 async function history(){return (await query('ai.message.user.bubble')).map(text);}
 try{
   await waitForServerReady();assert.equal(Number(JSON.parse(await readFile(join(rpc,'owner.json'),'utf8')).pid),app.pid);
-  await resizeWindow(1440,900);await click('workspace.empty.local');await visible('terminal.surface');await click('toolbar.ai');await visible('ai.prompt');
+  await resizeWindow(1440,900);await click('workspace.empty.local');await visible('terminal.surface');await click('ai.strip');await visible('ai.prompt');
   const original='OLD_NATIVE_MARKER Goal backup. No deployment.';
   await send(original,1);
   await send('RECENT_NATIVE_SECOND',2);await send('RECENT_NATIVE_LAST',3);

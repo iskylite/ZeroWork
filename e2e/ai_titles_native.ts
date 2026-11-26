@@ -44,7 +44,7 @@ const row=async(id:number,value:string)=>h.waitFor(async()=>{const node=(await h
 const titleCount=()=>requests.filter(r=>r.title).length;
 const report:any={status:'running',checks:[],isolated};
 try{
- await h.waitForServerReady(60000);await h.resizeWindow(1440,900);await click('workspace.empty.local');await visible('terminal.surface');await click('toolbar.ai');
+ await h.waitForServerReady(60000);await h.resizeWindow(1440,900);await click('workspace.empty.local');await visible('terminal.surface');await click('ai.strip');
  await send(questions.first);await h.waitFor(async()=>held.has(questions.first)||null,5000);
  await click('ai.sessions');await row(1,questions.first);await click('ai.sessions.close');
  report.checks.push('The main reply completes while title generation is held; the list displays the first-question fallback');

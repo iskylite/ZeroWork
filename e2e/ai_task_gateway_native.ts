@@ -44,7 +44,7 @@ const click=async(id:string)=>{report.last_action=id;await visible(id);assert((a
 const capture=async(name:string)=>{await h.mouseMove(1,1);await h.sleep(200);assert((await h.screenshot(join(out,name+'.png'))).ok);report.screenshots.push(join(out,name+'.png'))};
 const journal=async()=>String(await readFile(join(data,'ai-sessions-active.jsonl'),'utf8')).trim().split('\n').map(row=>JSON.parse(row));
 try{
- await h.waitForServerReady(60000);await h.resizeWindow(1200,900);await click('workspace.empty.local');await visible('terminal.surface');await click('toolbar.ai');
+ await h.waitForServerReady(60000);await h.resizeWindow(1200,900);await click('workspace.empty.local');await visible('terminal.surface');await click('ai.strip');
  await click('ai.prompt');await h.type_('ROOT_FIRST_TASK 委派材料检查并汇总');await click('ai.send');
  await h.waitFor(()=>childHeld||null,20000);
  await h.waitFor(async()=>(await journal()).some(row=>row.event?.task_fact?.status==='waiting_children')||null,20000);

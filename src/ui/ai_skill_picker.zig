@@ -4,7 +4,58 @@ const S = @import("ai_composer_controls_styles.zig");
 const Skill = @import("../config/ai_extensions.zig").Skill;
 
 const command = "/skill";
-const Menu = union(enum) { commands, skills: []const u8 };
+pub const Shortcut = enum {
+    skill,
+    model,
+    session,
+    permission,
+    execution,
+    auto,
+    swarm,
+    boost,
+    fn name(self: Shortcut) []const u8 {
+        return switch (self) {
+            .skill => "/skill",
+            .model => "/model",
+            .session => "/session",
+            .permission => "/permission",
+            .execution => "/execution",
+            .auto => "/auto",
+            .swarm => "/swarm",
+            .boost => "/boost",
+        };
+    }
+    fn hint(self: Shortcut) []const u8 {
+        return switch (self) {
+            .skill => "选择技能",
+            .model => "模型与推理强度",
+            .session => "关联会话或组",
+            .permission => "工具执行权限",
+            .execution => "命令执行方式",
+            .auto => "自动编排智能体",
+            .swarm => "协作智能体编排",
+            .boost => "强化智能体编排",
+        };
+    }
+    fn testId(self: Shortcut) []const u8 {
+        return switch (self) {
+            .skill => "ai.skill_picker.command",
+            .model => "ai.command.model",
+            .session => "ai.command.session",
+            .permission => "ai.command.permission",
+            .execution => "ai.command.execution",
+            .auto => "ai.command.auto",
+            .swarm => "ai.command.swarm",
+            .boost => "ai.command.boost",
+        };
+    }
+};
+const Menu = union(enum) { commands: []const u8, skills: []const u8 };
+pub const Actions = struct {
+    context: *anyopaque,
+    available: *const fn (*anyopaque, u64, Shortcut) bool,
+    open: *const fn (*anyopaque, u64, Shortcut) void,
+};
 const row_height: f32 = 32;
 const row_gap: f32 = 4;
 const padding: f32 = 6;
@@ -16,12 +67,15 @@ fn menu(line: []const u8) ?Menu {
     if (line.len == 0) return null;
     if (std.mem.eql(u8, line, command)) return .{ .skills = "" };
     if (std.mem.startsWith(u8, line, command ++ " ")) return .{ .skills = std.mem.trim(u8, line[command.len + 1 ..], " \t\r") };
-    if (std.mem.startsWith(u8, command, line)) return .commands;
+    if (line[0] == '/') for (std.enums.values(Shortcut)) |choice| {
+        if (std.mem.startsWith(u8, choice.name(), line)) return .{ .commands = line };
+    };
     return null;
 }
 
 pub fn isIncomplete(text: []const u8) bool {
-    return std.mem.eql(u8, text, "/") or std.mem.eql(u8, text, command);
+    if (menu(text)) |level| return level == .commands or (level == .skills and level.skills.len == 0);
+    return false;
 }
 
 pub const View = struct {
@@ -36,6 +90,8 @@ pub const View = struct {
     editor_revision: u64 = 0,
     dismissed: ?u64 = null,
     selected: usize = 0,
+    actions: ?Actions = null,
+    conversation: ?u64 = null,
     reveal_selection: bool = false,
 
     pub fn mount(cx: *ui.Cx, scope: *ui.Scope, input: ui.widgets.input.TextareaResult, on_change: ui.Handler([]const u8)) !*View {
@@ -66,6 +122,7 @@ pub const View = struct {
     }
 
     pub fn refresh(self: *View, conversation: ?u64, revision: u64, skills: []const Skill, allowed_ids: ?[]const []const u8) !void {
+        self.conversation = conversation;
         const focused = self.cx.focus_manager.getFocused();
         const has_focus = if (focused) |node| node == self.input.input or node.isDescendantOf(self.popup.chrome) else false;
         const text = self.input.state.getText();
@@ -80,6 +137,7 @@ pub const View = struct {
         var hash = std.hash.Wyhash.init(0);
         hash.update(line);
         std.hash.autoHash(&hash, .{ conversation, revision, S.theme.current() });
+        if (level.? == .commands) for (std.enums.values(Shortcut)) |choice| std.hash.autoHash(&hash, self.available(choice));
         if (allowed_ids) |ids| for (ids) |id| hash.update(id);
         const key = hash.final();
         if (self.active == key) {
@@ -99,7 +157,12 @@ pub const View = struct {
         const row_scope = try self.popup.scope.childScope();
         self.row_scope = row_scope;
         switch (level.?) {
-            .commands => try self.addRow(row_scope, command, true),
+            .commands => |prefix| {
+                for (std.enums.values(Shortcut)) |choice| {
+                    if (self.available(choice) and std.mem.startsWith(u8, choice.name(), prefix)) try self.addRow(row_scope, choice.name(), choice);
+                }
+                if (self.rows.items.len == 0) try self.emptyHint(if (std.mem.eql(u8, prefix, "/session")) "请在独立 AI 会话中关联终端" else "当前会话暂不可使用此命令");
+            },
             .skills => |query| {
                 for (skills) |skill| {
                     if (!skill.enabled) continue;
@@ -108,13 +171,9 @@ pub const View = struct {
                             if (std.mem.eql(u8, id, skill.id)) break;
                         } else continue;
                     }
-                    if (query.len == 0 or std.ascii.findIgnoreCase(skill.name, query) != null) try self.addRow(row_scope, skill.name, false);
+                    if (query.len == 0 or std.ascii.findIgnoreCase(skill.name, query) != null) try self.addRow(row_scope, skill.name, null);
                 }
-                if (self.rows.items.len == 0) {
-                    const label = try ui.text(self.cx, if (query.len == 0) "没有可用技能" else "没有匹配的技能", S.text(13, 400, 20, true));
-                    label.setStyleInline(self.cx.allocator, .{ .height = .{ .px = row_height }, .width = .fill(), .padding = .{ .left = 8, .top = 6 } });
-                    try self.scroll.content.appendChild(self.cx.allocator, label);
-                }
+                if (self.rows.items.len == 0) try self.emptyHint(if (query.len == 0) "没有可用技能" else "没有匹配的技能");
             },
         }
         self.selected = 0;
@@ -131,6 +190,12 @@ pub const View = struct {
         self.editor_revision = self.input.state.doc.revision;
         self.popup.open.?.set(true);
         self.cx.requestRedraw();
+    }
+
+    fn emptyHint(self: *View, hint: []const u8) !void {
+        const label = try ui.text(self.cx, hint, S.text(13, 400, 20, true));
+        label.setStyleInline(self.cx.allocator, .{ .height = .{ .px = row_height }, .width = .fill(), .padding = .{ .left = 8, .top = 6 } });
+        try self.scroll.content.appendChild(self.cx.allocator, label);
     }
 
     fn clearRows(self: *View) void {
@@ -150,7 +215,7 @@ pub const View = struct {
         name: *ui.Signal([]const u8),
         style: *ui.Signal(ui.BoxStyle),
         button: *ui.Node = undefined,
-        is_command: bool,
+        shortcut: ?Shortcut,
         fn click(self: *Row) void {
             self.view.choose(self) catch |err| std.log.warn("AI skill selection: {s}", .{@errorName(err)});
         }
@@ -164,14 +229,14 @@ pub const View = struct {
         return style;
     }
 
-    fn addRow(self: *View, scope: *ui.Scope, name: []const u8, is_command: bool) !void {
+    fn addRow(self: *View, scope: *ui.Scope, name: []const u8, shortcut: ?Shortcut) !void {
         try self.rows.ensureUnusedCapacity(self.cx.allocator, 1);
         const selected = self.rows.items.len == 0;
         const row = try scope.createState(Row, .{
             .view = self,
             .name = try scope.createText(name, .{}),
             .style = try scope.createSignal(ui.BoxStyle, rowStyle(selected)),
-            .is_command = is_command,
+            .shortcut = shortcut,
         });
         const button = try ui.widgets.Button(.{
             .variant = .ghost,
@@ -182,14 +247,17 @@ pub const View = struct {
         }).mount(scope, self.cx);
         for (button.children.items) |child| child.setDisplay(.none);
         errdefer self.cx.destroyDetached(button);
-        button.meta.ownership.meta.test_id = if (is_command) "ai.skill_picker.command" else "ai.skill_picker.skill";
+        button.meta.ownership.meta.test_id = if (shortcut) |item| item.testId() else "ai.skill_picker.skill";
         if (button.behavior.interaction.a11y) |*attrs| attrs.selected = selected;
         try button.appendChild(self.cx.allocator, try ui.iconTint(self.cx, ui.icons.sparkles, S.theme.current().accent, S.icon(16)));
         const label = try ui.text(self.cx, "", S.text(13, 400, 20, false));
         try label.setTextContent(self.cx.allocator, name);
         label.setStyleInline(self.cx.allocator, S.flexibleLabel(20));
         try button.appendChild(self.cx.allocator, label);
-        if (is_command) try button.appendChild(self.cx.allocator, try ui.iconTint(self.cx, ui.icons.get("chevron-right").?, S.theme.current().fg_2, S.icon(16)));
+        if (shortcut) |item| {
+            try button.appendChild(self.cx.allocator, try ui.text(self.cx, item.hint(), S.text(11, 400, 16, true)));
+            try button.appendChild(self.cx.allocator, try ui.iconTint(self.cx, ui.icons.get("chevron-right").?, S.theme.current().fg_2, S.icon(14)));
+        }
         try self.scroll.content.appendChild(self.cx.allocator, button);
         row.button = button;
         self.rows.appendAssumeCapacity(row);
@@ -202,23 +270,42 @@ pub const View = struct {
         return if (editor.cursor.offset <= line.len) line else null;
     }
 
+    fn available(self: *View, item: Shortcut) bool {
+        if (item == .skill) return true;
+        const actions = self.actions orelse return false;
+        return actions.available(actions.context, self.conversation orelse return false, item);
+    }
+
     fn choose(self: *View, row: *const Row) !void {
         const editor = self.input.state;
         const line = self.activeLine() orelse return;
         const level = menu(line) orelse return;
-        if ((level == .commands) != row.is_command) return;
-        if (row.is_command) {
-            try editor.replaceRangeChecked(0, line.len, command);
+        const chosen = row.shortcut;
+        if ((level == .commands) != (chosen != null)) return;
+        if (chosen) |item| {
+            if (!self.available(item) or !std.mem.startsWith(u8, item.name(), line)) return;
+            if (item == .skill) {
+                try editor.replaceRangeChecked(0, line.len, command);
+            } else {
+                // Local UI shortcuts are never sent as prompts. Keep the rest
+                // of a multiline draft and only open the actual captured UI.
+                try editor.replaceRangeChecked(0, @min(editor.getText().len, line.len + 1), "");
+                self.popup.open.?.set(false);
+            }
         } else {
             const replacement = try std.fmt.allocPrint(self.cx.allocator, command ++ " {s}\n", .{row.name.peek()});
             defer self.cx.allocator.free(replacement);
             try editor.replaceRangeChecked(0, @min(editor.getText().len, line.len + 1), replacement);
             self.popup.open.?.set(false);
         }
+        const conversation = self.conversation;
         const edited = editor.getText();
         self.input.value.?.set(edited);
         self.on_change.call(edited);
         self.cx.setFocus(self.input.input);
+        if (chosen) |item| if (item != .skill) if (self.actions) |actions| if (conversation) |owner| {
+            if (actions.available(actions.context, owner, item)) actions.open(actions.context, owner, item);
+        };
         self.cx.requestRedraw();
     }
 

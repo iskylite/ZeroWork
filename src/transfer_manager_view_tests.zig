@@ -83,8 +83,10 @@ test "transfer projection global popover stays in current Cx hides without nativ
     try std.testing.expectEqual(h.root, p.root.parent.?);
     try std.testing.expectApproxEqAbs(@as(f32, 640), bounds.w, 0.01);
     try std.testing.expectApproxEqAbs(@as(f32, 240), bounds.h, 0.01);
-    try std.testing.expectApproxEqAbs(trigger.y + trigger.h + 8, bounds.y, 0.01);
-    try std.testing.expectApproxEqAbs(@as(f32, 12), 1440 - bounds.x - bounds.w, 0.01);
+    // Top-right anchor: the new shared mascot placement puts the panel
+    // below the trigger, with the same gap and edge padding as other tools.
+    try std.testing.expectApproxEqAbs(trigger.y + trigger.h + 6, bounds.y, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 8), 1440 - bounds.x - bounds.w, 0.01);
     try std.testing.expectApproxEqAbs(@as(f32, 90), p.list.container.globalRect().y - bounds.y, 0.01);
     try std.testing.expectApproxEqAbs(@as(f32, 128), p.list.container.globalRect().h, 0.01);
     try std.testing.expect(p.foot.style.display == .none);

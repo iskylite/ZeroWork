@@ -129,7 +129,7 @@ try {
   await h.resizeWindow(1440, 1000);
   await click('workspace.empty.local');
   await visible('terminal.surface');
-  await click('toolbar.ai');
+  await click('ai.strip');
   await send('START_LONG_EXECUTION');
   await h.waitFor(async () => {
     assert.equal(failure, null);

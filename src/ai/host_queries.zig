@@ -80,6 +80,9 @@ pub const Group = struct { id: u64, name: []const u8, membership_revision: u64, 
 pub const Snapshot = struct {
     context: host.Context,
     initial_binding: scope.Owner,
+    /// Only the host can select these live, generation-bound handles. Null =
+    /// attached session; empty = standalone AI without terminal authority.
+    explicit_targets: ?scope.ExplicitTargets = null,
     execution_policy: config.ExecutionPolicy,
     permission_mode: config.PermissionMode,
     lifecycle_management: bool = false,
@@ -102,8 +105,8 @@ const session_field = "\"session_ref\":{\"type\":\"string\",\"minLength\":1,\"ma
 /// Terminal-content tools are registered separately from metadata queries.
 pub const terminal_contributions = @import("host_terminal_queries.zig").contributions;
 pub const contributions = [_]host.Contribution{
-    query("get_current_context", "Read host metadata for this conversation: current binding_ref, effective mode and granted capabilities. Contains no chat history, terminal text or foreground-process status. Use when these facts are needed, not before every tool call. A single-session binding_ref is already its exact session reference; further discovery is only needed for additional metadata or target disambiguation. UI focus never changes authority.", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"detail\":{\"type\":\"string\",\"enum\":[\"summary\"]}}}"),
-    query("list_sessions", "List only this conversation's bound session or current group members. Other sessions and groups are inaccessible. Optional group_ref must name the current group. Pages are bounded; restart on CursorExpired or SnapshotChanged.", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{" ++ page_fields ++ "," ++ scope_field ++ "," ++ group_field ++ ",\"state_filter\":{\"type\":\"string\",\"enum\":[\"all\",\"ready\",\"opening\",\"closed\"]}}}"),
+    query("get_current_context", "Read host metadata for this conversation: current binding_ref, effective mode and granted capabilities. Contains no chat history, terminal text or foreground-process status. Use when these facts are needed, not before every tool call. An attached single-session binding_ref is its exact terminal reference; an independent AI page has no terminal binding_ref, so use its explicitly associated targets; further discovery is only needed for additional metadata or target disambiguation. UI focus never changes authority.", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"detail\":{\"type\":\"string\",\"enum\":[\"summary\"]}}}"),
+    query("list_sessions", "List only this conversation's bound session, explicitly associated sessions, or current group members. Other sessions and groups are inaccessible. Optional group_ref must name the current group. Pages are bounded; restart on CursorExpired or SnapshotChanged.", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{" ++ page_fields ++ "," ++ scope_field ++ "," ++ group_field ++ ",\"state_filter\":{\"type\":\"string\",\"enum\":[\"all\",\"ready\",\"opening\",\"closed\"]}}}"),
     query("get_session", "Read exact visible session metadata without effects or terminal content. state is the host attachment lifecycle. For Web, connection_state is the route state and page_state is the navigation state; a ready route does not mean a page loaded. For BMC, connection_state describes the video connection; connected requires an RFB-ready video transport, and ready additionally requires a current complete frame. Connection ready does not prove PTY execution ready: inspect trusted_pty_execution (legacy capability name), trusted_pty_state, trusted_pty_failure and completion_source. shell_reported means cooperative shell events, not private attestation. Initializing/busy allow bounded read-only observation before input. Validates the original generation.", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{" ++ session_field ++ "},\"required\":[\"session_ref\"]}"),
     query("list_groups", "List only this conversation's bound group. A single-session conversation returns no groups. Other groups are inaccessible.", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{" ++ page_fields ++ "," ++ scope_field ++ "}}"),
     query("get_group", "Read the exact visible group's identity, name and membership revision. No connection, execution or membership mutation occurs.", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{" ++ group_field ++ "},\"required\":[\"group_ref\"]}"),
@@ -143,7 +146,7 @@ pub fn sameHistoricalBinding(origin: host.Context, current: host.Context) bool {
 }
 fn boundSession(snapshot: Snapshot, handle: identity.SessionHandle) bool {
     return switch (snapshot.context.binding) {
-        .session => |id| @backingInt(handle.session_id) == id,
+        .session => |id| if (snapshot.explicit_targets) |targets| targets.contains(handle) else @backingInt(handle.session_id) == id,
         .group => |id| blk: {
             for (snapshot.groups) |group| {
                 if (group.id != id) continue;
@@ -176,7 +179,10 @@ pub fn permitsSessionId(snapshot: Snapshot, id: u64) bool {
     }
     for (snapshot.sessions) |item| if (@backingInt(item.handle.session_id) == id and retainedSession(snapshot, item)) return true;
     return switch (snapshot.context.binding) {
-        .session => |bound| id == bound,
+        .session => |bound| if (snapshot.explicit_targets) |targets| blk: {
+            for (targets.slice()) |handle| if (@backingInt(handle.session_id) == id) break :blk true;
+            break :blk false;
+        } else id == bound,
         .group => |bound| blk: {
             for (snapshot.groups) |group| {
                 if (group.id != bound) continue;
@@ -274,8 +280,9 @@ pub fn execute(raw_snapshot: Snapshot, invocation: host.Invocation, allocator: s
     if (args != .object) return error.InvalidArguments;
     var body: []const u8 = undefined;
     if (std.mem.eql(u8, invocation.tool_id, "host.get_current_context")) {
-        const binding_ref = switch (snapshot.context.binding) {
+        const binding_ref: ?[]const u8 = switch (snapshot.context.binding) {
             .session => |id| blk: {
+                if (snapshot.explicit_targets != null) break :blk null; // an AI page is not a terminal
                 for (snapshot.sessions) |item| if (@backingInt(item.handle.session_id) == id) break :blk try sessionRef(a, snapshot.context, item.handle);
                 return error.ContextUnavailable;
             },
@@ -458,6 +465,39 @@ test "host discovery supports an empty group without inventing a session authori
     var group = try testQuery(a, snapshot, "host.get_group", args);
     defer group.deinit(a);
     try group.validate(context, 1);
+}
+
+test "host discovery only exposes exact standalone selections and never treats the AI page as a terminal" {
+    const a = std.testing.allocator;
+    const ctx: host.Context = .{ .conversation_id = .generate(), .task_id = .generate(), .binding = .{ .session = 1 }, .binding_revision = 3, .grant_revision = 4 };
+    const target: identity.SessionHandle = .{ .session_id = @fromBackingInt(2), .generation = 6 };
+    var sessions = [_]Session{
+        .{ .handle = target, .title = "Selected", .protocol = "local", .state = "attached", .ready = true },
+        .{ .handle = .{ .session_id = @fromBackingInt(8), .generation = 1 }, .title = "Other", .protocol = "local", .state = "attached", .ready = true },
+    };
+    var snapshot: Snapshot = .{ .context = ctx, .initial_binding = ctx.binding, .explicit_targets = .{}, .execution_policy = .{ .execution_mode = .auto, .session_retention = .ask }, .permission_mode = .confirm, .observed_at = 1, .source_revision = 3, .cursor_key = @splat(7), .sessions = &sessions, .groups = &.{} };
+    try snapshot.explicit_targets.?.add(target);
+    const ref = try sessionRef(a, ctx, target);
+    defer a.free(ref);
+    try std.testing.expect((try resolveSession(snapshot, ref)).handle.eql(target));
+    try std.testing.expect(!permitsSessionId(snapshot, 8) and !permitsSessionId(snapshot, 1));
+    var listed = try testQuery(a, snapshot, "host.list_sessions", "{}");
+    defer listed.deinit(a);
+    const parsed = try std.json.parseFromSlice(std.json.Value, a, listed.blocks[0].structured, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(usize, 1), parsed.value.object.get("sessions").?.array.items.len);
+    var info = try testQuery(a, snapshot, "host.get_current_context", "{}");
+    defer info.deinit(a);
+    const context = try std.json.parseFromSlice(std.json.Value, a, info.blocks[0].structured, .{});
+    defer context.deinit();
+    try std.testing.expect(context.value.object.get("binding_ref").? == .null);
+    sessions[0].handle.generation += 1;
+    try std.testing.expectError(error.StaleReference, resolveSession(snapshot, ref));
+    const successor = try sessionRef(a, ctx, sessions[0].handle);
+    defer a.free(successor);
+    try std.testing.expectError(error.TargetNotAuthorized, resolveSession(snapshot, successor));
+    snapshot.explicit_targets = .{};
+    try std.testing.expectError(error.TargetNotAuthorized, resolveSession(snapshot, ref));
 }
 
 test "host discovery reports frozen execution retention and permission independently" {

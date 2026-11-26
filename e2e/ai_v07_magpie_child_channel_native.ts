@@ -90,7 +90,7 @@ const click=async(id:string)=>{await visible(id);assert((await h.clickTestId(id)
 try{
   await h.waitForServerReady(60000);await h.resizeWindow(1280,860);
   await click('workspace.empty.local');await visible('terminal.surface');
-  await click('toolbar.ai');
+  await click('ai.strip');
   // 先发父任务（保持父运行，等待子任务与报告汇总）。
   await click('ai.prompt');
   await h.type_('请整理并等待：把"ZeroWork 通道降阻验证材料"这句话改写为一句总结，然后等待并行子任务完成后把两个结果一起汇报。');

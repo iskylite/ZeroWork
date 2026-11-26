@@ -115,7 +115,7 @@ default=true
     };
     if (!process.env.ZW_IDLE_TRANSFER_ONLY) {
         // Local terminal only: no user-owned SSH connection is selected.
-        await click('toolbar.new_session'); await click('session.menu.local'); await visible('terminal.surface'); await click('toolbar.ai');
+        await click('toolbar.new_session'); await click('session.menu.local'); await visible('terminal.surface'); await click('ai.strip');
         let turns = 0;
         for (const state of ['complete', 'failed', 'stopped']) {
             mode = state;

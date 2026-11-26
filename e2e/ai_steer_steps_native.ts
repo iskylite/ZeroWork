@@ -62,7 +62,7 @@ const capture = async (name: string) => { assert((await h.screenshot(join(out, n
 const report: any = { status: 'running', checks: [] };
 try {
   await h.waitForServerReady(60000); await h.resizeWindow(1440, 1000);
-  await click('workspace.empty.local'); await visible('terminal.surface'); await click('toolbar.ai');
+  await click('workspace.empty.local'); await visible('terminal.surface'); await click('ai.strip');
   await send('FIRST_TASK 检查当前会话');
   await h.waitFor(async () => held || null, 20000);
   await h.waitFor(async () => (await h.query('ai.step_group.header')).length === 1 || null, 10000);

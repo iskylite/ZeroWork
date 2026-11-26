@@ -125,7 +125,7 @@ try {
   await waitForServerReady();
   const owner = JSON.parse(await readFile(join(rpc, "owner.json"), "utf8")); assert.equal(Number(owner.pid), child.pid);
   assert((await resizeWindow(1440, 900)).ok);
-  await click("workspace.empty.local"); await visible("terminal.surface"); await click("toolbar.ai"); await visible("ai.prompt");
+  await click("workspace.empty.local"); await visible("terminal.surface"); await click("ai.strip"); await visible("ai.prompt");
   await capture("00-local-native-provider-ready");
   await runCase(true); await runCase(false);
   report.status = "passed";

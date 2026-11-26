@@ -62,7 +62,7 @@ const click=async(id:string)=>{report.lastAction=id;await visible(id);assert((aw
 const text=(n:any):string=>Array.isArray(n)?n.map(text).join(' '):n?[n.text??'',...(n.children??[]).map(text)].join(' '):'';
 const send=async(value:string)=>{await click('ai.prompt');await h.type_(value);await click('ai.send');};
 try{
- await h.waitForServerReady(60000);await h.resizeWindow(1200,900);await click('workspace.empty.local');await click('toolbar.ai');
+ await h.waitForServerReady(60000);await h.resizeWindow(1200,900);await click('workspace.empty.local');await click('ai.strip');
  await send('INITIAL_BATCH');await click('ai.approval.accept');
  await h.waitFor(async()=>failure||text(await h.query('ai.conversation')).includes('FIRST_PAGE_AVAILABLE')||null,30000);assert.equal(failure,null);
  await h.waitFor(async()=>!(await h.query('ai.stop')).some(shown)||null,10000);

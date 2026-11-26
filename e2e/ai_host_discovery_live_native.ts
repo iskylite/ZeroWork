@@ -148,7 +148,7 @@ try{
  await h.type_(`discovery_marker="ZW_DISCOVERY_$(/usr/bin/uuidgen)"; printf '%s\\n' "$discovery_marker"; printf '%s' "$discovery_marker" > '${ready}'`);await h.key('return');
  await h.waitFor(async()=>{try{marker=await readFile(ready,'utf8');return /^ZW_DISCOVERY_[0-9A-F-]{36}$/i.test(marker)||null}catch{return null}},15000);
  await writeFile(join(out,'terminal-marker.txt'),marker);
- await click('toolbar.ai');await click('ai.maximize');await click('ai.prompt');
+ await click('ai.strip');await click('ai.maximize');await click('ai.prompt');
  const prompt=minimalRead?'请查看当前会话终端里可见的内容，只返回其中以 ZW_DISCOVERY_ 开头的完整随机标记。标记必须从实际终端内容读取，不得猜测，也不要执行命令。':'先调用对话状态和会话列表查询工具确认当前目标，再读取当前终端。只返回终端中以 ZW_DISCOVERY_ 开头的完整随机标记。不得猜测标记，不得执行命令。';
  await writeFile(join(out,'user-prompt.txt'),prompt);assert(!prompt.includes(marker));await h.type_(prompt);report.phase='model_turn';await click('ai.send');
  const turnStarted=performance.now();let turnComplete=false;

@@ -46,11 +46,11 @@ try{
  app=spawn(process.env.ZW_AI_BINARY??join(prefix,'bin/zerowork'),[],{env:{...process.env,ZEROWORK_DATA_DIR:data,ZEROWORK_AUTOCONNECT:'0',ZENIT_E2E_BACKGROUND:'1',ZENIT_E2E_ISOLATE_POINTER:'1'},stdio:['ignore',log.fd,log.fd]});
  app.on('exit',(code,signal)=>{report.appExit={code,signal}});await h.waitForServerReady(60000);await h.resizeWindow(1440,900);
  await click('workspace.empty.local');await visible('terminal.surface');const localTab=(await tabs())[0].test_id;
- await click('toolbar.ai');await visible('ai.prompt');await remoteMenu(false,'00-local-disabled');await click('ai.close');await h.waitFor(async()=>(await actual('ai.panel')).length===0||null,5000);
+ await click('ai.strip');await visible('ai.prompt');await remoteMenu(false,'00-local-disabled');await click('ai.close');await h.waitFor(async()=>(await actual('ai.panel')).length===0||null,5000);
  report.checks.push('Local standalone session disables remote-file attachment; clicking the disabled entry opens no picker');
  await click('sidebar.host');await h.key('return');await writeFile(join(out,'live.json'),JSON.stringify({pid:app.pid,iso,rpc,port:ready.port}));
  await h.waitFor(async()=>{const inputs=await actual('plugin.challenge.secret');if(inputs[0]){const n=inputs[0];await h.clickAt(n.rect.x+n.rect.w/2,n.rect.y+n.rect.h/2);await h.type_('ai-readonly');const submit=(await actual('plugin.challenge.submit'))[0];if(submit)await h.clickAt(submit.rect.x+submit.rect.w/2,submit.rect.y+submit.rect.h/2);}return (await tabs()).length===2&&(await h.query('terminal.input')).some(shown)?true:null},process.env.ZW_AI_PICKER_CUA==='1'?180000:20000);await h.sleep(1000);
- await click('toolbar.ai');await visible('ai.prompt');
+ await click('ai.strip');await visible('ai.prompt');
  await remoteMenu(true,'00-ssh-enabled');
  const filename=async(name:string)=>{const n=await h.waitFor(async()=>(await actual('ai.remote.filename')).find(n=>n.text===name)??null,10000);assert((await h.clickAt(n.rect.x+n.rect.w/2,n.rect.y+n.rect.h/2)).ok)};
  const waitEntries=async(count:number)=>h.waitFor(async()=>{
@@ -131,13 +131,13 @@ try{
  report.checks.push('Explicit text preview still reads file content; confirming it adds a remote reference, and all five draft entries are labeled as references at 860×480');
  if(!process.argv.includes('--attachments-only')){
  if((await actual('ai.remote.picker')).length)await click('ai.remote.close');await h.resizeWindow(1440,900);await click('ai.close');await click(localTab);
- await click('toolbar.ai');await visible('ai.prompt');await remoteMenu(false,'08-local-after-ssh');await click('ai.close');
+ await click('ai.strip');await visible('ai.prompt');await remoteMenu(false,'08-local-after-ssh');await click('ai.close');
  const existingTabs=await tabs();await click('toolbar.new_session');await click('session.menu.local');await visible('terminal.surface');
  const secondLocal=(await tabs()).find(n=>!existingTabs.some(old=>old.test_id===n.test_id));assert(secondLocal);
- await dragTab(secondLocal.test_id,localTab);await visible('groups.workspace');await click('toolbar.ai');await visible('ai.prompt');await remoteMenu(false,'09-local-group-disabled');await click('ai.close');
+ await dragTab(secondLocal.test_id,localTab);await visible('groups.workspace');await click('ai.strip');await visible('ai.prompt');await remoteMenu(false,'09-local-group-disabled');await click('ai.close');
  const groupTab=(await tabs()).find(n=>flat(n).some(c=>c.test_id==='tabs.group_marker'));assert(groupTab);
  const sshTab=(await tabs()).find(n=>n.test_id!==groupTab.test_id);assert(sshTab);await dragTab(sshTab.test_id,groupTab.test_id);
- await h.waitFor(async()=>(await tabs()).length===1||null,10000);await click('toolbar.ai');await visible('ai.prompt');await remoteMenu(true,'10-mixed-group-enabled');
+ await h.waitFor(async()=>(await tabs()).length===1||null,10000);await click('ai.strip');await visible('ai.prompt');await remoteMenu(true,'10-mixed-group-enabled');
  await openRemotePicker();await waitEntries(3);await cap('11-mixed-group-picker');
  const reopenedSource=await visible('ai.remote.source');await h.mouseMove(reopenedSource.rect.x+reopenedSource.rect.w/2,reopenedSource.rect.y+reopenedSource.rect.h/2);assert.equal(flat(await visible('ai.remote.source.tooltip')).map(n=>n.text??'').join(''),sourceName);
  await click('ai.remote.close');await h.waitFor(async()=>(await actual('ai.remote.source.tooltip')).length===0||null,5000);await h.waitFor(async()=>(await actual('ai.remote.info.tooltip')).length===0||null,5000);

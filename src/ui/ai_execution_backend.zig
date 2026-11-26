@@ -613,7 +613,7 @@ pub const Context = struct {
     }
     fn membership(self: *Context, controller: *Controller, handle: identity.SessionHandle, legacy: u64) !u64 {
         return switch (controller.authority.binding) {
-            .session => |id| if (id == @backingInt(handle.session_id)) 0 else error.TargetOutsideScope,
+            .session => |id| if (id == @backingInt(handle.session_id)) 0 else if (controller.inExecutionBinding(handle)) controller.authority.binding_revision else error.TargetOutsideScope,
             .group => |id| blk: {
                 const small = std.math.cast(u32, id) orelse return error.StaleReference;
                 const group = self.roster.findById(small) orelse return error.StaleReference;

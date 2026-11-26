@@ -514,7 +514,6 @@ pub const Panel = struct {
         try p.root.appendChild(cx.allocator, p.head);
         if (!tray) {
             try p.root.insertChildBefore(cx.allocator, try ui.boxStyled(cx, S.topFade, .{}), p.head);
-            try p.root.appendChild(cx.allocator, try ui.boxStyled(cx, S.grip, .{}));
         }
         if (!tray) try p.head.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.get("arrow-down-up").?, S.theme.current().accent_ink, S.icon(18)));
         const heading_title = try p.label(p.head, if (tray) "当前会话传输" else "传输任务", if (tray) 12 else 13, 700, false);
@@ -1708,24 +1707,24 @@ pub const Panel = struct {
         const notice_height: f32 = if (p.notice.parent.?.style.display != .none) @max(@as(f32, 36), p.notice.parent.?.globalRect().h) else 0;
         const chrome: f32 = if (global) 156 else 112;
         const presentation_cap: f32 = if (global) 578 else 420;
-        const height = @min(chrome + list_height + failure_height + notice_height, @min(presentation_cap, max_height));
+        var height = @min(chrome + list_height + failure_height + notice_height, @min(presentation_cap, max_height));
         var top: f32 = 46;
         var right: f32 = 12;
         if (p.anchor_id) |id| {
             if (findNode(p.cx.root orelse return .done, id)) |anchor| {
                 const r = anchor.globalRect();
-                const left = std.math.clamp(r.x - bounds.x, @as(f32, 12), @max(@as(f32, 12), bounds.w - width - 12));
-                right = bounds.w - width - left;
-                top = if (global) r.y - bounds.y + r.h + 8 else r.y - bounds.y - height - 8;
-                if (global and top + height > bounds.h - 12) top = r.y - bounds.y - height - 8;
+                const card = @import("mascot_island.zig").panelRect(bounds, r, width, height);
+                right = bounds.x + bounds.w - card.x - card.w;
+                top = card.y - bounds.y;
+                height = card.h;
             } else {
                 p.hide();
                 return .done;
             }
         }
-        // 12px window bounds, 8px anchor gap, flip before clamping.
-        top = std.math.clamp(top, @as(f32, 12), @max(@as(f32, 12), bounds.h - height - 12));
-        right = std.math.clamp(right, @as(f32, 12), @max(@as(f32, 12), bounds.w - width - 12));
+        // Keep panel padding and the virtualized list within the actual parent.
+        top = std.math.clamp(top, @as(f32, 8), @max(@as(f32, 8), bounds.h - height - 8));
+        right = std.math.clamp(right, @as(f32, 8), @max(@as(f32, 8), bounds.w - width - 8));
         const ext = p.root.style.ensureExtPanic(p.cx.allocator);
         if (p.root.style.width.px == width and p.root.style.height.px == height and ext.inset.top.px == top and ext.inset.right.px == right) return .done;
         p.root.setStyleInline(p.cx.allocator, .{ .width = .{ .px = width }, .height = .{ .px = height }, .inset = .{ .top = .{ .px = top }, .right = .{ .px = right } } });

@@ -110,9 +110,9 @@ async function cleanAssistantText(question: string) {
  assert(!bodies.includes(historicalMarker), 'echoed markers are absent from displayed replies');
 }
 try{
- await h.waitForServerReady(60000);await h.resizeWindow(1280,960);await click('workspace.empty.local');await visible('terminal.surface');await click('toolbar.ai');
+ await h.waitForServerReady(60000);await h.resizeWindow(1280,960);await click('workspace.empty.local');await visible('terminal.surface');await click('ai.strip');
  await send('FIRST 检查当前终端 🧑‍💻',1);await full(1,['FIRST']);await historyBoundary();await cleanAssistantText('FIRST');const originalTokens=(await tokenValues())[0];assert(originalTokens.includes('2.6K Token'));const firstRect=await resizeAssistant(80);report.checks.push('A fresh conversation completes with user, reasoning/tool group and usage; idle updates do not read freed tools');
- await click('ai.collapse');await click('toolbar.new_session');await click('session.menu.local');await visible('terminal.surface');await click('toolbar.ai');await send('NEW_CONNECTION 新连接问答',1);report.checks.push('A second connection and new AI conversation also complete without InvalidUtf8');
+ await click('ai.collapse');await click('toolbar.new_session');await click('session.menu.local');await visible('terminal.surface');await click('ai.strip');await send('NEW_CONNECTION 新连接问答',1);report.checks.push('A second connection and new AI conversation also complete without InvalidUtf8');
  await moveAssistant(-40,24);const copyRect=await resizeAssistant(120,60);await click('ai.sessions');await click('ai.session.copy_use.1');await confirmIfNeeded(async()=>text((await h.query('ai.message.user.text')).filter(shown)).includes('FIRST'));await full(1,['FIRST']);await expectAssistantRect(copyRect);assert.equal((await tokenValues())[0],originalTokens);
  assert(!text(await h.query('ai.message.user.text')).includes('NEW_CONNECTION'));
  await historyBoundary('FIRST');await cleanAssistantText('FIRST');
@@ -127,8 +127,8 @@ try{
  await send('RESTORED_FOLLOWUP 恢复后继续 ✅',3);await full(3,['FIRST','COPY_FOLLOWUP','RESTORED_FOLLOWUP']);assert((await h.screenshot(join(out,'02-restored-complete.png'))).ok);
  await historyBoundary('COPY_FOLLOWUP','RESTORED_FOLLOWUP');await cleanAssistantText('RESTORED_FOLLOWUP');
  report.checks.push('A single system notice separates old and new turns after both copy and restore, assistant echoes are hidden, and the provider still receives the historical marker');
- await click('ai.collapse');await click('tabs.tab.1');await click('toolbar.ai');await expectAssistantRect(firstRect);
- await click('tabs.tab.2');await click('toolbar.ai');await expectAssistantRect(copyRect);
+ await click('ai.collapse');await click('tabs.tab.1');await click('ai.strip');await expectAssistantRect(firstRect);
+ await click('tabs.tab.2');await click('ai.strip');await expectAssistantRect(copyRect);
  report.checks.push('Copy, new conversation and restore preserve the current assistant geometry, including maximized state and its restore rectangle');
  report.checks.push('Different connection tabs retain their own assistant geometry');
  report.checks.push('Restore retains both complete turns and the next turn succeeds without InvalidUtf8 or tool replay');

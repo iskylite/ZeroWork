@@ -39,7 +39,7 @@ const click=async(id:string)=>{report.last_action=id;await visible(id);assert((a
 const capture=async(name:string)=>{await h.mouseMove(1,1);await h.sleep(200);assert((await h.screenshot(join(out,name+'.png'))).ok);report.screenshots.push(join(out,name+'.png'))};
 const activeJournal=async()=> (await readFile(join(data,'ai-sessions-active.jsonl'),'utf8').catch((err:any)=>{if(err.code==='ENOENT')return '';throw err})).trim().split('\n').filter(Boolean).map(row=>JSON.parse(row));
 try{
- await h.waitForServerReady(60000);await h.resizeWindow(1200,900);await click('workspace.empty.local');await visible('terminal.surface');await click('toolbar.ai');await click('ai.sessions');
+ await h.waitForServerReady(60000);await h.resizeWindow(1200,900);await click('workspace.empty.local');await visible('terminal.surface');await click('ai.strip');await click('ai.sessions');
  await visible('ai.session.restore.2');
  const menu=await visible('ai.sessions.menu'),rows=flat(menu).filter(n=>/^ai\.session\.row\.\d+$/.test(n.test_id??''));assert.equal(rows.length,2,'saved parent plus the current empty welcome conversation');assert(rows.some(n=>n.test_id==='ai.session.row.2'));assert(!text(menu).includes('HIDDEN_CHILD_HISTORY'));assert.equal(requests.length,0);assert.equal((await activeJournal()).length,0);await capture('01-parent-list-only');
  await click('ai.session.restore.2');await h.waitFor(async()=>text(await h.query('ai.panel')).includes('PARENT_SAVED_ANSWER')||null,15000);

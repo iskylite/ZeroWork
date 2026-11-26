@@ -28,10 +28,10 @@ pub fn syncTitleChrome(allocator: std.mem.Allocator, node: *ui.Node, chrome: any
     return true;
 }
 
-/// With the sidebar hidden, reserve only the native traffic-light footprint.
-pub fn syncWorkspaceChrome(allocator: std.mem.Allocator, node: *ui.Node, chrome: anytype, collapsed: bool) bool {
+/// Match the content owner’s leading column and independently reserve native controls.
+pub fn syncWorkspaceChrome(allocator: std.mem.Allocator, node: *ui.Node, chrome: anytype, hidden_sidebar: bool, leading_column: f32) bool {
     const controls_visible = if (chrome.controls_geometry_known) chrome.native_controls_count != 0 else !chrome.fullscreen;
-    const padding: ui.Padding = .{ .left = if (collapsed and controls_visible) 96 else 0 };
+    const padding: ui.Padding = .{ .left = @max(leading_column, @as(f32, if (hidden_sidebar and controls_visible) 96 else 0)) };
     if (std.meta.eql(node.style.padding, padding)) return false;
     node.setStyleInline(allocator, .{ .padding = padding });
     return true;

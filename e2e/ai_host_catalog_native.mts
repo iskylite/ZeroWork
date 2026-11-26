@@ -126,7 +126,7 @@ try {
   await h.waitForServerReady(60000); await h.resizeWindow(1200, 900);
   await click('workspace.empty.local'); await visible('terminal.surface');
   baseline = await readFile(join(data, 'hosts.toml'), 'utf8');
-  await click('toolbar.ai'); await click('ai.prompt'); await h.type_('CATALOG_NATIVE_ACCEPTANCE'); await click('ai.send');
+  await click('ai.strip'); await click('ai.prompt'); await h.type_('CATALOG_NATIVE_ACCEPTANCE'); await click('ai.send');
   const handled = new Set<string>();
   let followupSent = false;
   await h.waitFor(async () => {

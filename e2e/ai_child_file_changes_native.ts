@@ -179,7 +179,7 @@ try {
   await h.resizeWindow(1200, 900);
   await click('workspace.empty.local');
   await visible('terminal.surface');
-  await click('toolbar.ai');
+  await click('ai.strip');
   await click('ai.composer.permission');
   await click('ai.permission.auto');
   await click('ai.prompt');

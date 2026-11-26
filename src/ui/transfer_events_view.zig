@@ -38,7 +38,6 @@ pub const View = struct {
         const body = try ui.boxStyled(cx, S.body, .{});
         try self.dialog.appendChild(cx.allocator, try ui.boxStyled(cx, @import("transfer_styles.zig").topFade, .{}));
         try self.dialog.appendChild(cx.allocator, body);
-        try self.dialog.appendChild(cx.allocator, try ui.boxStyled(cx, @import("transfer_styles.zig").grip, .{}));
         self.dialog.meta.ownership.meta.test_id = "transfer.events.dialog";
         const head = try ui.boxStyled(cx, S.row, .{});
         try head.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.get("file-clock").?, theme.current().accent, .{ .width = .{ .px = 18 }, .height = .{ .px = 18 } }));

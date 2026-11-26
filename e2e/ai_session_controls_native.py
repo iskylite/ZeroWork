@@ -103,7 +103,7 @@ try:
  rpc('/resize',{'width':1440,'height':1000})
  print('phase: native app ready',flush=True)
  click('workspace.empty.local');visible('terminal.surface');time.sleep(1)
- click('toolbar.ai');click('ai.prompt');text('FIRST_LINE');key('return',shift=True);text('第二行')
+ click('ai.strip');click('ai.prompt');text('FIRST_LINE');key('return',shift=True);text('第二行')
  assert rpc('/input_state',{'test_id':'ai.prompt'})['buffer']=='FIRST_LINE\n第二行'
  assert len(requests)==0
  shot('multiline-composer.png');key('return')
@@ -112,7 +112,7 @@ try:
  print('phase: multiline submit passed',flush=True)
  report['multiline']='Shift+Return inserts one newline without submitting; Return sends both lines'
  click('ai.collapse');click('terminal.input');text('@');visible('terminal.commands');text('grp SessionFix');key('right');time.sleep(.1);key('return');visible('groups.workspace')
- click('toolbar.ai');click('ai.prompt');text('GROUP_REASONING_TEST');key('return')
+ click('ai.strip');click('ai.prompt');text('GROUP_REASONING_TEST');key('return')
  print('phase: group message submitted',flush=True)
  wait(group_started.is_set)
  click('ai.composer.model');click('ai.effort.slider.track');key('end')

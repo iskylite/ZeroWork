@@ -101,6 +101,8 @@ pub const Controls = struct {
     icons: [8]*ui.Node,
     disabled: *ui.Signal(bool),
     theme_disabled: *ui.Signal(bool),
+    forward_disabled: *ui.Signal(bool),
+    chain_disabled: *ui.Signal(bool),
     narrow: bool = false,
     sidebar_width: f32 = 224,
 
@@ -198,7 +200,8 @@ pub fn mountStatusBar(cx: *ui.Cx, scope: *ui.Scope, status_node: *ui.Node) !Stat
     try more.appendChild(cx.allocator, more_icon);
     more.setDisplay(.none);
     try bar.appendChild(cx.allocator, more);
-    const chain = try makeButton(cx, scope, "通信链路", "status.connection.chain", S.metricTrigger(28), hover, disabled);
+    const chain_disabled = try scope.createSignal(bool, true);
+    const chain = try makeButton(cx, scope, "通信链路", "status.connection.chain", S.metricTrigger(28), hover, chain_disabled);
     const chain_icon = try ui.iconTint(cx, ui.icons.network, S.theme.current().fg_2, .{});
     chain_icon.setStyleInline(cx.allocator, S.metricIcon());
     try chain.appendChild(cx.allocator, chain_icon);
@@ -208,7 +211,8 @@ pub fn mountStatusBar(cx: *ui.Cx, scope: *ui.Scope, status_node: *ui.Node) !Stat
     chain_icon.meta.ownership.meta.test_id = "status.connection.chain.icon";
     try chain.appendChild(cx.allocator, chain_label);
     try bar.appendChild(cx.allocator, chain);
-    const socks = try makeButton(cx, scope, "端口转发", "status.connection.forward", S.metricTrigger(28), hover, disabled);
+    const forward_disabled = try scope.createSignal(bool, true);
+    const socks = try makeButton(cx, scope, "端口转发", "status.connection.forward", S.metricTrigger(28), hover, forward_disabled);
     const socks_icon = try ui.iconTint(cx, ui.icons.get("plug-zap").?, S.theme.current().fg_2, .{});
     socks_icon.setStyleInline(cx.allocator, S.metricIcon());
     socks_icon.meta.ownership.meta.test_id = "status.connection.forward.icon";
@@ -246,7 +250,14 @@ pub fn mountStatusBar(cx: *ui.Cx, scope: *ui.Scope, status_node: *ui.Node) !Stat
     try bar.appendChild(cx.allocator, theme);
     const progress = try ui.box(cx, .{ .height = .fill(), .direction = .row, .align_items = .center, .gap = 6, .flex_shrink = 0 }, .{});
     try bar.appendChild(cx.allocator, progress);
-    const controls = try scope.createState(Controls, .{ .bar = bar, .identity_button = id, .identity_label = status_node, .state_dot = dot, .rtt_button = rtt.button, .rtt_label = rtt.label, .encoding_button = encoding.button, .encoding_label = encoding.label, .grid_button = grid.button, .grid_label = grid.label, .more_button = more, .theme_button = theme, .theme_label = theme_label, .progress_slot = progress, .file_icon = file_icon, .chain_button = chain, .chain_label = chain_label, .forward_label = forward_label, .socks_button = socks, .broadcast_button = broadcast, .broadcast_icon = broadcast_icon, .broadcast_style = broadcast_style, .broadcast_label = broadcast_label, .icons = .{ id_icon, chevron, rtt.icon, encoding.icon, grid.icon, more_icon, socks_icon, theme_icon }, .disabled = disabled, .theme_disabled = theme_disabled });
+    const controls = try scope.createState(Controls, .{ .bar = bar, .identity_button = id, .identity_label = status_node, .state_dot = dot, .rtt_button = rtt.button, .rtt_label = rtt.label, .encoding_button = encoding.button, .encoding_label = encoding.label, .grid_button = grid.button, .grid_label = grid.label, .more_button = more, .theme_button = theme, .theme_label = theme_label, .progress_slot = progress, .file_icon = file_icon, .chain_button = chain, .chain_label = chain_label, .forward_label = forward_label, .socks_button = socks, .broadcast_button = broadcast, .broadcast_icon = broadcast_icon, .broadcast_style = broadcast_style, .broadcast_label = broadcast_label, .icons = .{ id_icon, chevron, rtt.icon, encoding.icon, grid.icon, more_icon, socks_icon, theme_icon }, .disabled = disabled, .theme_disabled = theme_disabled, .forward_disabled = forward_disabled, .chain_disabled = chain_disabled });
+    try scope.createEffect(.{ .controls = controls, .source = disabled }, struct {
+        fn run(ctx: anytype) void {
+            const unavailable = ctx.source.get();
+            ctx.controls.forward_disabled.set(!ctx.controls.workspace_chrome and unavailable);
+            if (!ctx.controls.workspace_chrome) ctx.controls.chain_disabled.set(unavailable);
+        }
+    }.run);
     return .{ .bar = bar, .details = left, .grid = grid.label, .progress_slot = progress, .socks_chip = socks, .socks_label = socks_label, .chain_trigger = chain, .chain_icon = chain_icon, .chain_hover = hover, .controls = controls };
 }
 fn makeButton(cx: *ui.Cx, scope: *ui.Scope, name: []const u8, id: []const u8, style: S.ButtonStyle, hover: *ui.Signal(?S.ButtonStyle), disabled: *ui.Signal(bool)) !*ui.Node {

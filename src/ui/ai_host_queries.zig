@@ -16,7 +16,7 @@ const inventory = @import("../ai/inventory_grants.zig");
 pub const Options = struct {
     /// Caller-verified, window-local standalone AI selections. An empty
     /// slice is deliberately different from an ordinary attached assistant.
-    explicit_session_ids: ?[]const u64 = null,
+    explicit_targets: ?@import("../ai/tool_scope.zig").ExplicitTargets = null,
     child_work_group: ?u32 = null,
     /// Policies captured when this Task was prepared, independent of defaults
     /// or composer selections made while its worker is still running.
@@ -93,8 +93,8 @@ fn captureSnapshot(app: *Application, roster: ?*@import("group_model.zig").Roste
         const in_binding = if (group) |value| blk: {
             for (value.members.items) |member| if (member.active and member.pane_id == tab.id) break :blk true;
             break :blk false;
-        } else if (options.explicit_session_ids) |ids|
-            !tab.archived and !tab.closing and std.mem.indexOfScalar(u64, ids, @backingInt(handle.session_id)) != null
+        } else if (options.explicit_targets) |targets|
+            !tab.archived and !tab.closing and targets.contains(handle)
         else
             @backingInt(handle.session_id) == binding.session;
         const owned_by_child = app.childOwnsReadySession(context, handle);
@@ -161,7 +161,7 @@ fn captureSnapshot(app: *Application, roster: ?*@import("group_model.zig").Roste
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(revision_source, &digest, .{});
     const revision = std.mem.readInt(u64, digest[0..8], .little);
-    return .{ .context = context, .initial_binding = initial, .execution_policy = options.execution_policy, .permission_mode = options.permission_mode, .lifecycle_management = lifecycle_management, .execution_tools_registered = execution_tools_registered, .can_open_local_terminal = can_open_local_terminal, .local_workspace = options.local_workspace, .observed_at = now, .source_revision = if (revision == 0) 1 else revision, .cursor_key = cursor_key, .sessions = sessions.items, .groups = groups.items, .inventory_grant = null };
+    return .{ .context = context, .initial_binding = initial, .explicit_targets = options.explicit_targets, .execution_policy = options.execution_policy, .permission_mode = options.permission_mode, .lifecycle_management = lifecycle_management, .execution_tools_registered = execution_tools_registered, .can_open_local_terminal = can_open_local_terminal, .local_workspace = options.local_workspace, .observed_at = now, .source_revision = if (revision == 0) 1 else revision, .cursor_key = cursor_key, .sessions = sessions.items, .groups = groups.items, .inventory_grant = null };
 }
 
 fn appendClosed(a: std.mem.Allocator, sessions: *std.ArrayList(queries.Session), app: *Application, context: host.Context, handle: identity.SessionHandle, metadata: *const @import("../host/lifecycle_supervisor.zig").SessionMetadata, ownership: @import("../host/lifecycle_supervisor.zig").Ownership, ownership_revision: u64, retention: ?config.SessionRetention, owned_by_task: bool) !void {

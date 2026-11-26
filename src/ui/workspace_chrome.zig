@@ -218,7 +218,7 @@ fn contains(rect: ui.ComputedRect, x: f32, y: f32) bool {
     return rect.w > 0 and rect.h > 0 and x >= rect.x and x <= rect.x + rect.w and y >= rect.y and y <= rect.y + rect.h;
 }
 pub fn move(cx: *ui.Cx, parent: *ui.Node, child: *ui.Node) !void {
-    if (child.parent) |old| old.removeChild(child);
+    if (child.parent == parent) return;
     try parent.appendChild(cx.allocator, child);
 }
 pub fn iconOnly(cx: *ui.Cx, button: *ui.Node, icon: *ui.Node, label: ?*ui.Node) void {

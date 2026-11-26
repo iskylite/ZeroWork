@@ -568,7 +568,6 @@ const AiHost = struct {
     scope: ?*ui.Scope = null,
     focus_return: ?@import("ui/ai_return_focus.zig").Ticket = null,
     history_submissions: std.AutoHashMapUnmanaged(@import("host/identity.zig").ExecutionId, void) = .empty,
-    toolbar_trigger: ?*ui.Node = null,
     strip: ?*@import("ui/ai_strip_view.zig").View = null,
     dock: @import("ai/dock_state.zig").State = .{},
     reveal: @import("ai/dock_state.zig").Reveal = .{},
@@ -576,6 +575,8 @@ const AiHost = struct {
     /// never re-created, so the AgentRuntime and draft survive the switch.
     dock_slot: ?*@import("ui/ai_dock_slot.zig").View = null,
     docked: bool = false,
+    dock_toggle_requested: bool = false,
+    strip_layout_owner: ?*ui.Node = null,
     /// V0.8: the card is hosted by a standalone AI tab instead of the overlay.
     standalone: bool = false,
     /// Undocking must recompute the floating rect even if the last docked
@@ -1436,6 +1437,7 @@ const AiHost = struct {
                 for (ai_tab.ai_associated_targets.slice()) |handle| {
                     const tab = self.liveExplicitTarget(handle) orelse continue;
                     try ids.append(self.allocator, @backingInt(tab.content_owner.session.session_id));
+                    try result.explicit_targets.add(handle);
                 }
                 result.explicit_inventory = true;
             } else {
@@ -1459,6 +1461,14 @@ const AiHost = struct {
                 };
             }
             ids.shrinkRetainingCapacity(kept);
+            if (result.explicit_inventory) {
+                var assigned_handles: @import("ai/tool_scope.zig").ExplicitTargets = .{};
+                for (result.explicit_targets.slice()) |handle| {
+                    if (std.mem.indexOfScalar(u64, ids.items, @backingInt(handle.session_id)) != null)
+                        try assigned_handles.add(handle);
+                }
+                result.explicit_targets = assigned_handles;
+            }
             if (self.request_host_context) |authority| if (self.application_host) |app| {
                 for (app.workspace.tabs.items) |tab| {
                     if (tab.content_owner != .session or !app.childOwnsReadySession(authority, tab.content_owner.session)) continue;
@@ -1509,6 +1519,7 @@ const AiHost = struct {
         var result: @import("ai/tool_scope.zig").Scope = .{ .owner = owner, .members = .{}, .explicit_inventory = true };
         for (tab.ai_associated_targets.slice()) |handle| {
             if (self.liveExplicitTarget(handle) == null) continue;
+            result.explicit_targets.add(handle) catch unreachable; // same bounded tab selection
             result.members.ids[result.members.len] = @backingInt(handle.session_id);
             result.members.len += 1;
         }
@@ -1644,6 +1655,7 @@ const AiHost = struct {
             bar.setVisible(false);
             return;
         };
+        bar.setOwner(if (surface.binding == .session) surface.tab.content_owner.session else null);
         bar.setVisible(surface.binding == .session);
         if (surface.binding == .group) return;
         var rows: [16]@import("ui/ai_target_bar.zig").Target = undefined;
@@ -1653,7 +1665,7 @@ const AiHost = struct {
             const tab = self.liveExplicitTarget(handle) orelse continue;
             const session_id = @backingInt(handle.session_id);
             if (len == rows.len) break;
-            rows[len] = .{ .id = session_id, .kind = .session, .label = tab.titleSlice() };
+            rows[len] = .{ .id = session_id, .kind = .session, .generation = tab.content_owner.session.generation, .label = tab.titleSlice() };
             len += 1;
         }
         bar.setTargets(rows[0..len]) catch return;
@@ -1667,7 +1679,7 @@ const AiHost = struct {
             const session_id = @backingInt(tab.content_owner.session.session_id);
             if (self.liveExplicitTarget(tab.content_owner.session) == null or selected.contains(tab.content_owner.session)) continue;
             if (candidate_len == candidates.len) break;
-            candidates[candidate_len] = .{ .id = session_id, .kind = .session, .label = tab.titleSlice() };
+            candidates[candidate_len] = .{ .id = session_id, .kind = .session, .generation = tab.content_owner.session.generation, .label = tab.titleSlice() };
             candidate_len += 1;
         }
         if (self.roster) |roster| for (roster.groups.items) |group| {
@@ -1725,6 +1737,32 @@ const AiHost = struct {
         self.refreshTargetBar();
         self.refreshPageBadge();
         self.cx.requestRedraw();
+    }
+
+    /// A human click creates precisely one local session. Restore the AI tab and
+    /// grant only that new handle, not all open tabs or a guessed "last" tab.
+    fn createAssociation(raw: *anyopaque) void {
+        const self: *AiHost = @ptrCast(@alignCast(raw));
+        const surface = self.activeAiSurface() orelse return;
+        if (surface.binding != .session or surface.tab.ai_associated_targets.slice().len >= 16) return;
+        const workspace = self.workspace orelse return;
+        const app = self.application_host orelse return;
+        const origin = surface.tab.tab_id;
+        const previous_group = workspace.creation_group;
+        workspace.creation_group = null;
+        defer workspace.creation_group = previous_group;
+        const created = app.createLocal(null) catch {
+            self.setFeedback("本地终端未能创建，请检查本地会话状态。");
+            return;
+        };
+        workspace.activateTabId(origin);
+        const active = self.activeAiSurface() orelse return;
+        if (active.tab.tab_id != origin or self.liveExplicitTarget(created.handle) == null) {
+            self.setFeedback("本地终端未能关联，请检查其状态后重新选择。");
+            return;
+        }
+        targetAdded(self, .session, @backingInt(created.handle.session_id), "");
+        self.focusComposer();
     }
 
     fn targetRemoved(raw: *anyopaque, kind: @import("ui/ai_target_bar.zig").Kind, id: u64) void {
@@ -3452,6 +3490,44 @@ const AiHost = struct {
         self.cx.requestRedraw();
     }
 
+    const ComposerShortcut = @import("ui/ai_skill_picker.zig").Shortcut;
+    fn shortcutKind(item: ComposerShortcut) ?@import("ui/ai_composer_controls_styles.zig").Kind {
+        return switch (item) {
+            .model => .model,
+            .permission => .permission,
+            .execution => .execution,
+            .auto, .swarm, .boost => .mode,
+            else => null,
+        };
+    }
+    fn shortcutAvailable(raw: *anyopaque, conversation: u64, item: ComposerShortcut) bool {
+        const self: *AiHost = @ptrCast(@alignCast(raw));
+        if (self.display_conversation != conversation or !self.controller.model.visible) return false;
+        if (item == .session) {
+            const bar = self.target_bar orelse return false;
+            return bar.available and !bar.interaction and bar.owner != null;
+        }
+        const controls = self.composer_controls orelse return false;
+        return controls.canOpen(shortcutKind(item) orelse return false);
+    }
+    fn openShortcut(raw: *anyopaque, conversation: u64, item: ComposerShortcut) void {
+        if (!shortcutAvailable(raw, conversation, item)) return;
+        const self: *AiHost = @ptrCast(@alignCast(raw));
+        switch (item) {
+            .session => self.target_bar.?.open(),
+            .auto, .swarm, .boost => {
+                const selected: @import("ai/swarm_mode.zig").Mode = switch (item) {
+                    .auto => .auto,
+                    .swarm => .swarm,
+                    .boost => .boost,
+                    else => unreachable,
+                };
+                composerAction(self, .{ .owner = self.currentBinding() orelse return, .revision = self.controlsRevision(), .action = .{ .swarm_mode = selected } }) catch |err| self.setFeedback(@errorName(err));
+            },
+            else => self.composer_controls.?.openChoice(shortcutKind(item).?),
+        }
+    }
+
     fn refreshComposer(self: *AiHost) !void {
         if (self.skill_picker) |picker| {
             const conversation = if (self.controller.model.visible and (self.child_identity == null or self.childCanWrite())) self.display_conversation else null;
@@ -3551,7 +3627,7 @@ const AiHost = struct {
                 };
             }
         }
-        if (!self.panel.isDisplayedInTree()) return;
+        if (!(self.card_box orelse self.panel).isDisplayedInTree()) return;
         var hash = std.hash.Wyhash.init(0);
         std.hash.autoHash(&hash, owner);
         const workspace_ticket = if (workspace_snapshot) |snapshot| if (snapshot.editable) snapshot.ticket else null else null;
@@ -4351,7 +4427,7 @@ const AiHost = struct {
     }
     fn appendSteerBubble(self: *AiHost, parent: *ui.Node, content: []const u8, status: ?[]const u8, waiting_hint: ?[]const u8) !void {
         const row = try ui.box(self.cx, .{ .width = .fill(), .direction = .row, .justify = .end, .flex_shrink = 0 }, .{});
-        const bubble = try ui.box(self.cx, @import("ui/ai_assistant_styles.zig").userBubble(@max(0, self.panel.globalRect().w - 30)), .{});
+        const bubble = try ui.box(self.cx, @import("ui/ai_assistant_styles.zig").userBubble(@max(0, (self.card_box orelse self.panel).globalRect().w - 30)), .{});
         bubble.setStyleInline(self.allocator, .{ .direction = .column, .gap = 4 });
         bubble.meta.ownership.meta.test_id = if (status == null) "ai.followup.consumed" else "ai.followup.pending";
         const text = try ui.text(self.cx, "", .{ .font_size = 11.5, .line_height = 1.4, .color = @import("ui/ai_assistant_styles.zig").userBubbleForeground(), .wrap = .word });
@@ -4429,7 +4505,7 @@ const AiHost = struct {
     fn showCompactionSaving(raw: *anyopaque) bool {
         const self: *AiHost = @ptrCast(@alignCast(raw));
         const id = self.manual_compaction_conversation orelse return true;
-        if (self.display_conversation != id or !self.panel.isDisplayedInTree()) return true;
+        if (self.display_conversation != id or !(self.card_box orelse self.panel).isDisplayedInTree()) return true;
         const state = self.assistant_states.?.find(id) orelse return true;
         const activity = if (state.compaction_activity) |*value| value else return true;
         // Paint the saving stage before the synchronous checkpoint write.
@@ -5466,11 +5542,22 @@ const AiHost = struct {
     }
     fn panelCapture(event: ui.events.Event, raw: ?*anyopaque) ui.events.EventResult {
         const self: *AiHost = @ptrCast(@alignCast(raw orelse return .ignored));
-        if (event == .mouse_down) self.dock.pin();
+        if (event == .mouse_down and !self.standalone and self.activeAiSurface() == null) self.dock.pin();
         return .ignored;
     }
     fn updateDock(self: *AiHost) void {
         const strip = self.strip orelse return;
+        if (self.dock_toggle_requested) {
+            self.dock_toggle_requested = false;
+            if (!self.standalone and self.activeAiSurface() == null and self.setDocked(!self.docked)) self.persistDockPreference();
+        }
+        // A hover preview may only open the overlay. A dock takes layout
+        // space; opening it from hover would move its own trigger (and the
+        // terminal's mascot) out from under the stationary cursor.
+        if (self.standalone or self.activeAiSurface() != null or self.docked) {
+            self.updatePresentation();
+            return;
+        }
         const before = self.dock.mode;
         const now = @import("platform/realtime.zig").milliseconds(self);
         const strip_rect = strip.root.globalRect();
@@ -5484,7 +5571,13 @@ const AiHost = struct {
         self.dock.hover(strip_hovered, panel_hovered, now);
         if (before != self.dock.mode) {
             if (self.dock.mode == .preview) {
-                self.syncOwner() catch return;
+                self.syncOwner() catch {
+                    self.dock.hide();
+                    return;
+                };
+                // Initial owner binding can restore a hidden snapshot. The
+                // current live hover still owns this preview, not that snapshot.
+                self.dock = .{ .mode = .preview };
                 self.controller.model.visible = true;
                 self.controller.model.expanded = true;
                 self.refresh("AI 助手");
@@ -5494,42 +5587,46 @@ const AiHost = struct {
         self.updatePresentation();
     }
 
-    fn setDocked(self: *AiHost, docked: bool) void {
-        const slot = self.dock_slot orelse return;
-        const card = self.card_box orelse return;
-        if (self.docked == docked) return;
-        self.docked = docked;
+    fn setDocked(self: *AiHost, docked: bool) bool {
+        const slot = self.dock_slot orelse return false;
+        const card = self.card_box orelse return false;
+        if (self.docked == docked) return false;
+        const was_open = self.controller.model.visible;
+        const focus_composer = if (self.input_node) |input| self.cx.focus_manager.getFocused() == input else false;
         if (docked) {
             // Move the retained card itself so the AgentRuntime, conversation,
             // draft, approvals and streaming output are never rebuilt.
             if (self.gestures) |gestures| gestures.cancel();
-            slot.attach(card) catch {
-                self.docked = false;
-                return;
-            };
+            slot.attach(card) catch return false;
             self.panel.setDisplay(.none);
-            self.controller.model.expanded = false;
-            self.controller.model.visible = true;
-            slot.setOpen(true);
+            self.reveal = .{};
+            slot.setOpen(was_open);
         } else {
+            self.panel.appendChild(self.cx.allocator, card) catch return false;
             slot.setOpen(false);
-            slot.detach(card);
-            self.panel.appendChild(self.cx.allocator, card) catch {};
             card.setStyleInline(self.cx.allocator, @import("ui/ai_assistant_styles.zig").panel(self.cx.tokens));
             self.force_float_geometry = true;
-            self.updatePresentation();
         }
+        self.docked = docked;
+        if (self.header_grip) |grip| grip.setDisplay(if (docked) .none else .flex);
+        self.controller.model.expanded = was_open;
+        if (self.conversation_viewport) |viewport| viewport.setStyleInline(self.cx.allocator, .{ .height = if (docked) .fill() else .{ .px = 276 }, .flex = if (docked) 1 else 0, .min_height = 0 });
+        if (was_open) self.dock.pin();
+        self.updatePresentation();
+        if (focus_composer and was_open) self.focusComposer();
         if (self.dock_button) |button| if (button.behavior.interaction.a11y) |*attrs| {
             attrs.label = if (docked) "取消固定，恢复悬浮" else "固定到右侧";
             attrs.pressed = docked;
         };
         if (self.dock_icon) |icon| _ = icon.setTint(app_theme.current().fg_2);
         self.cx.requestRedraw();
+        return true;
     }
 
     fn toggleDock(self: *AiHost) void {
-        self.setDocked(!self.docked);
-        self.persistDockPreference();
+        // Mouse dispatch still owns header paths until this callback returns.
+        self.dock_toggle_requested = true;
+        self.cx.requestRedraw();
     }
 
     /// Startup restores the persisted dock preference once, without touching
@@ -5537,7 +5634,7 @@ const AiHost = struct {
     fn restoreDockPreference(self: *AiHost) void {
         const settings = self.settings_host orelse return;
         if (!settings.runtime.value.ui.ai_dock_preferred) return;
-        self.setDocked(true);
+        _ = self.setDocked(true);
     }
 
     fn syncDockButton(self: *AiHost) void {
@@ -5564,8 +5661,9 @@ const AiHost = struct {
 
     fn updatePresentation(self: *AiHost) void {
         if (self.child_identity != null) return;
-        if (self.standalone) {
+        if (self.standalone or self.activeAiSurface() != null) {
             self.panel.setDisplay(.none);
+            if (self.dock_slot) |slot| slot.setOpen(false);
             return;
         }
         if (self.docked) {
@@ -5588,22 +5686,28 @@ const AiHost = struct {
 
     fn focusComposer(self: *AiHost) void {
         const input = self.input_node orelse return;
-        if (self.retained_panel) |panel| panel.focusWhenAttached(input) else self.cx.setFocus(input);
+        if (!self.docked and !self.standalone) {
+            if (self.retained_panel) |panel| {
+                panel.focusWhenAttached(input);
+                return;
+            }
+        }
+        self.cx.setFocus(input);
     }
 
     fn updateStrip(self: *AiHost) void {
         const strip = self.strip orelse return;
-        const pane = if (self.currentBinding() != null) region: {
+        const standalone_page = if (self.activeAiSurface()) |surface| surface.binding == .session else false;
+        const pane = if (!standalone_page and self.currentBinding() != null) region: {
             const workspace = self.workspace orelse break :region null;
             const title = self.dock_titlebar orelse break :region null;
-            var rect = workspace.terminal_area.globalRect();
+            var rect = (self.strip_layout_owner orelse workspace.terminal_area).globalRect();
             const title_rect = title.globalRect();
             rect.y = title_rect.y;
             rect.h = title_rect.h;
             break :region rect;
         } else null;
-        // File workspaces align with the sidebar. Their toolbar AI entry remains
-        // available without reserving or overlaying a strip across the file cards.
+        // File workspaces keep their unobstructed header; use the AI shortcut.
         const file_workspace = if (self.workspace) |workspace| blk: {
             if (workspace.active_group_view != null) break :blk false;
             const index = workspace.active_tab orelse break :blk false;
@@ -5627,6 +5731,10 @@ const AiHost = struct {
     }
 
     fn toggle(self: *AiHost) void {
+        if (self.activeAiSurface() != null or self.standalone) {
+            self.focusComposer();
+            return;
+        }
         if (self.currentBinding() == null) return;
         self.syncOwner() catch |err| {
             self.setFeedback(@errorName(err));
@@ -5720,7 +5828,7 @@ const AiHost = struct {
         const workspace = self.workspace orelse return;
         const index = workspace.active_tab orelse return;
         const terminal_input = workspace.tabs.items[index].terminal.?.root;
-        _ = @import("ui/ai_return_focus.zig").restore(self.cx, captured, current, terminal_input, self.card_box orelse self.panel, self.toolbar_trigger, if (self.textarea) |textarea| textarea.imeIsComposing() else false);
+        _ = @import("ui/ai_return_focus.zig").restore(self.cx, captured, current, terminal_input, self.card_box orelse self.panel, if (self.strip) |strip| strip.root else null, if (self.textarea) |textarea| textarea.imeIsComposing() else false);
     }
 
     fn collapse(self: *AiHost) void {
@@ -5744,14 +5852,13 @@ const AiHost = struct {
     }
 
     fn dismissOnOutsidePress(self: *AiHost, target: *ui.Node) void {
-        if (!self.controller.model.visible) return;
+        if (!self.controller.model.visible or self.docked or self.standalone or self.activeAiSurface() != null) return;
         if (@import("ui/notification_presenter.zig").containsPress(target)) return;
-        if (self.toolbar_trigger) |trigger| if (target.isDescendantOf(trigger)) return;
         if (self.strip) |strip| if (target.isDescendantOf(strip.root)) return;
         if (self.child_dialog) |dialog| {
             if (@import("ui/floating_input.zig").containsPress(self.cx, dialog.dialog, target)) return;
         }
-        if (@import("ui/floating_input.zig").containsPress(self.cx, self.panel, target)) return;
+        if (@import("ui/floating_input.zig").containsPress(self.cx, self.card_box orelse self.panel, target)) return;
         self.collapse();
     }
 
@@ -7285,7 +7392,13 @@ const AiHost = struct {
             self.tool_bridge.execution_mode = self.request_execution_policy.execution_mode;
             self.tool_bridge.interactive_batch_fallback = self.request_config.?.value.ai.interactive_batch_fallback;
             self.tool_bridge.session_retention = self.request_execution_policy.session_retention;
-            try self.tool_bridge.configureRouting(self.approvalsRef(), authority, input.text, if (context.owner == .session) tab.?.content_owner.session else null);
+            const route_target = if (allowed.explicit_inventory) blk: {
+                const ids = allowed.memberIds();
+                if (ids.len != 1) break :blk null;
+                for (allowed.explicit_targets.slice()) |target| if (@backingInt(target.session_id) == ids[0]) break :blk target;
+                break :blk null;
+            } else if (context.owner == .session) tab.?.content_owner.session else null;
+            try self.tool_bridge.configureScopeRouting(self.approvalsRef(), authority, input.text, route_target, allowed);
             if (self.lifecycle_runtime == null) self.lifecycle_runtime = .{ .journal_owner = try @import("ai/lifecycle_runtime.zig").ProcessJournal.acquire(.{ .data_root = self.data_root }), .controller = .{ .context = self, .invoke = lifecycleCall }, .approval = self.approvalsRef() };
             try self.prepareLifecycleTask(authority);
             self.request_host_context = authority;
@@ -7305,7 +7418,7 @@ const AiHost = struct {
                 @memcpy(self.host_cursor_key[16..32], &@import("host/identity.zig").TaskId.generate().bytes);
             }
             const controller = lookupLifecycleTask(self, authority.conversation_id, authority.task_id).?;
-            const summary = try @import("ui/ai_host_queries.zig").requestSummary(app, self.roster, .{ .execution_policy = controller.execution_policy, .permission_mode = self.request_permission_mode, .host_contributions = self.tool_bridge.host_binding.?.contributions, .execution_supported = self.execution_driver != null, .explicit_session_ids = if (allowed.explicit_inventory) allowed.memberIds() else null }, self.host_cursor_key, authority, self.allocator);
+            const summary = try @import("ui/ai_host_queries.zig").requestSummary(app, self.roster, .{ .execution_policy = controller.execution_policy, .permission_mode = self.request_permission_mode, .host_contributions = self.tool_bridge.host_binding.?.contributions, .execution_supported = self.execution_driver != null, .explicit_targets = if (allowed.explicit_inventory) allowed.explicit_targets else null }, self.host_cursor_key, authority, self.allocator);
             defer self.allocator.free(summary);
             const scoped_rules = try self.buildAssistantPrompt(self.allocator, self.request_tools[0..self.request_tools_len], workspace_snapshot, input.wire, summary.len +| 48);
             defer self.allocator.free(scoped_rules.text);
@@ -8586,15 +8699,14 @@ const AiHost = struct {
         const captured = self.execution().tool_bridge.captured_scope orelse return error.ScopeChanged;
         const live = try self.execution().captureOwnerScope(invocation.context.binding);
         defer self.execution().allocator.free(live.inventory.?);
-        var selected: [@import("ai/tool_scope.zig").max_targets]u64 = undefined;
-        var selected_len: usize = 0;
-        if (captured.explicit_inventory) for (captured.memberIds()) |id| {
-            if (selected_len == selected.len) break;
-            if (!live.explicit_inventory or std.mem.indexOfScalar(u64, live.memberIds(), id) == null) continue;
-            selected[selected_len] = id;
-            selected_len += 1;
+        var selected: @import("ai/tool_scope.zig").ExplicitTargets = .{};
+        if (captured.explicit_inventory and live.explicit_inventory) for (captured.explicit_targets.slice()) |handle| {
+            const id = @backingInt(handle.session_id);
+            if (std.mem.indexOfScalar(u64, captured.memberIds(), id) == null or
+                std.mem.indexOfScalar(u64, live.memberIds(), id) == null or !live.explicit_targets.contains(handle)) continue;
+            try selected.add(handle);
         };
-        return @import("ui/ai_host_queries.zig").execute(app, self.roster, state.initial_owner orelse state.owner, .{ .execution_policy = controller.execution_policy, .permission_mode = self.execution().request_permission_mode, .host_contributions = self.execution().tool_bridge.host_binding.?.contributions, .execution_supported = self.execution().execution_driver != null, .local_workspace = workspace, .child_work_group = controller.child_group, .explicit_session_ids = if (captured.explicit_inventory) selected[0..selected_len] else null }, self.execution().host_cursor_key, invocation, allocator);
+        return @import("ui/ai_host_queries.zig").execute(app, self.roster, state.initial_owner orelse state.owner, .{ .execution_policy = controller.execution_policy, .permission_mode = self.execution().request_permission_mode, .host_contributions = self.execution().tool_bridge.host_binding.?.contributions, .execution_supported = self.execution().execution_driver != null, .local_workspace = workspace, .child_work_group = controller.child_group, .explicit_targets = if (captured.explicit_inventory) selected else null }, self.execution().host_cursor_key, invocation, allocator);
     }
 
     fn controllerScheduler(raw: *anyopaque, context: *anyopaque, callback: *const fn (*anyopaque) anyerror!void, cancel: ?*ai_provider.CancelToken) !void {
@@ -11716,6 +11828,12 @@ const AiHost = struct {
             const colors = app_theme.current();
             if (host.painted_colors == null or !std.meta.eql(host.painted_colors.?, colors)) {
                 const styles = @import("ui/ai_assistant_styles.zig");
+                if (host.child_identity == null) if (host.card_box) |card| {
+                    card.setStyleInline(host.allocator, .{
+                        .background = if (host.docked or host.standalone) colors.surface_1 else colors.overlay,
+                        .glass = if (host.standalone) .{} else app_theme.overlayGlass(),
+                    });
+                };
                 if (host.window_base) |base| base.set(styles.windowControl());
                 for (host.window_hovers, 0..) |hover, index| if (hover) |value| value.set(styles.controlHover(switch (index) {
                     0 => .collapse,
@@ -16161,19 +16279,23 @@ const AppNavHost = struct {
         // Move only after the presented conversation switched to this tab.
         // A blocked journal/transition must not paint another tab's draft.
         ai.syncOwner() catch return;
-        if (ai.dock_slot) |slot| slot.setOpen(false);
-        if (card.parent) |parent| parent.removeChild(card);
+        // appendChild is a retained move, with allocation completed before
+        // unlinking from the old parent. Do not fire the composer's cleanup.
         center.appendChild(self.allocator, card) catch return;
-        card.setStyleInline(self.allocator, .{ .position = .relative, .inset = .{}, .width = .fill(), .height = .fill(), .flex_shrink = 0, .background = app_theme.current().surface_1, .border = .{ .width = 0, .color = ui.Color.TRANSPARENT, .radius = 14 }, .shadow = .{ .color = ui.Color.TRANSPARENT }, .shadows = ui.ShadowList.of(&.{}) });
+        if (ai.dock_slot) |slot| slot.setOpen(false);
+        card.setStyleInline(self.allocator, .{ .position = .relative, .inset = .{}, .width = .fill(), .height = .fill(), .flex_shrink = 0, .background = app_theme.current().surface_1, .glass = .{}, .border = .{ .width = 0, .color = ui.Color.TRANSPARENT, .radius = 14 }, .shadow = .{ .color = ui.Color.TRANSPARENT }, .shadows = ui.ShadowList.of(&.{}) });
         card.setDisplay(.flex);
         card.setHitTestVisible(true);
+        card.setOpacityRaw(1);
+        ai.standalone = true;
+        ai.dock.hide();
+        ai.reveal = .{};
+        ai.panel.setDisplay(.none);
+        ai.controller.model.visible = true;
         ai.refreshTargetBar();
         ai.syncInspectorHosts();
         if (ai.header_bar) |bar| bar.setDisplay(.none);
         if (ai.header_grip) |grip| grip.setDisplay(.none);
-        ai.panel.setDisplay(.none);
-        ai.standalone = true;
-        ai.controller.model.visible = true;
         self.ai_tab_owner = owner;
         ai.refreshPageBadge();
         ai.refreshStandaloneConversations(owner);
@@ -16204,8 +16326,8 @@ const AppNavHost = struct {
         if (ai.target_bar) |bar| bar.setVisible(false);
         ai.restoreInspectorHosts();
         if (ai.header_bar) |bar| bar.setDisplay(.flex);
-        if (ai.header_grip) |grip| grip.setDisplay(.flex);
-        if (ai.conversation_viewport) |viewport| viewport.setStyleInline(self.allocator, .{ .height = .{ .px = 276 }, .flex = 0 });
+        if (ai.header_grip) |grip| grip.setDisplay(if (ai.docked) .none else .flex);
+        if (ai.conversation_viewport) |viewport| viewport.setStyleInline(self.allocator, .{ .height = if (ai.docked) .fill() else .{ .px = 276 }, .flex = if (ai.docked) 1 else 0, .min_height = 0 });
         ai.panel.setDisplay(.none);
         ai.standalone = false;
         self.ai_tab_owner = null;
@@ -16250,13 +16372,15 @@ const AppNavHost = struct {
 
     fn syncMascot(self: *AppNavHost) void {
         const mascot = self.mascot orelse return;
+        const visible = self.activeStandaloneAiOwner() == null;
+        mascot.setVisible(visible);
+        if (!visible) return;
         var activity: @import("ui/mascot_island.zig").Activity = .{};
         if (self.mist_transfer) |view| activity.transfer_active = view.phase != .idle;
-        if (self.socks_host) |host| {
-            if (host.info) |info| {
-                activity.forward_active = info.state == .running or info.state == .connecting or info.state == .paused;
-                if (activity.forward_active) activity.forward_count += 1;
-            }
+        const forwarding = if (self.socks_host) |host| host.currentForwarding() else null;
+        if (forwarding) |current| {
+            activity.forward_active = current.active;
+            activity.forward_count += @intFromBool(current.active);
         }
         if (self.menu_host) |menu| {
             if (menu.background_socks) |host| {
@@ -16266,7 +16390,14 @@ const AppNavHost = struct {
             }
         }
         if (self.status_controls) |controls| {
-            activity.chain_available = !controls.disabled.peek();
+            activity.chain_available = !controls.disabled.peek() or if (self.connection_details_host) |host|
+                host.ssh_status.file_active != null or if (self.workspace) |ws_| if (ws_.active_tab) |idx|
+                    idx < ws_.tabs.items.len and if (ws_.tabs.items[idx].plugin_renderer) |renderer| renderer.vtable.connection_status != null else false
+                else
+                    false else false
+            else
+                false;
+            if (controls.workspace_chrome and controls.chain_disabled.peek() == activity.chain_available) controls.chain_disabled.set(!activity.chain_available);
             activity.broadcast_available = controls.broadcast_button.style.display != .none;
             activity.broadcast_active = if (controls.broadcast_button.behavior.interaction.a11y) |attrs| attrs.pressed else false;
         }
@@ -16277,28 +16408,17 @@ const AppNavHost = struct {
         }
         mascot.setActivity(activity);
         if (self.forward_entry) |entry| {
-            var session: @import("ui/forward_entry_view.zig").Row = .{};
-            if (self.socks_host) |host| {
-                if (host.info) |info| {
-                    session.enabled = info.has_rule or info.state != .off;
-                    session.active = info.state == .running or info.state == .connecting or info.state == .paused;
-                    session.detail = switch (info.state) {
-                        .running => "运行中",
-                        .connecting => "启动中",
-                        .paused => "连接已断开",
-                        .stopping => "停止中",
-                        .failed => "启动失败",
-                        .off => if (info.has_rule) "配置已就绪" else "未配置",
-                    };
-                }
-            }
+            const session: @import("ui/forward_entry_view.zig").Row = if (forwarding) |current|
+                .{ .enabled = true, .active = current.active, .detail = current.label }
+            else
+                .{};
             var background: @import("ui/forward_entry_view.zig").Row = .{};
+            var background_detail: [64]u8 = undefined;
             if (self.menu_host) |menu| if (menu.background_socks) |host| {
                 const rows = host.model.rows.items.len;
                 background.enabled = rows != 0;
                 background.active = rows != 0;
-                var buffer: [64]u8 = undefined;
-                background.detail = if (rows == 0) "" else std.fmt.bufPrint(&buffer, "{d} 条后台转发", .{rows}) catch "";
+                background.detail = if (rows == 0) "无后台转发" else std.fmt.bufPrint(&background_detail, "{d} 条后台转发", .{rows}) catch "";
             };
             entry.update(session, background) catch {};
         }
@@ -16348,6 +16468,120 @@ const AppNavHost = struct {
             return;
         };
         if (self.workspace) |workspace| workspace.status("没有后台保持的端口转发");
+    }
+
+    const MascotSlot = @import("ui/mascot_island.zig").Slot;
+
+    fn mascotPanel(raw: *anyopaque, which: MascotSlot) ?*ui.Node {
+        const self: *AppNavHost = @ptrCast(@alignCast(raw));
+        const mascot = self.mascot orelse return null;
+        if (mascot.glanceFor(which)) |glance| return glance;
+        return switch (which) {
+            .transfer => if (self.transfer_host) |host| if (host.manager_panel) |p| if (p.root.style.display != .none) p.root else null else null else null,
+            .forward => if (self.forward_entry) |v| if (v.popover.open.?.peek()) v.popover.chrome else null else null,
+            .history => if (self.command_history) |v| if (v.mode != .closed) v.root else null else null,
+            .broadcast => if (self.broadcast_view) |v| if (v.open.peek() or v.requested) v.root else null else null,
+            .chain => if (self.connection_details_host) |host| if (host.view.isVisible()) host.view.chrome else null else null,
+        };
+    }
+
+    fn showMascotPreview(raw: *anyopaque, which: MascotSlot) void {
+        const self: *AppNavHost = @ptrCast(@alignCast(raw));
+        if (self.modalOwnsInput()) return;
+        const mascot = self.mascot orelse return;
+        const workspace = self.workspace orelse return;
+        switch (which) {
+            .transfer => if (self.transfer_host) |host| host.presentGlobalManager(false),
+            .forward => showForwardEntry(self),
+            .history => if (self.command_history) |view| view.show(true),
+            .broadcast => {
+                const group = self.roster.findById(workspace.active_group_view orelse return) orelse return;
+                const facts = self.broadcastFacts(group.id) catch return;
+                defer self.allocator.free(facts);
+                const count = if (self.broadcastFor(group.id)) |approval| approval.participantCount(facts) else 0;
+                if (count > 0) {
+                    var buf: [64]u8 = undefined;
+                    const detail = std.fmt.bufPrint(&buf, "广播已开启 · {d} 个参与终端", .{count}) catch return;
+                    mascot.showGlance(which, "输入广播", group.name, detail) catch {};
+                } else {
+                    var buf: [64]u8 = undefined;
+                    const detail = std.fmt.bufPrint(&buf, "广播未开启 · {d} 个组成员", .{group.members.items.len}) catch return;
+                    mascot.showGlance(which, "输入广播", group.name, detail) catch {};
+                }
+            },
+            .chain => {
+                const index = workspace.active_tab orelse return;
+                if (index >= workspace.tabs.items.len) return;
+                const tab = workspace.tabs.items[index];
+                const host = self.connection_details_host orelse return;
+                if (tab.plugin_renderer) |renderer| {
+                    if (renderer.vtable.connection_status) |get| {
+                        const status = get(renderer.context);
+                        mascot.showGlance(.chain, "通信链路", tab.titleSlice(), status.label) catch {};
+                    }
+                } else if (tab.file_scope != null) {
+                    const status = host.ssh_status.file_active orelse return;
+                    mascot.showGlance(.chain, "通信链路", tab.titleSlice(), switch (status.state) {
+                        .connected => "SFTP · 已连接",
+                        .connecting => "SFTP · 连接中",
+                        .disconnected => "SFTP · 已断开",
+                        .unknown => "SFTP · 状态未知",
+                    }) catch {};
+                } else host.showForTab(index);
+            },
+        }
+    }
+
+    fn hideMascotPreview(raw: *anyopaque, which: MascotSlot) void {
+        const self: *AppNavHost = @ptrCast(@alignCast(raw));
+        if (self.mascot) |mascot| if (mascot.glanceFor(which) != null) {
+            mascot.closeGlance();
+            return;
+        };
+        switch (which) {
+            .transfer => if (self.transfer_host) |host| {
+                if (host.manager_panel) |panel| panel.dismiss();
+                host.manager_visible = false;
+            },
+            .forward => if (self.forward_entry) |entry| entry.hide(),
+            .history => if (self.command_history) |view| view.hide(),
+            .broadcast => if (self.broadcast_view) |view| view.dismiss(),
+            .chain => if (self.connection_details_host) |host| host.view.dismiss(),
+        }
+    }
+
+    // File/plugin sessions may expose live connection status without a detail
+    // window. A click in that case pins the useful status rather than replacing
+    // it with an unsupported-action tooltip or opening the wrong SSH pane.
+    fn openMascotChain(self: *AppNavHost) void {
+        const workspace = self.workspace orelse return;
+        const index = workspace.active_tab orelse return;
+        if (index >= workspace.tabs.items.len) return;
+        const tab = workspace.tabs.items[index];
+        const read_only = tab.file_scope != null or if (tab.plugin_renderer) |renderer| renderer.vtable.show_connection_details == null else false;
+        if (read_only) {
+            if (self.mascot) |mascot| if (mascot.glanceFor(.chain) == null) showMascotPreview(self, .chain);
+        } else {
+            if (self.mascot) |mascot| mascot.closeGlance();
+            if (self.connection_details_host) |host| host.showForTab(index);
+        }
+    }
+
+    fn pinMascotPreview(raw: *anyopaque, which: MascotSlot) void {
+        const self: *AppNavHost = @ptrCast(@alignCast(raw));
+        if (which == .transfer) {
+            if (self.transfer_host) |host| host.acknowledgeTransfers();
+        }
+        const mascot = self.mascot orelse return;
+        if (mascot.glanceFor(which) == null) return;
+        switch (which) {
+            .broadcast => {
+                mascot.closeGlance();
+                openBroadcastStatus(self);
+            },
+            .chain => self.openMascotChain(),
+            else => {},
+        }
     }
 
     fn saveMascotAnchor(raw: *anyopaque, x: f32, y: f32) void {
@@ -16426,7 +16660,7 @@ const AppNavHost = struct {
         self.sidebar_panel.setDisplay(if (hidden) .none else .flex);
         self.sidebar_panel.setStyle(self.allocator, .width, .{ .px = self.quick.sidebar.expanded_width });
         if (self.sidebar_grip) |grip| grip.setDisplay(if (hidden) .none else .flex);
-        if (self.collapsed_sidebar) |collapsed| collapsed.setCollapsed(self.quick.sidebar.collapsed);
+        if (self.collapsed_sidebar) |collapsed| collapsed.setCollapsed(allowed and self.quick.sidebar.collapsed);
     }
 
     fn homeConnect(self: *AppNavHost) void {
@@ -16527,9 +16761,9 @@ const AppNavHost = struct {
 
     fn hookRun(ctx: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
         const self: *AppNavHost = @ptrCast(@alignCast(ctx));
-        self.syncMascot();
         self.applyHostSidebarGate();
         self.syncStandaloneAi();
+        self.syncMascot();
         self.settlePendingAiGroup();
         if (self.menu_host) |menu| menu.drainSidebarAction();
         if (self.wizard_host) |host| if (self.workspace) |workspace| {
@@ -16592,10 +16826,19 @@ const AppNavHost = struct {
         }
         // AppKit reports only controls occupying the client header. In native
         // fullscreen its hidden header has none; zoom/maximize keeps them.
-        const title_chrome_changed = if (self.app_runtime) |app|
-            if (self.title_bar) |bar| shell_styles.syncWorkspaceChrome(self.allocator, bar, app.chromeState(), self.quick.sidebar.collapsed) else false
-        else
-            false;
+        const title_chrome_changed = if (self.app_runtime) |app| blk: {
+            const bar = self.title_bar orelse break :blk false;
+            // A plugin can hide the host sidebar without changing the user's
+            // collapse preference. Line its tabs up with the actual conversation
+            // column; even before that page has a layout, never cover AppKit.
+            const hidden = self.quick.sidebar.collapsed or !self.host_sidebar_allowed;
+            const leading: f32 = if (self.activeStandaloneAiOwner()) |owner| leading: {
+                const center = @import("ui/ai_standalone_bridge.zig").find(owner) orelse break :leading 0;
+                if (center.globalRect().w <= 0 or (if (center.parent) |pane| pane.style.display == .none else true)) break :leading 0;
+                break :leading @max(0, center.globalRect().x - bar.globalRect().x);
+            } else 0;
+            break :blk shell_styles.syncWorkspaceChrome(self.allocator, bar, app.chromeState(), hidden, leading);
+        } else false;
         var notes_layout_changed = false;
         if (self.application_host) |host| {
             _ = host.safeTick() catch |err| {
@@ -16733,7 +16976,6 @@ const AppNavHost = struct {
             if (self.sidebar_full) |full| full.setDisplay(if (no_hosts) .none else .flex);
             if (self.sidebar_empty) |empty| empty.setDisplay(if (no_hosts) .flex else .none);
             const has_session = workspace.active_tab != null or workspace.active_group_view != null;
-            if (self.ai) |ai| if (ai.toolbar_trigger) |trigger| trigger.setDisplay(if (has_session) .flex else .none);
             if (self.chrome.transfer_badge) |badge| {
                 const count = if (self.transfer_host) |transfer| transfer.unreadTransferCount() else 0;
                 badge.setDisplay(.none);
@@ -16787,14 +17029,14 @@ const AppNavHost = struct {
                 controls.sidebar_width = self.quick.sidebar.width();
                 self.refreshBroadcastStatus(controls);
                 if (plugin_status) controls.broadcast_button.setDisplay(.none);
-                // Group status follows the focused member, including Local.
-                // Keep the same broadcast control on the visible status bar.
-                const local_status = if (local_active) self.local_status_view else null;
-                const destination = if (self.mist) |chrome| chrome.groups[0] else if (local_status) |view| view.root else controls.bar;
-                const anchor = if (self.mist != null) controls.chain_button else if (local_status) |view| view.theme_button else controls.chain_button;
-                if (controls.broadcast_button.parent != destination) {
-                    if (controls.broadcast_button.parent) |parent| parent.removeChild(controls.broadcast_button);
-                    destination.insertChildBefore(self.allocator, controls.broadcast_button, anchor) catch {};
+                // Only the legacy status bars move the broadcast action. In the
+                // workspace its single retained trigger lives in the task strip.
+                if (self.mascot == null) {
+                    const local_status = if (local_active) self.local_status_view else null;
+                    const destination = if (local_status) |view| view.root else controls.bar;
+                    const anchor = if (local_status) |view| view.theme_button else controls.chain_button;
+                    if (controls.broadcast_button.parent != destination)
+                        destination.insertChildBefore(self.allocator, controls.broadcast_button, anchor) catch {};
                 }
             };
             if (self.local_status_view) |view| {
@@ -18714,14 +18956,6 @@ fn caseInsensitiveContains(haystack: []const u8, needle: []const u8) bool {
     return false;
 }
 
-const AiClick = struct {
-    host: *AiHost,
-
-    fn onClick(self: *AiClick) void {
-        self.host.toggle();
-    }
-};
-
 const AiStopClick = struct {
     host: *AiHost,
 };
@@ -18729,12 +18963,6 @@ const AiStopClick = struct {
 fn onAiStopClick(raw: *anyopaque) void {
     const click: *AiStopClick = @ptrCast(@alignCast(raw));
     click.host.stop();
-}
-
-/// Legacy free-function trampoline for behavior.events.on_click sites.
-fn onAiToggleClickLegacy(raw: *anyopaque) void {
-    const ctx: *AiClick = @ptrCast(@alignCast(raw));
-    ctx.host.toggle();
 }
 
 // ── Region builders ─────────────────────────────────────────────────
@@ -18784,7 +19012,7 @@ const WindowPin = struct {
     }
 };
 
-fn mountTitleBar(cx: *ui.Cx, scope: *ui.Scope, p: Palette, settings_host: *SettingsHost, workspace: *ws.Workspace, ai_host: *AiHost, nav_host: *AppNavHost, history_host: *HistoryHost) !*ui.Node {
+fn mountTitleBar(cx: *ui.Cx, scope: *ui.Scope, p: Palette, settings_host: *SettingsHost, workspace: *ws.Workspace, nav_host: *AppNavHost, history_host: *HistoryHost) !*ui.Node {
     const bar = try ui.boxStyled(cx, shell_styles.title, .{});
     bar.meta.ownership.meta.test_id = "workspace.titlebar";
     nav_host.title_bar = bar;
@@ -18812,8 +19040,8 @@ fn mountTitleBar(cx: *ui.Cx, scope: *ui.Scope, p: Palette, settings_host: *Setti
     try controls.appendChild(cx.allocator, try ui.spacer(cx));
     const actions = try ui.hstack(cx, .{ .gap = 8, .height = .{ .px = 36 }, .align_items = .center, .flex_shrink = 0 }, .{});
     try controls.appendChild(cx.allocator, actions);
-    // V0.8 §2.1: the right side is one fixed 196x36 global island with six
-    // controls. Session/task controls move to the mascot island.
+    // Only window-wide controls belong here. AI is entered through its
+    // session strip, shortcut or new-session menu.
     var groups: [1]*ui.Node = undefined;
     groups[0] = try ui.boxStyled(cx, shell_styles.titleFloating, .{});
     groups[0].meta.ownership.meta.test_id = "toolbar.group.global";
@@ -18831,14 +19059,9 @@ fn mountTitleBar(cx: *ui.Cx, scope: *ui.Scope, p: Palette, settings_host: *Setti
     notification_button.meta.ownership.meta.test_id = "toolbar.notifications";
     nav_host.notification_anchor = notification_button;
     try groups[0].appendChild(cx.allocator, notification_button);
-    const ai_click = try cx.allocator.create(AiClick);
-    ai_click.* = .{ .host = ai_host };
-    const ai_trigger = try titleIcon(cx, scope, "✨", icon_tint, false, onAiToggleClickLegacy, @ptrCast(ai_click));
-    ai_host.toolbar_trigger = ai_trigger;
-    try groups[0].appendChild(cx.allocator, ai_trigger);
     const settings_click = try cx.allocator.create(SettingsNavClick);
     settings_click.* = .{ .host = settings_host, .page_index = 0 };
-    const settings_trigger = try titleIcon(cx, scope, "⚙️", icon_tint, true, onSettingsTitleClick, @ptrCast(settings_click));
+    const settings_trigger = try titleSettingsIcon(cx, scope, icon_tint, onSettingsTitleClick, @ptrCast(settings_click));
     settings_host.focus_return = settings_trigger;
     try groups[0].appendChild(cx.allocator, settings_trigger);
     // Transfer/session controls remain owned by their real hosts; the mascot
@@ -18856,12 +19079,10 @@ fn fitMascotSlot(cx: *ui.Cx, node: *ui.Node) void {
 }
 
 /// 标题栏图标：30×28、圆角 7、透明底（mockup .icn）。
-fn titleIcon(cx: *ui.Cx, scope: *ui.Scope, icon: []const u8, color: *ui.Signal(?ui.Color), _: bool, callback: *const fn (*anyopaque) void, ctx: *anyopaque) !*ui.Node {
-    const asset = if (std.mem.eql(u8, icon, "⚡")) @import("ui/quick_connect_icon.zig").asset else if (std.mem.eql(u8, icon, "✨")) ui.icons.sparkles else ui.icons.settings;
-    const label = if (std.mem.eql(u8, icon, "⚡")) "快捷连接" else if (std.mem.eql(u8, icon, "✨")) "AI 助手" else "偏好设置";
-    const button = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = asset, .icon_size = @as(f32, 16), .icon_tint = color, .a11y_label = label, .on_click = ui.Handler(void){ .callback = callback, .context = ctx } }).mount(scope, cx);
+fn titleSettingsIcon(cx: *ui.Cx, scope: *ui.Scope, color: *ui.Signal(?ui.Color), callback: *const fn (*anyopaque) void, ctx: *anyopaque) !*ui.Node {
+    const button = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.settings, .icon_size = @as(f32, 16), .icon_tint = color, .a11y_label = "偏好设置", .on_click = ui.Handler(void){ .callback = callback, .context = ctx } }).mount(scope, cx);
     shell_styles.titleToolbarButton(cx.allocator, button);
-    button.meta.ownership.meta.test_id = if (std.mem.eql(u8, icon, "⚡")) "toolbar.quick_connect" else if (std.mem.eql(u8, icon, "✨")) "toolbar.ai" else "toolbar.settings";
+    button.meta.ownership.meta.test_id = "toolbar.settings";
     return button;
 }
 
@@ -19022,7 +19243,7 @@ fn mountAssistantConversation(ai_host: *AiHost, scope: *ui.Scope, ai_card_box: *
     ai_host.textarea = ai_input.state;
     ai_host.composer_input = ai_input;
     ai_host.skill_picker = try @import("ui/ai_skill_picker.zig").View.mount(cx, scope, ai_input, cx.on(AiHost, ai_host, AiHost.promptChanged));
-    ai_host.target_bar = try @import("ui/ai_target_bar.zig").View.mount(cx, scope, ai_card_box, .{ .context = ai_host, .add = AiHost.targetAdded, .remove = AiHost.targetRemoved, .insert = AiHost.targetInserted });
+    ai_host.skill_picker.?.actions = .{ .context = ai_host, .available = AiHost.shortcutAvailable, .open = AiHost.openShortcut };
     ai_host.composer_node = ai_input_row;
     @import("ui/ai_composer_sizing.zig").configure(ai_input);
     try @import("ui/ai_composer_sizing.zig").bindTheme(cx, scope, ai_input);
@@ -19039,6 +19260,8 @@ fn mountAssistantConversation(ai_host: *AiHost, scope: *ui.Scope, ai_card_box: *
     try ai_input_row.appendChild(cx.allocator, ai_host.skill_picker.?.popup.wrapper);
     const composer_controls = try @import("ui/ai_composer_controls_view.zig").View.mount(cx, scope, .{ .context = ai_host, .action = AiHost.composerAction, .open_settings = AiHost.composerSettings, .models_opened = AiHost.composerModelsOpened });
     ai_host.composer_controls = composer_controls;
+    ai_host.target_bar = try @import("ui/ai_target_bar.zig").View.mount(cx, scope, composer_controls.root, composer_controls.buttons[1], .{ .context = ai_host, .add = AiHost.targetAdded, .remove = AiHost.targetRemoved, .insert = AiHost.targetInserted, .create_local = AiHost.createAssociation });
+    composer_controls.targets = ai_host.target_bar;
     const ai_controls = composer_controls.trailing;
     const ai_send_base = try scope.createSignal(ai_styles.ButtonStyle, ai_styles.primary());
     ai_host.send_base = ai_send_base;
@@ -19136,7 +19359,10 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     ai_panel.setDisplay(.none);
     const ai_styles = @import("ui/ai_assistant_styles.zig");
     const ai_host = try cx.allocator.create(AiHost);
-    const ai_card_box = try ui.boxStyled(cx, ai_styles.panel, .{});
+    // Visual tokens are refreshed below, but geometry belongs to the
+    // active presentation. A styled-box theme replay resets docked and
+    // embedded cards to the floating 600pt size on cold start/theme change.
+    const ai_card_box = try ui.box(cx, ai_styles.panel(cx.tokens), .{});
     ai_card_box.meta.ownership.meta.test_id = "ai.panel";
     const ai_window_base = try scope.createSignal(ai_styles.ButtonStyle, ai_styles.windowControl());
     const ai_window_hovers = [_]*ui.Signal(?ai_styles.ButtonStyle){
@@ -19635,12 +19861,13 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     nav_host.help_overlay = help_overlay;
     try root.appendChild(cx.allocator, main_row);
 
-    const title_bar = try mountTitleBar(cx, scope, p, settings_host, workspace, ai_host, nav_host, history_host);
+    const title_bar = try mountTitleBar(cx, scope, p, settings_host, workspace, nav_host, history_host);
     try content_stack.insertChildBefore(cx.allocator, title_bar, history_card_host);
     try panel_parent.appendChild(cx.allocator, settings_panel);
     ai_host.strip = try @import("ui/ai_strip_view.zig").View.mount(cx, scope, cx.on(AiHost, ai_host, AiHost.openFromStrip));
 
     ai_host.dock_titlebar = title_bar;
+    ai_host.strip_layout_owner = content_row;
     const ai_dock = try @import("ui/ai_dock_slot.zig").View.mount(cx, scope, content_row, .{ .context = nav_host, .resize = AppNavHost.resizeAiDock, .persist = AppNavHost.persistAiDock }, app_config.value.ui.ai_dock_width);
     nav_host.ai_dock = ai_dock;
     ai_host.dock_slot = ai_dock;
@@ -19814,6 +20041,7 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     if (nav_host.mist) |chrome| {
         const c = status_bar.controls;
         c.workspace_chrome = true;
+        c.forward_disabled.set(false);
         local_status.workspace_chrome = true;
         try chrome.identitiesAtTabs(c.identity_button, local_status.identity_button);
         for ([_]*ui.Node{ c.identity_label, c.state_dot, c.rtt_label, c.file_icon, c.icons[0], c.icons[1], local_status.identity_label, local_status.state_dot, local_status.identity_icon, local_status.identity_chevron }) |node| node.setDisplay(.none);
@@ -19823,12 +20051,11 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
         MistChrome.iconOnly(cx, c.broadcast_button, c.broadcast_icon, c.broadcast_label);
         shell_styles.titleToolbarButton(cx.allocator, command_history.buttons[0]);
         // V0.8: session/task controls live on the mascot island, not the top bar.
-        try MistChrome.move(cx, chrome.groups[0], c.theme_button);
-        chrome.groups[0].removeChild(c.theme_button);
-        try chrome.groups[0].insertChildBefore(cx.allocator, c.theme_button, ai_host.toolbar_trigger);
+        try chrome.groups[0].insertChildBefore(cx.allocator, c.theme_button, settings_host.focus_return);
+
         background_socks.view.remote_entry.setDisplay(.none);
         background_socks.view.local_entry.setDisplay(.none);
-        const mascot = try @import("ui/mascot_island.zig").View.mount(cx, scope, terminal_area, .{ .context = nav_host, .save_anchor = AppNavHost.saveMascotAnchor }, app_config.value.ui.mascot_anchor_x, app_config.value.ui.mascot_anchor_y);
+        const mascot = try @import("ui/mascot_island.zig").View.mount(cx, scope, terminal_area, .{ .context = nav_host, .save_anchor = AppNavHost.saveMascotAnchor, .open_preview = AppNavHost.showMascotPreview, .close_preview = AppNavHost.hideMascotPreview, .panel = AppNavHost.mascotPanel, .pin_preview = AppNavHost.pinMascotPreview }, app_config.value.ui.mascot_anchor_x, app_config.value.ui.mascot_anchor_y);
         nav_host.mascot = mascot;
         if (nav_host.transfer_anchor) |node| {
             try MistChrome.move(cx, mascot.slot(.transfer), node);
@@ -19839,13 +20066,14 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
         // V0.8 §2.2.2: one entry opens both forward owners instead of two
         // near-identical top-bar plug icons.
         const forward_entry = try @import("ui/forward_entry_view.zig").View.mount(cx, scope, .{ .context = nav_host, .open_session = AppNavHost.openSessionForward, .open_background = AppNavHost.openBackgroundForward });
+        forward_entry.trigger_node = mascot.slot(.forward);
         nav_host.forward_entry = forward_entry;
         c.socks_button.behavior.events.on_click = .{ .context = nav_host, .callback = AppNavHost.showForwardEntry };
-        chrome.ownPanel(forward_entry.popover.wrapper);
         try MistChrome.move(cx, mascot.slot(.broadcast), c.broadcast_button);
         fitMascotSlot(cx, c.broadcast_button);
         try MistChrome.move(cx, mascot.slot(.chain), c.chain_button);
         fitMascotSlot(cx, c.chain_button);
+        c.chain_button.behavior.events.on_click = cx.on(AppNavHost, nav_host, AppNavHost.openMascotChain);
         try MistChrome.move(cx, mascot.slot(.history), command_history.buttons[0]);
         fitMascotSlot(cx, command_history.buttons[0]);
         workspace.mascot_occlusion = .{ .context = mascot, .rect = struct {
@@ -19876,8 +20104,12 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     // A graphical (web/BMC) session repoints the identity trigger at a sticky
     // route/details popover. Hover must stay inert there; only a real click opens it.
     try StatusPreview.mountVetoed(cx, scope, status_previews, status_bar.controls.identity_button, details_host.ssh_status.info.chrome, details_host.ssh_status.info.open, cx.on(@import("ui/status_connection_view.zig").View, details_host.ssh_status.info, @import("ui/status_connection_view.zig").View.dismiss), details_host.ssh_status, projectsGraphicalHost);
-    try StatusPreview.mountClick(cx, scope, status_previews, status_bar.chain_trigger, details_host.view.chrome, details_host.view.open, cx.on(@import("ui/connection_details_view.zig").View, details_host.view, @import("ui/connection_details_view.zig").View.dismiss));
-    try StatusPreview.mountClick(cx, scope, status_previews, status_bar.socks_chip, socks_info.root, socks_info.open, cx.on(@import("ui/socks_info_view.zig").View, socks_info, @import("ui/socks_info_view.zig").View.hide));
+    // The mascot owns the paired trigger and preview lifetime for these two;
+    // do not wrap its unified forwarding entry in the legacy SOCKS-only toggle.
+    if (nav_host.mascot == null) {
+        try StatusPreview.mountClick(cx, scope, status_previews, status_bar.chain_trigger, details_host.view.chrome, details_host.view.open, cx.on(@import("ui/connection_details_view.zig").View, details_host.view, @import("ui/connection_details_view.zig").View.dismiss));
+        try StatusPreview.mountClick(cx, scope, status_previews, status_bar.socks_chip, socks_info.root, socks_info.open, cx.on(@import("ui/socks_info_view.zig").View, socks_info, @import("ui/socks_info_view.zig").View.hide));
+    }
     for ([_]*ui.Node{ status_bar.controls.theme_button, local_status.theme_button }) |trigger| {
         try StatusPreview.mountClick(cx, scope, status_previews, trigger, theme_picker.chrome, theme_picker.open, cx.on(@import("ui/status_theme_view.zig").View, theme_picker, @import("ui/status_theme_view.zig").View.dismiss));
     }
@@ -21661,9 +21893,12 @@ const TransferHost = struct {
     }
 
     fn showGlobalManager(self: *TransferHost) void {
+        self.presentGlobalManager(true);
+    }
+    fn presentGlobalManager(self: *TransferHost, acknowledge: bool) void {
         const panel = self.manager_panel orelse return;
         if (self.workspace.shutting_down) return;
-        panel.selected_scope = .all;
+        if (acknowledge) panel.selected_scope = .all;
         panel.refresh(wallClockMsTransfer(), .{
             .window_chunks = self.workspace.app_config.transfer.window_chunks,
             .chunk_kb = self.workspace.app_config.transfer.chunk_kb,
@@ -21672,7 +21907,7 @@ const TransferHost = struct {
             return;
         };
         panel.show();
-        self.acknowledgeTransfers();
+        if (acknowledge) self.acknowledgeTransfers();
         self.manager_visible = true;
         self.manager_last_refresh_ms = 0;
         self.cx.requestRedraw();

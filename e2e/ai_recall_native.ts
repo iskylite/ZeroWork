@@ -130,7 +130,7 @@ try{
     await click('workspace.empty.local');
     stage='wait for terminal.surface';
     await visible('terminal.surface');
-    await click('toolbar.ai');
+    await click('ai.strip');
     await send('SAVE_HISTORY');
     await waitForText('SAVED_RESPONSE');
     stage='wait for first turn to settle';

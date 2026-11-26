@@ -30,6 +30,23 @@ test "routing ambiguous negated quoted and group target intent creates no grant"
     try state.captureIntent(ctx, "这次在当前终端执行", null, .auto_idle);
     try std.testing.expect(!state.resolve(ctx, target, "pwd", .batch).trusted);
 }
+test "standalone user routing instruction requires the exact host selected handle, not the AI page or a namesake" {
+    var state: routing.State = .{};
+    var ctx = context();
+    ctx.binding = .{ .session = 9 };
+    try state.configure(ctx);
+    var grant: @import("tool_scope.zig").Scope = .{ .owner = ctx.binding, .members = .{}, .inventory = &.{@backingInt(target.session_id)}, .explicit_inventory = true };
+    try grant.explicit_targets.add(target);
+    const prompt = "这次在当前终端执行 `pwd`";
+    try std.testing.expectError(error.TargetOutsideScope, state.captureIntent(ctx, prompt, target, .ask));
+    try state.captureScopeIntent(ctx, prompt, target, .ask, grant);
+    const selected = state.resolve(ctx, target, "pwd", .batch);
+    try std.testing.expect(selected.trusted and !selected.approved and selected.route == .current_terminal);
+    try std.testing.expectError(error.TargetOutsideScope, state.captureScopeIntent(ctx, prompt, try target.nextGeneration(), .ask, grant));
+    grant.inventory = &.{};
+    try std.testing.expectError(error.TargetOutsideScope, state.captureScopeIntent(ctx, prompt, target, .ask, grant));
+}
+
 test "routing exact selection rejects command target generation and context drift" {
     var state: routing.State = .{};
     const ctx = context();

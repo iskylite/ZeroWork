@@ -30,7 +30,7 @@ matrix:for(const theme of ['dark','light','sauber'])for(const transparency of tr
  const log=await open(join(out,caseName+'.log'),'w');const app=spawn(join(prefix,'bin/zerowork'),[],{env:environment,stdio:['ignore',log.fd,log.fd]});
  const ended=new Promise<void>(r=>app.once('close',()=>r()));const item:any={theme,transparency,status:'running',isolated:iso,captures:[],geometry:[]};report.cases.push(item);
  try{
-  await h.waitForServerReady(60000);await h.resizeWindow(1440,900);await click('workspace.empty.local');await visible('terminal.surface');await click('toolbar.ai');await visible('ai.composer.execution');
+  await h.waitForServerReady(60000);await h.resizeWindow(1440,900);await click('workspace.empty.local');await visible('terminal.surface');await click('ai.strip');await visible('ai.composer.execution');
   for(const [mode,label]of modes){await click('ai.composer.execution');await click('ai.execution.'+mode);await h.waitFor(async()=>(await text('ai.composer.execution')).includes(label)||null,5000);}
   assert((await text('ai.composer.permission')).includes('确认后执行'));
   await click('ai.composer.execution');await click('ai.execution.retention');await click('ai.retention.keep');await click('ai.composer.execution');assert((await text('ai.execution.retention')).includes('保留任务会话'));await capture(item,caseName+'-menu-wide');await h.key('escape');
@@ -52,7 +52,7 @@ matrix:for(const theme of ['dark','light','sauber'])for(const transparency of tr
   await click('ai.composer.execution');await click('ai.execution.interactive');
   // Global draft save affects inherit and preserves an explicit conversation override.
   await click('toolbar.settings');await edit('settings.search','execution_mode');await visible('settings.field.execution_mode');await chooseSetting('execution_mode',2);await click('settings.save');await h.waitFor(async()=>/execution_mode\s*=\s*"isolated_exec"/.test(await readFile(configPath,'utf8'))||null,10000);await capture(item,caseName+'-settings-mode-saved');await click('settings.close');
-  if(!(await h.query('ai.composer.execution')).some(shown))await click('toolbar.ai');
+  if(!(await h.query('ai.composer.execution')).some(shown))await click('ai.strip');
   assert((await text('ai.composer.execution')).includes('交互式'),'explicit override preserved after global save');
   await click('ai.composer.execution');await click('ai.execution.isolated_exec');assert((await text('ai.composer.execution')).includes('批处理'));
   await click('toolbar.settings');await edit('settings.search','session_retention');await chooseSetting('session_retention',2);await click('settings.save');await h.waitFor(async()=>/session_retention\s*=\s*"keep"/.test(await readFile(configPath,'utf8'))||null,10000);await capture(item,caseName+'-settings-retention-saved');await click('settings.close');

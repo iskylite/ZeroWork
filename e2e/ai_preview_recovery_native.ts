@@ -109,7 +109,7 @@ await h.waitForServerReady(60000);
 assert((await h.resizeWindow(1440,1000)).ok);
 await click('workspace.empty.local');
 await visible('terminal.surface');
-await click('toolbar.ai');
+await click('ai.strip');
 await visible('ai.prompt');
 let panel=await visible('ai.panel');
 if(verifyFilePicker){

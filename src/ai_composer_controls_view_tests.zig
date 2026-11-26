@@ -734,7 +734,7 @@ test "native protocol model effort claims cannot enable an unsupported composer 
 //     f.enter(option);
 //     try std.testing.expectEqualStrings(f.models[0].id, f.last.?.action.model.model_id);
 // }
-// 
+//
 test "AI composer combined model card switches to a real binary thinking control" {
     var f: Fixture = undefined;
     try f.init();
@@ -991,7 +991,7 @@ test "AI composer retention selection is captured and stale execution menu canno
 //     try std.testing.expect(menu.globalRect().x >= 0 and menu.globalRect().y >= 0);
 //     try std.testing.expect(menu.globalRect().x + menu.globalRect().w <= f.cx.viewport.width);
 // }
-// 
+//
 test "AI composer menus keep owner based layers and title icon alignment across material settings" {
     const theme = Styles.theme;
     const previous = theme.currentName();
@@ -1112,7 +1112,7 @@ test "hidden maintenance composer releases a revoked projection before reopening
 //     try std.testing.expectApproxEqAbs(full_width, label.globalRect().w, 0.1);
 //     try std.testing.expectApproxEqAbs(natural_width, f.view.buttons[2].globalRect().w, 0.1);
 // }
-// 
+//
 test "AI composer reasoning popup stays horizontally stable while effort labels change" {
     var f: Fixture = undefined;
     try f.init();
@@ -1327,6 +1327,9 @@ test "AI workspace composer menu captures the displayed conversation and revisio
     f.click(f.view.buttons[0]);
     const menu = find(f.cx.root.?, "ai.attachment.menu").?;
     const choice = find(menu, "ai.attachment.workspace").?;
+    const space = find(menu, "ai.attachment.workspace.gap").?;
+    try std.testing.expect(ui.Color.eql(ui.Color.TRANSPARENT, space.getBackground()));
+    try std.testing.expectApproxEqAbs(@as(f32, 6), space.globalRect().h, 0.5);
     try std.testing.expectApproxEqAbs(@as(f32, 173), menu.globalRect().h, 0.5);
     try std.testing.expect(choice.globalRect().y + choice.globalRect().h <= menu.globalRect().y + menu.globalRect().h);
     try std.testing.expect(f.cx.focus_manager.current_focus == choice);

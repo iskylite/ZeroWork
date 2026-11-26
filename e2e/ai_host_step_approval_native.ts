@@ -46,7 +46,7 @@ const visible=(id:string)=>h.waitFor(async()=>(await h.query(id)).find(shown)??n
 const click=async(id:string)=>{await visible(id);assert((await h.clickTestId(id)).ok)};
 const report:any={status:'running',scope:'Isolated native App, real Local zsh and deterministic provider; no production App or remote host accessed.'};
 try{
- await h.waitForServerReady(60000);await h.resizeWindow(1200,900);await click('workspace.empty.local');await visible('terminal.surface');await click('toolbar.ai');await click('ai.prompt');await h.type_('在当前终端执行审批阶段验证');await click('ai.send');await visible('ai.host_approval');
+ await h.waitForServerReady(60000);await h.resizeWindow(1200,900);await click('workspace.empty.local');await visible('terminal.surface');await click('ai.strip');await click('ai.prompt');await h.type_('在当前终端执行审批阶段验证');await click('ai.send');await visible('ai.host_approval');
  const requestCount=requests;
  const panel=flat(await h.query('ai.panel'));
  assert(!panel.some((n:any)=>n.test_id==='ai.step.projection'&&n.text?.includes('printf APPROVAL_NATIVE_OK')),'unapproved request must not have an execution step');

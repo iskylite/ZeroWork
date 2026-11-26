@@ -74,7 +74,7 @@ const geometry=async(name:string,expectedId?:number)=>{
 };
 try{
  await h.waitForServerReady(60000);assert.equal(Number(JSON.parse(await readFile(join(rpc,'owner.json'),'utf8')).pid),app.pid);
- await h.resizeWindow(1440,1000);await click('workspace.empty.local');await click('toolbar.ai');
+ await h.resizeWindow(1440,1000);await click('workspace.empty.local');await click('ai.strip');
  await click('ai.prompt');await h.type_('检查 Markdown 窗口缩放');await click('ai.send');
  const initial=await geometry('01-streaming-small');
  const edge=await visible('ai.float.resize.e'),x=edge.rect.x+edge.rect.w/2,y=edge.rect.y+edge.rect.h/2;
@@ -91,7 +91,7 @@ try{
  await h.resizeWindow(860,600);const compact=await geometry('05-window-compact');assert(compact.rect.w<wide.rect.w);
  await h.resizeWindow(1440,1000);await geometry('06-window-restored');
  await click('ai.maximize');await geometry('07-float-restored');
- await click('ai.collapse');await click('toolbar.ai');await geometry('08-reopened');
+ await click('ai.collapse');await click('ai.strip');await geometry('08-reopened');
  const natural=wide.children[0].rect.w;assert(natural<wide.rect.w,'Long table should stop at its content width');
  for(const item of report.geometry)assert(Math.abs(item.content.w-Math.max(400,Math.min(natural,item.viewport.w)))<.5,'Long table should fit the viewport up to its content width');
  const overflow=async()=>h.waitFor(async()=>(await h.query('ai.message.table')).find((n:any)=>shown(n)&&n.children[0]?.children[0]?.children.length===8)??null,5000);

@@ -32,7 +32,7 @@ const click=async(id:string)=>{await visible(id);assert((await h.clickTestId(id)
 const report:any={status:'running',checks:[]};
 try{
  await h.waitForServerReady();await h.resizeWindow(1440,1000);
- await click('workspace.empty.local');await click('toolbar.ai');await click('ai.prompt');
+ await click('workspace.empty.local');await click('ai.strip');await click('ai.prompt');
  await h.type_('检查复制和代码按钮');await click('ai.send');
  await visible('ai.turn.complete');await visible('ai.message.code.copy');
  const cap=async(name:string)=>{await h.mouseMove(1,1);assert((await h.screenshot(join(out,name+'.png'))).ok);await writeFile(join(out,name+'.json'),JSON.stringify(await h.query('ai.panel'),null,2));};

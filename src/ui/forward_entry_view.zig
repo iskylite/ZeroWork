@@ -16,6 +16,7 @@ const Entry = struct {
     session: bool,
     button: *ui.Node = undefined,
     dot: *ui.Node = undefined,
+    disabled: *ui.Signal(bool) = undefined,
     detail: *ui.Node = undefined,
 
     fn activate(self: *Entry) void {
@@ -36,11 +37,12 @@ pub const View = struct {
     popover: ui.widgets.popover.PopoverResult = undefined,
     session_entry: Entry = undefined,
     background_entry: Entry = undefined,
+    trigger_node: ?*ui.Node = null,
     anchor: ui.ComputedRect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
 
     pub fn mount(cx: *ui.Cx, scope: *ui.Scope, hooks: Hooks) !*View {
         const self = try scope.createState(View, .{ .cx = cx, .hooks = hooks });
-        self.popover = try ui.widgets.Popover(.{ .group = @import("floating_surface.zig").workspace_popup, .trigger = .manual, .position = .top_end, .offset = .{ .static = 8 }, .width = @as(f32, 320), .max_width = @as(f32, 320), .constrain_width_to_viewport = true, .close_on_escape = true, .close_on_outside_click = true, .anchor = .{ .virtual = .{ .ctx = self, .getRect = anchorRect } } }).mount(scope, cx);
+        self.popover = try ui.widgets.Popover(.{ .group = @import("floating_surface.zig").workspace_popup, .trigger = .manual, .position = .top_end, .flip = true, .shift_main_axis = true, .viewport_padding = 8, .offset = .{ .static = 8 }, .width = @as(f32, 320), .max_width = @as(f32, 320), .constrain_width_to_viewport = true, .close_on_escape = true, .close_on_outside_click = true, .anchor = .{ .virtual = .{ .ctx = self, .getRect = anchorRect } } }).mount(scope, cx);
         self.popover.trigger.setDisplay(.none);
         self.popover.content.meta.ownership.meta.test_id = "workspace.mascot.forward.menu";
         self.popover.content.setStyleInline(cx.allocator, .{
@@ -53,6 +55,7 @@ pub const View = struct {
             .border = .{ .width = 0, .color = ui.Color.TRANSPARENT, .radius = 11 },
             .shadow = .{ .offset_y = 12, .blur = 24, .color = T.current().shadow },
         });
+        try cx.root.?.appendChild(cx.allocator, self.popover.wrapper);
         const header = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 26 }, .direction = .row, .align_items = .center, .gap = 8, .padding = .{ .left = 6, .right = 6 }, .flex_shrink = 0 }, .{});
         try header.appendChild(cx.allocator, try T.icon(cx, ui.icons.get("plug-zap").?, "accent", .{ .width = .{ .px = 15 }, .height = .{ .px = 15 }, .flex_shrink = 0 }));
         try header.appendChild(cx.allocator, try ui.text(cx, "端口转发", .{ .font_size = 12.5, .font_weight = 600, .color = T.current().fg_1 }));
@@ -72,7 +75,8 @@ pub const View = struct {
     fn row(self: *View, scope: *ui.Scope, title: []const u8, test_id: []const u8, session: bool) !Entry {
         const cx = self.cx;
         const state = try scope.createState(Entry, .{ .view = self, .session = session });
-        const button = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = title, .on_click = cx.on(Entry, state, Entry.activate) }).mount(scope, cx);
+        state.disabled = try scope.createSignal(bool, true);
+        const button = try ui.widgets.Button(.{ .variant = .ghost, .disabled = state.disabled, .a11y_label = title, .on_click = cx.on(Entry, state, Entry.activate) }).mount(scope, cx);
         button.meta.ownership.meta.test_id = test_id;
         button.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = 46 }, .direction = .row, .align_items = .center, .gap = 10, .padding = .{ .left = 10, .right = 10 }, .background = ui.Color.TRANSPARENT, .border = .{ .width = 0, .color = ui.Color.TRANSPARENT, .radius = 8 } });
         const dot = try ui.box(cx, .{ .width = .{ .px = 7 }, .height = .{ .px = 7 }, .background = T.current().fg_3, .border = .{ .width = 0, .color = T.current().fg_3, .radius = 4 }, .flex_shrink = 0 }, .{});
@@ -106,14 +110,17 @@ pub const View = struct {
     }
 
     fn apply(cx: *ui.Cx, entry: *Entry, value: Row) !void {
-        entry.button.setDisplay(if (value.enabled) .flex else .none);
-        if (!value.enabled) return;
-        try entry.detail.setTextContent(cx.allocator, value.detail);
+        // An empty source is still a useful status, not a blank menu row.
+        if (entry.disabled.peek() != !value.enabled) entry.disabled.set(!value.enabled);
+        const detail = if (value.detail.len != 0) value.detail else if (entry.session) "当前会话无转发" else "无后台转发";
+        if (entry.detail.getText() == null or !std.mem.eql(u8, entry.detail.getText().?.content, detail))
+            try entry.detail.setTextContent(cx.allocator, detail);
         entry.dot.setBackground(if (value.active) T.current().ok else T.current().fg_3);
     }
 
     fn anchorRect(raw: *anyopaque) ui.widgets.popover.AnchorRect {
         const self: *View = @ptrCast(@alignCast(raw));
-        return .{ .x = self.anchor.x, .y = self.anchor.y, .w = self.anchor.w, .h = self.anchor.h };
+        const r = if (self.trigger_node) |node| node.globalRect() else self.anchor;
+        return .{ .x = r.x, .y = r.y, .w = r.w, .h = r.h };
     }
 };

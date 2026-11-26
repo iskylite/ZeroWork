@@ -51,7 +51,7 @@ const click = async (id: string) => { await visible(id); const result = await h.
 const menu = async () => { if (!(await h.query('ai.model.menu')).some(shown)) { await click('ai.composer.model'); await h.sleep(180); } await visible('ai.model.menu'); };
 const expectEffort = async (name: string) => { await menu(); await h.waitFor(async () => (await visible('ai.effort.value')).text === name || null, 10000); };
 const choose = async (key: string | null, name: string) => { await menu(); await click('ai.effort.slider.track'); if (key) await h.key(key); await expectEffort(name); };
-const newLocal = async () => { if ((await h.query('ai.panel')).some(shown)) await click('ai.collapse'); await click('toolbar.new_session'); await click('session.menu.local'); await visible('terminal.surface'); await click('toolbar.ai'); };
+const newLocal = async () => { if ((await h.query('ai.panel')).some(shown)) await click('ai.collapse'); await click('toolbar.new_session'); await click('session.menu.local'); await visible('terminal.surface'); await click('ai.strip'); };
 const newConversation = async () => {
     await click('ai.session.new'); await h.sleep(160);
     if ((await h.query('ai.session.close.accept')).some(shown)) await click('ai.session.close.accept');
@@ -86,7 +86,7 @@ const send = async (effort: string, model = 'reasoner') => {
 };
 const report: any = {status: 'running', checks: []};
 try {
-    await launch(); await click('workspace.empty.local'); await visible('terminal.surface'); await click('toolbar.ai');
+    await launch(); await click('workspace.empty.local'); await visible('terminal.surface'); await click('ai.strip');
     await expectEffort('低'); await h.key('escape');
     const first = flat(await h.query('tabs.strip')).find(n => /^tabs\.tab\.\d+$/.test(n.test_id ?? '')).test_id;
     await newLocal(); await expectEffort('低');
@@ -96,16 +96,16 @@ try {
     assert(/default_effort\s*=\s*"high"/.test(await readFile(configPath, 'utf8')));
     await h.key('escape'); await expectEffort('高');
     assert((await h.screenshot(join(out, 'selected-high.png'))).ok);
-    await h.key('escape'); await click('ai.collapse'); await click(first); await click('toolbar.ai'); await expectEffort('高'); await send('high');
+    await h.key('escape'); await click('ai.collapse'); await click(first); await click('ai.strip'); await expectEffort('高'); await send('high');
     report.checks.push('Selection is saved immediately; an existing unmodified session displays and sends high.');
     await choose(null, '中');
     assert(/default_effort\s*=\s*"medium"/.test(await readFile(configPath, 'utf8')));
-    await h.key('escape'); await click('ai.collapse'); await click(second); await click('toolbar.ai'); await expectEffort('高');
+    await h.key('escape'); await click('ai.collapse'); await click(second); await click('ai.strip'); await expectEffort('高');
     report.checks.push('An explicit choice in another existing session stays independent.');
     await h.key('escape'); await newConversation(); await expectEffort('中'); await send('medium');
     report.checks.push('A new conversation inherits the most recently saved default and sends it.');
     await quit(); await launch();
-    if ((await h.query('workspace.empty.local')).some(shown)) { await click('workspace.empty.local'); await visible('terminal.surface'); await click('toolbar.ai'); }
+    if ((await h.query('workspace.empty.local')).some(shown)) { await click('workspace.empty.local'); await visible('terminal.surface'); await click('ai.strip'); }
     else await newLocal();
     await expectEffort('中'); await send('medium');
     report.checks.push('Restarting the app restores the saved effort and sends the same value.');

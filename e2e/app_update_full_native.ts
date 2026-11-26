@@ -49,7 +49,7 @@ const report:any={status:'running',case:force?'force-with-unsent-input':'delete-
 async function transaction(){const active=await readJSON(join(root,'active.json'));if(active?.transaction)txn=active.transaction;return txn?readJSON(join(txn,'record.json')):null;}
 try{
  await h.waitForServerReady();await h.resizeWindow(1100,800);const initial=await route();assert.equal(initial.pid,app.pid);assert.equal(initial.app_version,'0.3.0-rc1');run('codesign',['--verify','--deep','--strict',target]);report.checks.push('Starting the real signed app and applying its Dock icon leaves the installed bundle signature valid');
- await click('workspace.empty.local');await visible('terminal.surface');await click('toolbar.ai');await click('ai.prompt');await h.type_('DRAFT_BEFORE_FULL_UPDATE');
+ await click('workspace.empty.local');await visible('terminal.surface');await click('ai.strip');await click('ai.prompt');await h.type_('DRAFT_BEFORE_FULL_UPDATE');
  await route('fixture_feed',{envelope,archive});await route('open');
  await h.waitFor(async()=> (await route()).update_state===2||null,15000);assert((await text('update.primary')).includes('下载更新'));await click('update.primary');
  const download=await h.waitFor(async()=>{const s=await route();assert.notEqual(s.update_state,10,JSON.stringify(s));return s.received>0?s:null;},15000);report.download=download;await cap('01-downloaded-bytes');
@@ -61,7 +61,7 @@ try{
  await click('update.cancel');
  await click('ai.session.new');await click('ai.session.close.accept');await h.mouseMove(1,1);await click('ai.sessions');
  const menu=await visible('ai.sessions.menu'),ids=[...new Set(flat([menu]).filter(shown).map(n=>n.test_id??'').filter(id=>/^ai.session.delete.\d+$/.test(id)))];assert(ids.length>0);
- for(const [i,id] of ids.entries()){await click(id);await click('ai.session.close.accept');await h.waitFor(async()=>!(await h.query(id)).some(shown)||null);if(i<ids.length-1){if(!(await h.query('ai.panel')).some(shown))await click('toolbar.ai');await click('ai.sessions');}}
+ for(const [i,id] of ids.entries()){await click(id);await click('ai.session.close.accept');await h.waitFor(async()=>!(await h.query(id)).some(shown)||null);if(i<ids.length-1){if(!(await h.query('ai.panel')).some(shown))await click('ai.strip');await click('ai.sessions');}}
  const drafts=await route('drafts');for(const w of drafts.windows){assert.equal(w.prompt_len,0);assert.equal(w.legacy_reason,null);for(const state of w.states){assert.equal(state.draft_len,0);assert.equal(state.journal_draft_len,0);}}
  await route('open');await visible('update.modal');assert.equal((await route()).message,'');await click('update.primary');await h.waitFor(async()=> (await route()).phase==='confirm'||null);assert.equal((await route()).allow_unsaved,false);await cap('03-install-confirm');await click('update.primary');
  }

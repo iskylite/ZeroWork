@@ -188,7 +188,7 @@ async function normalQuit(){
 }
 try{
  await h.waitForServerReady(60000);assert.equal(Number(JSON.parse(await readFile(join(rpc,'owner.json'),'utf8')).pid),app.pid);
- await h.resizeWindow(1440,900);await click('workspace.empty.local');await visible('terminal.surface');await h.sleep(700);await click('toolbar.ai');await click('ai.maximize');await click('ai.prompt');
+ await h.resizeWindow(1440,900);await click('workspace.empty.local');await visible('terminal.surface');await h.sleep(700);await click('ai.strip');await click('ai.maximize');await click('ai.prompt');
  const prompt=`这是一次获准的本机只读诊断，只有本轮隔离 Local 终端可用。请先批量调用 host.get_current_context 和 host.list_sessions，从真实结果取得引用和可信 PTY 状态。auto 模式优先直接使用本轮已创建的 Local；若实际策略必须 task-owned，才创建一个真实 group，刷新上下文，然后用来源 Local 的 source_ref、new_only 打开一个工作会话并等待就绪。不需要为了形式创建组。只允许调用一次 host.run_in_terminal，命令必须逐字为：\n${command}\n本次仅批准这个只向标准输出打印随机标记并以 false 结束的固定命令；禁止其他命令、run_command、输入、重跑、重连、关闭。随机标记只能从实际执行输出读取，禁止编造。run 返回后用 host.get_execution 或 host.wait_execution 按真实 execution_ref 获取前台进程、退出码、输出与保存回执；未结束时继续有界只读等待，unknown 必须如实报告，不得用新 key 重放。工具 status=succeeded 只说明查询成功，不代表前台 exit 0。最终只输出 JSON：marker、foreground_finished、exit_code、interval_saved、output_scope、output_attribution、explanation。各字段根据实际回执填写；explanation 用中文说明前台结果、观测片段是否保存，以及该输出范围对同 PTY 输出归属和前台结束后后台输出的限制，不能声称完整专属输出。`;
  await h.type_(prompt);await click('ai.send');const approved=new Set<string>(),started=performance.now();
  while(performance.now()-started<240000){

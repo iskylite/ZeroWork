@@ -37,7 +37,7 @@ fn resumedHistoryCard(_: *const ui.ThemeTokens) ui.BoxStyle {
         .margin = .{ .top = 4, .bottom = 4 },
         .padding = ui.Padding.all(12),
         .background = ui.Color.lerp(surface, accent, 0.08),
-        .border = .{ .width = 1, .radius = 10, .color = ui.Color.lerp(surface, accent, 0.32) },
+        .border = .{ .width = 0, .radius = 10 },
         .flex_shrink = 0,
     };
 }

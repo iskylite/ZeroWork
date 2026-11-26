@@ -36,7 +36,7 @@ try{
   async function capture(stage:string,ids:string[]){await h.sleep(250);const path=join(out,name+'-'+stage+'.png');assert((await h.screenshot(path)).ok);await writeFile(path.replace('.png','.json'),JSON.stringify(Object.fromEntries(await Promise.all(ids.map(async id=>[id,await h.query(id)]))),null,2));item.captures.push(path);}
   try{
    await h.waitForServerReady();await h.resizeWindow(1440,900);
-   await click('workspace.empty.local');await visible('terminal.surface');await click('toolbar.ai');await visible('ai.prompt');
+   await click('workspace.empty.local');await visible('terminal.surface');await click('ai.strip');await visible('ai.prompt');
    await capture('recent',['ai.panel','ai.empty.recent','ai.strip.lip']);
    await click('ai.prompt');await h.type_('请检查主题和全局透明度。');await click('ai.send');
    await visible('ai.message.user.bubble');await h.waitFor(async()=>!(await h.query('ai.stop')).some(shown)||null,15000);

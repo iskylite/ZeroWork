@@ -57,12 +57,12 @@ const capture=async(name:string)=>{await h.mouseMove(1,1);await h.sleep(200);ass
 const journal=async()=>String(await readFile(join(data,'ai-sessions-active.jsonl'),'utf8')).trim().split('\n').map(line=>JSON.parse(line));
 async function endConversation(){await click('ai.close');await click('ai.close.confirmation.confirm');await absent('ai.panel');await visible('terminal.surface')}
 async function restore(){
- await click('toolbar.ai');await click('ai.sessions');await click('ai.session.restore.1');
+ await click('ai.strip');await click('ai.sessions');await click('ai.session.restore.1');
  await h.waitFor(async()=>{if((await h.query('ai.session.close.accept')).some(shown))await click('ai.session.close.accept');return !(await h.query('ai.sessions.menu')).some(shown)&&!(await h.query('ai.session.close.confirmation')).some(shown)||null},15000);
  await visible('ai.prompt');
 }
 try{
- await h.waitForServerReady(60000);await h.resizeWindow(1200,900);await click('workspace.empty.local');await visible('terminal.surface');await click('toolbar.ai');
+ await h.waitForServerReady(60000);await h.resizeWindow(1200,900);await click('workspace.empty.local');await visible('terminal.surface');await click('ai.strip');
  assert.equal(requests.length,0);
  await send('WORKER_FIRST 读取当前会话信息');await h.waitFor(async()=>text(await h.query('ai.panel')).includes('WORKER_FIRST_FINISHED')||null,20000);await absent('ai.stop');assert.equal(requests.length,2);
  await input('解绑后保留的草稿');await capture('01-completed');await endConversation();

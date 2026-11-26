@@ -203,8 +203,7 @@ try {
   if (await find('settings.confirmation.save')) await click('settings.confirmation.save');
   await click('workspace.empty.local');
   await visible('terminal.surface');
-  if (!await find('toolbar.ai')) await click('toolbar.expand');
-  await click('toolbar.ai');
+  await click('ai.strip');
   await click('ai.composer.mode');
   const mode = await visible('ai.mode.menu');
   assert.doesNotMatch(text(mode), /角色模板/);

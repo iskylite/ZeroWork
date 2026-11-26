@@ -115,7 +115,7 @@ try{
  const after=await readFile(join(data,'hosts.toml'),'utf8');assert(!after.includes(secret),'Connect-time secret is never persisted');assert.equal(after,saved);report.checks.push('Public per-owner connect-time secret challenge precedes ready; answer remains ephemeral','Independent non-terminal content renders a real synthetic RGBA texture without terminal/exec placeholders');await capture('02-real-nonterminal-canvas');
  const tab=(nodes(await visible('tabs.strip')).find(n=>shown(n)&&/^tabs\.tab\.\d+$/.test(n.test_id??'')));assert(tab);report.tab=tab.test_id;
  if(opts['--no-ai']!=='1'){
-  await click('toolbar.ai');await visible('ai.prompt');
+  await click('ai.strip');await visible('ai.prompt');
   const observe=await turn('03-observe','Call fixture_uprobe__observe exactly once for the current assistant_session_id. Do not call another tool. After the actual image is received, describe the visible synthetic grid and pointer in one short sentence.');
   verifyTurn(observe,'observe');
   const observed=observe.flatMap(e=>e.event==='wire_request'?e.images??[]:[]);assert(observed.some(i=>i.mime==='image/png'&&i.width===64&&i.height===40),'Actual serialized provider request contains the 64x40 PNG observation');

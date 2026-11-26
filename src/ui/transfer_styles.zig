@@ -152,9 +152,6 @@ pub fn topFade(_: *const ui.ThemeTokens) ui.BoxStyle {
     const c = theme.current();
     return .{ .width = .fill(), .height = .{ .px = 72 }, .position = .absolute, .inset = .{ .left = .{ .px = 0 }, .top = .{ .px = 0 } }, .gradient = .{ .from = c.well_border.withAlpha(48), .to = c.overlay.withAlpha(0) }, .border = .{ .radius = 14 }, .hit_behavior = .pass_through };
 }
-pub fn grip(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .position = .absolute, .inset = .{ .top = .{ .px = 7 }, .left = .{ .percent = 50 } }, .width = .{ .px = 32 }, .height = .{ .px = 3 }, .margin = .{ .left = -16 }, .background = theme.current().fg_3, .border = .{ .radius = 1.5 }, .hit_behavior = .pass_through };
-}
 
 // Shared compact transfer row and bounded popover presentations.
 pub const v3_card_height: f32 = row_height;

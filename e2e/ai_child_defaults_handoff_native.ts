@@ -57,7 +57,7 @@ try{
  const saved=await readFile(join(data,'config.toml'),'utf8');assert(saved.includes('child_context_mode = "inherit"'));
  await setting('settings.field.child_reuse_policy');await click('settings.child_reuse.model');await click('settings.revert');
  await h.resizeWindow(860,480);await scrollTo('settings.field.child_reuse_policy');await capture('02-compact-reverted');assert.equal(await readFile(join(data,'config.toml'),'utf8'),saved);
- await click('settings.close');await h.resizeWindow(1200,900);await click('workspace.empty.local');await visible('terminal.surface');await click('toolbar.ai');
+ await click('settings.close');await h.resizeWindow(1200,900);await click('workspace.empty.local');await visible('terminal.surface');await click('ai.strip');
  await click('ai.prompt');await h.type_('ROOT_HANDOFF 委派子任务后创建组，保留原根任务');await click('ai.send');
  await h.waitFor(async()=>{if(fixtureError)throw Error(fixtureError);if(text(await h.query('ai.panel')).includes('HANDOFF_COMPLETE'))return true;for(const id of ['ai.interaction.approve','ai.host_approval.accept']){const q=await h.query(id);if(q.some(shown)){await h.clickTestId(id)}}return null},30000);
  await h.waitFor(async()=>!(await h.query('ai.stop')).some(shown)||null,15000);assert.equal(rootRound,5);

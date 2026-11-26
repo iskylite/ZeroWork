@@ -335,8 +335,14 @@ test "connection details view small viewport keeps a bounded scroll region and r
     f.cx.layout();
     try f.view.show(try snapshot(9), f.trigger, 440);
     f.cx.layout();
-    try std.testing.expect(f.view.chrome.globalRect().w <= 464);
-    try std.testing.expect(f.view.chrome.globalRect().h <= 426);
+    const panel = f.view.chrome.globalRect();
+    const anchor_rect = f.trigger.globalRect();
+    try std.testing.expect(panel.w <= 464);
+    // A mounted trigger supplies its real position. The status bar's
+    // fallback coordinate is not a cap on the available space anymore.
+    // This fixture lays out the panel content, not the compositor's portal
+    // translation. Validate the available height against the live anchor.
+    try std.testing.expectApproxEqAbs(anchor_rect.y - S.anchor_gap - S.margin, panel.h, 0.1);
     try std.testing.expect(f.view.pointer.?.style.display == .none);
     const footer = findId(f.view.chrome, "connection.details.footer").?.globalRect();
     try std.testing.expect(footer.y + footer.h <= f.view.chrome.globalRect().y + f.view.chrome.globalRect().h);

@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="900" viewBox="0 0 1440 900" role="img" aria-labelledby="title">
+  <title id="title">ZeroWork · 独立 AI 对话与文件检查器</title>
+  <defs>
+    <filter id="tool-shadow" x="-50%" y="-60%" width="200%" height="240%"><feDropShadow dx="0" dy="3" stdDeviation="4" flood-color="#18181b" flood-opacity=".07"/></filter>
+    <filter id="panel-shadow" x="-10%" y="-10%" width="120%" height="125%"><feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#18181b" flood-opacity=".06"/></filter>
+    <symbol id="terminal" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="m7 9 3 3-3 3m6 0h4"/></symbol>
+    <symbol id="shield" viewBox="0 0 24 24"><path d="M12 22c4-2 7-5 7-10V6l-7-3-7 3v6c0 5 3 8 7 10zm-3-10 2 2 4-4"/></symbol>
+    <symbol id="chat" viewBox="0 0 24 24"><path d="M21 14a4 4 0 0 1-4 4H8l-5 4V6a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z"/></symbol>
+    <symbol id="pane" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M15 4v16"/></symbol>
+    <symbol id="search" viewBox="0 0 24 24"><circle cx="10" cy="10" r="6.4"/><path d="m15 15 5 5"/></symbol>
+    <symbol id="plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="close" viewBox="0 0 24 24"><path d="m6 6 12 12M6 18 18 6"/></symbol>
+    <symbol id="history" viewBox="0 0 24 24"><path d="M3 10a9 9 0 1 1 2.5 8M3 5v5h5m4-4v6l4 2"/></symbol>
+    <symbol id="down" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+    <symbol id="right" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></symbol>
+    <symbol id="folder" viewBox="0 0 24 24"><path d="M3 7V5a2 2 0 0 1 2-2h5l3 3h6a2 2 0 0 1 2 2v11H3z"/></symbol>
+    <symbol id="file" viewBox="0 0 24 24"><path d="M5 3h9l5 5v13H5zM14 3v6h5M8 13h8M8 16h6"/></symbol>
+    <symbol id="link" viewBox="0 0 24 24"><path d="m10 14 4-4m-5 3-2 2a3 3 0 0 1-4-4l4-4a3 3 0 0 1 5 1m0 8a3 3 0 0 0 5 1l4-4a3 3 0 1 0-4-4l-2 2"/></symbol>
+    <symbol id="spark" viewBox="0 0 24 24"><path d="m9 5 2.5 6L17 13l-5.5 2L9 21l-2-6-5-2 5-2zm9-3 1 3 3 1-3 1-1 3-1-3-3-1 3-1z"/></symbol>
+    <symbol id="bot" viewBox="0 0 24 24"><rect x="3" y="8" width="18" height="13" rx="3"/><path d="M12 8V4h-2M7 13v3m10-3v3M1 12v5m22-5v5"/></symbol>
+    <symbol id="send" viewBox="0 0 24 24"><path d="M12 19V5m-6 6 6-6 6 6"/></symbol>
+    <symbol id="bell" viewBox="0 0 24 24"><path d="M4 17h16l-2-3V9a6 6 0 1 0-12 0v5zm6 3a2 2 0 0 0 4 0"/></symbol>
+    <symbol id="pin" viewBox="0 0 24 24"><path d="m13 3 8 8-3 1-3 4-7-7 4-3zm-3 11-6 6"/></symbol>
+    <symbol id="palette" viewBox="0 0 24 24"><path d="M21 11a9 9 0 1 0-9 10c3 0 2-2 2-3a2 2 0 0 1 2-2h2q3 0 3-5z"/><path d="M7 10h.01m3-3h.01m4 0h.01m3 3h.01" stroke-width="2.8"/></symbol>
+    <symbol id="settings" viewBox="0 0 24 24"><path d="m10 3 4 0 1 3 3 1 2 3-2 2 1 3-2 3-3-1-2 3-3-1-1-3-3-1-1-3 2-2-1-3 3-2 2 1z"/><circle cx="12" cy="11.7" r="2.8"/></symbol>
+    <style>
+      text{font-family:Inter,-apple-system,BlinkMacSystemFont,'PingFang SC',sans-serif;fill:#18181b;font-size:13px}
+      .sec{fill:#5b5b65}.muted{fill:#676771}.small{font-size:11px}.title{font-weight:600}.h{font-size:14px;font-weight:620}
+      .mono{font-family:'SF Mono',Menlo,monospace;font-size:12px}.s{fill:none;stroke:currentColor;stroke-width:1.65;stroke-linecap:round;stroke-linejoin:round;color:#5b5b65}.brand{color:#4352c7}
+      .panel{fill:#f6f6f7}.control{fill:#efeff2}.sel{fill:#eaedfd}.msg{fill:#fff}.busy{fill:#15b8a6}
+    </style>
+  </defs>
+  <rect width="1440" height="900" rx="16" fill="#fff"/>
+  <g id="window-controls"><circle cx="30" cy="30" r="6" fill="#ff625b"/><circle cx="50" cy="30" r="6" fill="#ffbf44"/><circle cx="70" cy="30" r="6" fill="#35c84a"/></g>
+  <g id="workspace-tabs" transform="translate(262 12)">
+    <rect width="344" height="36" rx="18" fill="#fff" filter="url(#tool-shadow)"/>
+    <g id="local-tab" transform="translate(4 4)"><use href="#terminal" x="19" y="7" width="14" height="14" class="s"/><circle cx="32" cy="8" r="3" class="busy"/><text x="43" y="19" class="sec">Local Terminal</text><use href="#close" x="148" y="8" width="12" height="12" class="s"/></g>
+    <g id="independent-ai-tab" transform="translate(174 4)"><rect width="134" height="28" rx="7" class="sel"/><use href="#spark" x="19" y="7" width="14" height="14" class="s brand"/><circle cx="32" cy="8" r="3" class="busy"/><text x="43" y="19" class="title">AI Agent</text><use href="#close" x="114" y="8" width="12" height="12" class="s"/></g>
+    <use href="#plus" x="318" y="10" width="16" height="16" class="s"/>
+  </g>
+  <g id="window-tools" transform="translate(1264 12)"><rect width="164" height="36" rx="18" fill="#fff" filter="url(#tool-shadow)"/><g class="s"><use href="#pin" x="10" y="10" width="16" height="16"/><use href="#history" x="42" y="10" width="16" height="16"/><use href="#bell" x="74" y="10" width="16" height="16"/><use href="#palette" x="106" y="10" width="16" height="16"/><use href="#settings" x="138" y="10" width="16" height="16"/></g></g>
+  <g id="conversation-rail" transform="translate(12 60)">
+    <rect width="238" height="828" rx="16" class="panel" filter="url(#panel-shadow)"/>
+    <use href="#chat" x="12" y="14" width="16" height="16" class="s brand"/><text x="36" y="27" class="title">AI 对话</text>
+    <use href="#history" x="147" y="14" width="15" height="15" class="s"/><use href="#plus" x="177" y="14" width="16" height="16" class="s"/><use href="#pane" x="207" y="14" width="15" height="15" class="s"/>
+    <rect x="10" y="46" width="218" height="34" rx="8" fill="#efefef"/><use href="#search" x="20" y="56" width="14" height="14" class="s"/><text x="42" y="68" class="sec">搜索历史对话…</text>
+    <rect x="10" y="90" width="218" height="46" rx="9" class="sel"/><use href="#chat" x="19" y="106" width="14" height="14" class="s"/><text x="42" y="109" class="title">检查构建日志</text><text x="42" y="126" class="sec small">当前对话</text>
+    <use href="#chat" x="19" y="155" width="14" height="14" class="s"/><text x="42" y="158">比较测试结果</text><text x="42" y="175" class="sec small">昨天</text>
+  </g>
+  <g id="conversation" transform="translate(262 60)">
+    <text x="14" y="27" class="h">检查构建日志</text><rect x="117" y="11" width="156" height="22" rx="11" class="control"/><use href="#spark" x="124" y="15" width="13" height="13" class="s brand"/><text x="141" y="26" class="small sec">独立 AI · 1 个关联目标</text>
+    <rect x="609" y="8" width="108" height="28" rx="14" class="control"/><use href="#folder" x="618" y="15" width="14" height="14" class="s"/><text x="637" y="26" class="sec small">ZeroWork</text><use href="#down" x="694" y="16" width="12" height="12" class="s"/>
+    <rect x="726" y="8" width="74" height="28" rx="14" class="sel"/><use href="#pane" x="735" y="15" width="14" height="14" class="s brand"/><text x="754" y="26" class="small sec">检查器</text>
+    <rect x="479" y="82" width="307" height="40" rx="13" fill="#4f5ed9"/><text x="496" y="107" class="msg">请汇总这次构建的错误和下一步检查项。</text>
+    <text x="25" y="176">构建在链接阶段中断：编译器没有找到目标库。</text><text x="25" y="207">先确认本机库文件的架构，再核对构建配置里的搜索路径。</text>
+    <g id="composer" transform="translate(0 738)"><rect width="814" height="90" rx="12" fill="#f6f6f7"/><text x="13" y="29" class="sec">继续提问…</text>
+      <g transform="translate(12 54)"><rect width="26" height="26" rx="8" fill="#efeff2"/><use href="#plus" x="5" y="5" width="16" height="16" class="s"/>
+        <rect x="34" width="94" height="26" rx="8" fill="#efeff2"/><use href="#link" x="41" y="6" width="13" height="13" class="s"/><text x="59" y="17" class="small">已关联 1</text><use href="#down" x="109" y="7" width="12" height="12" class="s"/>
+        <rect x="134" width="103" height="26" rx="8" fill="#efeff2"/><use href="#shield" x="141" y="6" width="13" height="13" class="s"/><text x="159" y="17" class="small">确认后执行</text><use href="#down" x="219" y="7" width="12" height="12" class="s"/>
+        <rect x="243" width="91" height="26" rx="8" fill="#efeff2"/><use href="#terminal" x="250" y="6" width="13" height="13" class="s"/><text x="266" y="17" class="small">自行判断</text><use href="#down" x="316" y="7" width="12" height="12" class="s"/>
+        <rect x="340" width="73" height="26" rx="8" fill="#efeff2"/><use href="#bot" x="347" y="6" width="13" height="13" class="s"/><text x="365" y="17" class="small">Auto</text><use href="#down" x="396" y="7" width="12" height="12" class="s"/>
+        <rect x="539" width="52" height="26" rx="8" fill="#efeff2"/><circle cx="551" cy="13" r="4" fill="none" stroke="#676771" stroke-width="1"/><text x="560" y="17" class="small sec">6%</text>
+        <rect x="597" width="155" height="26" rx="8" fill="#efeff2"/><text x="607" y="17" class="small">DeepSeek V4 · 高</text><use href="#down" x="731" y="7" width="12" height="12" class="s"/><rect x="763" width="27" height="26" rx="8" fill="#efeff2"/><use href="#send" x="769" y="5" width="15" height="15" class="s"/>
+      </g>
+    </g>
+  </g>
+  <g id="inspector" transform="translate(1088 60)">
+    <rect width="340" height="828" rx="16" class="panel" filter="url(#panel-shadow)"/><use href="#pane" x="12" y="14" width="16" height="16" class="s brand"/><text x="35" y="27" class="title">检查器</text><use href="#close" x="309" y="14" width="15" height="15" class="s"/>
+    <g id="inspector-segments" transform="translate(8 44)"><rect width="324" height="32" rx="9" fill="#efefef"/><rect x="3" y="3" width="62" height="26" rx="7" class="sel"/>
+      <g text-anchor="middle"><text x="34" y="21" class="small title">文件</text><text x="98" y="21" class="small sec">成员</text><text x="162" y="21" class="small sec">留言板</text><text x="226" y="21" class="small sec">关系图</text><text x="290" y="21" class="small sec">轮次</text></g>
+    </g>
+    <g transform="translate(12 92)"><use href="#down" x="2" y="6" width="12" height="12" class="s"/><use href="#folder" x="19" y="4" width="16" height="16" class="s brand"/><text x="43" y="17">src</text><rect x="-4" y="24" width="324" height="25" rx="5" fill="#eaedfd"/><use href="#file" x="34" y="31" width="14" height="14" class="s"/><text x="55" y="43">main.zig</text><use href="#file" x="18" y="58" width="14" height="14" class="s"/><text x="39" y="70">build.zig</text><use href="#file" x="18" y="85" width="14" height="14" class="s"/><text x="39" y="97">README.md</text></g>
+    <g id="file-preview" transform="translate(8 610)"><rect width="324" height="210" rx="8" class="control"/><use href="#file" x="8" y="9" width="14" height="14" class="s"/><text x="28" y="21" class="title small">main.zig</text><text x="293" y="21" class="small sec">刷新</text>
+      <text x="10" y="57" class="mono muted">1</text><text x="31" y="57" class="mono">const std = @import("std");</text><text x="10" y="76" class="mono muted">2</text><text x="10" y="95" class="mono muted">3</text><text x="31" y="95" class="mono">pub fn main() !void {</text><text x="10" y="114" class="mono muted">4</text><text x="31" y="114" class="mono">    try run();</text><text x="10" y="133" class="mono muted">5</text><text x="31" y="133" class="mono">}</text>
+    </g>
+  </g>
+</svg>

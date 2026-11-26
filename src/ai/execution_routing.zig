@@ -86,11 +86,18 @@ pub const State = struct {
     /// No command permission is minted here; an exact command is still approved
     /// under the ordinary permission policy.
     pub fn captureIntent(self: *State, context: host.Context, submitted: []const u8, selected: ?identity.SessionHandle, retention: config.SessionRetention) !void {
+        return self.captureScopeIntent(context, submitted, selected, retention, null);
+    }
+    pub fn captureScopeIntent(self: *State, context: host.Context, submitted: []const u8, selected: ?identity.SessionHandle, retention: config.SessionRetention, captured: ?@import("tool_scope.zig").Scope) !void {
+        const explicit = if (captured) |s| if (selected) |h|
+            s.owner.eql(context.binding) and s.owner == .session and s.explicit_inventory and s.explicit_targets.contains(h) and std.mem.indexOfScalar(u64, s.memberIds(), @backingInt(h.session_id)) != null
+        else
+            false else false;
         self.lock();
         defer self.mutex.unlock();
         if (self.context == null or !self.context.?.eql(context)) return error.ScopeChanged;
         self.grant = null;
-        if (try self.captureNewSessionLocked(context, submitted, selected, retention)) return;
+        if (try self.captureNewSessionLocked(context, submitted, selected, retention, explicit)) return;
         if (submitted.len > 65534 or std.mem.indexOfAny(u8, submitted, "\n\r\"") != null or containsAny(submitted, &.{ "“", "”" }) or containsAny(submitted, &.{ "不要", "别在", "不是", "不要新", "don't", "do not", " if ", "如果", "或者", "也可以", "还是", "或在", " or " })) return;
         var instruction = std.mem.trim(u8, submitted, " \t");
         if (std.mem.startsWith(u8, instruction, "请")) instruction = instruction["请".len..];
@@ -100,7 +107,7 @@ pub const State = struct {
         const batch = startsAny(instruction, &.{ "这次批处理执行", "这次批量执行", "run as batch" });
         if (@as(u8, @intFromBool(current)) + @as(u8, @intFromBool(fresh)) + @as(u8, @intFromBool(batch)) != 1) return;
         const handle = selected orelse return; // groups never infer active/pin
-        if (context.binding == .session and context.binding.session != @backingInt(handle.session_id)) return error.TargetOutsideScope;
+        if (context.binding == .session and context.binding.session != @backingInt(handle.session_id) and !explicit) return error.TargetOutsideScope;
         const route: Route = if (current) .current_terminal else if (fresh and !containsAny(instruction, &.{ "批量", "批处理", "batch" })) .new_terminal else .batch;
         self.grant = .{ .context = context, .choice = .{ .route = route, .create_new = fresh, .source = .{ .session = handle }, .retention = if (containsAny(submitted, &.{ "后保留", "并保留", "and keep" })) .keep else retention } };
     }
@@ -110,7 +117,7 @@ pub const State = struct {
     pub fn captureFollowup(self: *State, context: host.Context, submitted: []const u8, selected: ?identity.SessionHandle, retention: config.SessionRetention) !void {
         return self.captureIntent(context, submitted, selected, retention);
     }
-    fn captureNewSessionLocked(self: *State, context: host.Context, submitted: []const u8, selected: ?identity.SessionHandle, retention: config.SessionRetention) !bool {
+    fn captureNewSessionLocked(self: *State, context: host.Context, submitted: []const u8, selected: ?identity.SessionHandle, retention: config.SessionRetention, explicit: bool) !bool {
         if (submitted.len > 65534 or std.mem.indexOfAny(u8, submitted, "\n\r\"") != null or containsAny(submitted, &.{ "“", "”", "如果", "除非", "不是", "别开", "别新", "不要开", "不要新", "不要创建", "不要在新", "不需要", "不必", "无需", "禁止", "或者在", "或在", "或者用", "或用", "或者原", "或原", "或者当前", "或当前", "还是", "也可以", "怎么", "如何", "什么意思", " don't ", " do not ", " if ", "批量", "批处理" })) return false;
         // The common explicit protection of the original terminal is allowed;
         // other negative instructions need user clarification instead.
@@ -131,7 +138,7 @@ pub const State = struct {
         }
         if (!startsAny(instruction, &.{ "再开会话", "再开一个会话", "新开会话", "新开一个会话", "新建会话", "新建一个会话", "另开会话", "另开一个会话", "重新开启一个会话", "再开终端", "再开一个终端", "新开终端", "新开一个终端", "新建终端", "另开终端" })) return false;
         const source: Source = if (selected) |handle| blk: {
-            if (context.binding == .session and context.binding.session != @backingInt(handle.session_id)) return error.TargetOutsideScope;
+            if (context.binding == .session and context.binding.session != @backingInt(handle.session_id) and !explicit) return error.TargetOutsideScope;
             break :blk .{ .session = handle };
         } else if (context.binding == .group) .group_selection else return false;
         const keep = containsAny(submitted, &.{ "后保留", "并保留", "and keep" });

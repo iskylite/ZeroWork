@@ -34,7 +34,7 @@ const toggle=async()=>{const card=await visible('ai.thinking');assert((await h.c
 const report:any={status:'running',binary,isolated,checks:[]};
 try{
  await h.waitForServerReady(60000);assert.equal(Number(JSON.parse(await readFile(join(rpc,'owner.json'),'utf8')).pid),app.pid);
- await h.resizeWindow(1200,900);await click('workspace.empty.local');await visible('terminal.surface');await click('toolbar.ai');await click('ai.prompt');await h.type_('检查展开的思考内容自动滚动。');await click('ai.send');await visible('ai.thinking');
+ await h.resizeWindow(1200,900);await click('workspace.empty.local');await visible('terminal.surface');await click('ai.strip');await click('ai.prompt');await h.type_('检查展开的思考内容自动滚动。');await click('ai.send');await visible('ai.thinking');
  append(30);await h.waitFor(async()=>(await visible('ai.step.projection')).text?.startsWith('思考第 30 行')||null,10000);await toggle();await tail();await cap('01-expanded-tail');
  report.checks.push('Opening long thinking shows the latest lines');
  let before=await geometry();append(10);await grew(before);await tail();await cap('02-streamed-tail');

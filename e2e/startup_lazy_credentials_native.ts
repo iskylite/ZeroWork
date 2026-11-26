@@ -139,7 +139,7 @@ auth={ password_ref = "${reference}" }
             assert(!/AI history (index|preview|restore)/.test(await startupLog(data)));
             await click('workspace.empty.local');
             await visible('terminal.surface');
-            await click('toolbar.ai');
+            await click('ai.strip');
             await h.waitFor(async () => JSON.stringify(await h.query('ai.composer.model')).includes('fixture'), 5000);
             assert(!(await h.query('ai.empty.unconfigured')).some(shown));
             const resizeStart = performance.now();
@@ -209,7 +209,7 @@ auth={ password_ref = "${reference}" }
             if (!archive) {
                 await click('workspace.empty.local');
                 await visible('terminal.surface');
-                await click('toolbar.ai');
+                await click('ai.strip');
             }
             await click('ai.prompt');
             await h.type_('test saved API key');

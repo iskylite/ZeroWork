@@ -115,7 +115,7 @@ test "mounts the three-column shell and routes every interaction through callbac
     });
 
     cx.layout();
-    try std.testing.expectApproxEqAbs(@as(f32, 220), view.left_rail.globalRect().w, 0.5);
+    try std.testing.expectApproxEqAbs(@import("sidebar_styles.zig").expanded_width, view.left_rail.globalRect().w, 0.5);
     try std.testing.expectEqual(@as(usize, 2), view.sessions.items.len);
     try std.testing.expectEqual(@as(usize, 3), view.files.items.len);
     try std.testing.expect(view.inspector_root.style.display == .none);
@@ -321,6 +321,51 @@ test "compact width collapses rails without changing the center minimum" {
     try std.testing.expect(view.left_collapsed);
     try std.testing.expect(!view.inspector_open);
     try std.testing.expect(view.center_slot.globalRect().w >= 360);
+}
+
+test "standalone inspector and conversation rail share the shell material and remain usable in split panes" {
+    const cx = try ui.Cx.init(std.testing.allocator, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(900, 600);
+    cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill(), .direction = .column }, .{});
+    const scope = try ui.Scope.init(std.testing.allocator, null, cx.owner);
+    defer scope.dispose();
+    var host = newHost();
+    const view = try mountShell(&host, .{ .cx = cx, .scope = scope, .sessions = &sample_sessions });
+    const frame = struct {
+        fn run(ctx: *ui.Cx) void {
+            ctx.advanceFrameClock();
+            _ = ctx.render();
+            ctx.layout();
+        }
+    }.run;
+    frame(cx);
+    const sidebar = @import("sidebar_styles.zig").panel(cx.tokens);
+    try std.testing.expectEqual(sidebar.background.?, view.left_rail.getBackground());
+    try std.testing.expectEqual(sidebar.background.?, view.inspector_root.getBackground());
+    try std.testing.expectEqual(sidebar.border.?.radius, view.inspector_root.style.border.radius);
+    click(cx, view.inspector_toggle);
+    frame(cx);
+    try std.testing.expect(view.left_collapsed and view.inspector_open);
+    try std.testing.expect(view.center.globalRect().w >= @import("ai_workspace_shell_styles.zig").center_min_width);
+    const body = view.inspector_root.globalRect();
+    for (view.tab_buttons) |tab| {
+        const r = tab.globalRect();
+        try std.testing.expect(r.x >= body.x and r.x + r.w <= body.x + body.w + 0.5);
+        try std.testing.expect(r.w >= 35 and r.h >= 24);
+    }
+    const center_id = view.center_slot.id;
+    cx.setViewport(480, 600);
+    frame(cx);
+    click(cx, view.inspector_toggle);
+    frame(cx);
+    try std.testing.expect(view.center.style.display == .none);
+    try std.testing.expectApproxEqAbs(@as(f32, 480), view.inspector_root.globalRect().w, 0.5);
+    click(cx, view.close_button);
+    frame(cx);
+    try std.testing.expect(view.center.style.display == .flex);
+    try std.testing.expectApproxEqAbs(@as(f32, 480), view.center.globalRect().w, 0.5);
+    try std.testing.expectEqual(center_id, view.center_slot.id);
 }
 
 test "inspector hosts mount real pages and survive tab switches" {

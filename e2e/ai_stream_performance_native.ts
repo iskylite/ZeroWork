@@ -87,7 +87,7 @@ const click=async(id:string)=>{await visible(id);assert((await h.clickTestId(id)
 const report:any={status:'running',prefix,isolated:iso,latency_ms:[]};
 try {
  await h.waitForServerReady(60000);await h.resizeWindow(1440,1000);
- await click('workspace.empty.local');await visible('terminal.surface');await click(largeHistory?'toolbar.ai':'ai.strip');
+ await click('workspace.empty.local');await visible('terminal.surface');await click('ai.strip');
  if(largeHistory) {
   await click('ai.sessions');await click('ai.session.restore.2');await visible('ai.message.user.text');
   report.journal_before_bytes=(await stat(journalPath)).size;

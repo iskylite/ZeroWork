@@ -60,7 +60,7 @@ const capture = async (name: string) => { assert((await h.screenshot(join(out, n
 const report: any = { status: 'running', checks: [] };
 try {
   await h.waitForServerReady(60000); await h.resizeWindow(1440, 1000);
-  await click('workspace.empty.local'); await visible('terminal.surface'); await click('toolbar.ai');
+  await click('workspace.empty.local'); await visible('terminal.surface'); await click('ai.strip');
   await send('FIRST_TASK 检查消息引导');
   await h.waitFor(async () => held || null, 15000);
   await sendHint('引导当前任务');

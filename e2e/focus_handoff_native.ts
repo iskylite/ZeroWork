@@ -63,13 +63,13 @@ try {
     const firstPid = await receipt('first-ready');
     const firstTab = (await h.query('tabs.strip')).flatMap(flat).find((n: any) => /^tabs\.tab\.\d+$/.test(n.test_id ?? '') && shown(n)).test_id;
     for (let i = 0; i < 3; i++) {
-        await click('toolbar.ai');
+        await click('ai.strip');
         // Do not click ai.prompt or add a readiness sleep before the first text.
         await h.type_('a');
         assert.equal((await h.inputState('ai.prompt')).buffer, 'a');
         await focus('assistant first letter ' + i, 'ai.prompt');
         await h.key('a', {cmd: true}); await h.key('backspace');
-        await click(i % 2 === 0 ? 'ai.collapse' : 'toolbar.ai');
+        await click(i % 2 === 0 ? 'ai.collapse' : 'ai.strip');
         await focus('assistant collapse ' + i, firstFocus);
         assert.equal(await receipt('after-ai-' + i), firstPid);
     }

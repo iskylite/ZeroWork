@@ -29,7 +29,7 @@ try{
  report.checks.push('Session list floats without moving transcript; Escape and outside click dismiss it');
  await h.type_('UNSENT_WELCOME_DRAFT');await click('ai.close');await h.waitFor(async()=>{assert(!(await h.query('ai.close.confirmation')).some(shown),'an unsent welcome draft must not require End confirmation');return !(await h.query('ai.panel')).some(shown)||null},5000);await capture('01b-welcome-closed');
  assert(!(await h.query('ai.close.confirmation')).some(shown),'empty welcome closes without confirmation');
- await click('toolbar.ai');await visible('ai.empty.unconfigured');assert.equal((await h.inputState('ai.prompt')).buffer,'UNSENT_WELCOME_DRAFT');
+ await click('ai.strip');await visible('ai.empty.unconfigured');assert.equal((await h.inputState('ai.prompt')).buffer,'UNSENT_WELCOME_DRAFT');
  await click('ai.sessions');await visible('ai.session.row.1');await checkOwnerHint();assert(!(await h.query('ai.session.row.2')).some(shown),'closing welcome must not create another conversation');await click('ai.sessions.close');
  await click('ai.prompt');await h.key('a',{cmd:true});await h.key('backspace');
  report.checks.push('Current hover-preview conversation is listed; welcome X closes immediately, preserves its draft and reopens the same conversation');

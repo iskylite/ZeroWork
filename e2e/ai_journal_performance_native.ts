@@ -69,7 +69,7 @@ async function launch() {
     await h.waitForServerReady(60000);
     assert.equal(Number(JSON.parse(await readFile(join(rpc, 'owner.json'), 'utf8')).pid), app.pid);
     await h.resizeWindow(1440, 1000);
-    await click('workspace.empty.local'); await visible('terminal.surface'); await click('toolbar.ai');
+    await click('workspace.empty.local'); await visible('terminal.surface'); await click('ai.strip');
 }
 async function quit() {
     assert((await h.request('POST', '/zerowork/windows', {action: 'quit'})).ok);

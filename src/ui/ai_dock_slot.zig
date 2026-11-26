@@ -54,16 +54,18 @@ pub const View = struct {
     fn applyWidth(self: *View, value: f32) void {
         const max = @max(min_width, self.cx.viewport.width * 0.5);
         self.width = std.math.clamp(value, min_width, max);
-        self.card_slot.setStyleInline(self.cx.allocator, .{ .width = .{ .px = self.width } });
+        const width: ui.Sizing = .{ .px = self.width };
+        if (!std.meta.eql(self.card_slot.style.width, width))
+            self.card_slot.setStyleInline(self.cx.allocator, .{ .width = width });
     }
 
     pub fn attach(self: *View, card: *ui.Node) !void {
-        try move(self.cx, self.card_slot, card);
+        try self.card_slot.appendChild(self.cx.allocator, card);
         self.applyWidth(self.width);
         card.setStyleInline(self.cx.allocator, .{
             .position = .relative,
             .inset = .{ .left = .{ .px = 0 }, .top = .{ .px = 0 } },
-            .width = .{ .px = self.width },
+            .width = .fill(),
             .height = .fill(),
             .min_width = 0,
             .flex_shrink = 0,
@@ -78,10 +80,6 @@ pub const View = struct {
         card.setDisplay(.flex);
         card.setHitTestVisible(true);
         card.setOpacityRaw(1);
-    }
-
-    pub fn detach(self: *View, card: *ui.Node) void {
-        if (card.parent) |parent| if (parent == self.card_slot) self.card_slot.removeChild(card);
     }
 
     fn drag(event: ui.interaction.drag.Event, raw: *anyopaque) void {
@@ -108,8 +106,3 @@ pub const View = struct {
         }
     }
 };
-
-fn move(cx: *ui.Cx, parent: *ui.Node, child: *ui.Node) !void {
-    if (child.parent) |old| old.removeChild(child);
-    try parent.appendChild(cx.allocator, child);
-}

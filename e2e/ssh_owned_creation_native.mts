@@ -123,7 +123,7 @@ try {
   await h.waitForServerReady(60000);
   assert.equal(Number(JSON.parse(await readFile(join(rpc, 'owner.json'), 'utf8')).pid), app.pid);
   await click('workspace.empty.local'); await visible('terminal.surface');
-  await click('toolbar.ai'); await click('ai.prompt'); await h.type_('Compare one saved-source new_only SSH creation.'); await click('ai.send');
+  await click('ai.strip'); await click('ai.prompt'); await h.type_('Compare one saved-source new_only SSH creation.'); await click('ai.send');
   await h.waitFor(async () => {
     assert.equal(providerFailure, null);
     if ((await h.query('ai.host_approval.accept')).some(shown)) await click('ai.host_approval.accept');

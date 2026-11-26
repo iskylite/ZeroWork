@@ -177,7 +177,7 @@ try {
   assert((await resizeWindow(1440, 900)).ok);
   await click("workspace.empty.local");
   await visible("terminal.surface");
-  await click("toolbar.ai");
+  await click("ai.strip");
   await visible("ai.prompt");
   assert(text(await visible("ai.composer.model")).includes("mimo-v2.6"), "UI resolves the configured actual model");
   await capture("00-local-ai-ready");

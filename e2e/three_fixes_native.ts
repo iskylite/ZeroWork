@@ -57,7 +57,7 @@ try{
  await click('wizard.identity.toggle');await click('wizard.advanced.toggle');
  const before=await inputState('wizard.encoding');await edit('wizard.encoding','GB18030');
  assert.equal((await inputState('wizard.encoding')).buffer,'UTF-8');report.checks.push('UTF-8 readonly capability prevents unsupported edit');await cap('01-encoding-readonly');await resizeWindow(860,480);await cap('01b-encoding-compact');await resizeWindow(1440,900);await key('escape');
- await click('workspace.empty.local');await visible('terminal.surface');await click('toolbar.ai');
+ await click('workspace.empty.local');await visible('terminal.surface');await click('ai.strip');
  await submit('controlled first question');await approve(0);await recovery();assert.equal(await count(),1);await cap('02-recovery-original');
  // Retain a separate next draft and prove editing does not request or execute.
  await edit('ai.prompt','next draft');const requestCount=requests.length;await click('ai.recovery.edit');assert.equal(requests.length,requestCount);assert.equal(await count(),1);assert((await inputState('ai.prompt')).buffer.includes('next draft'));assert((await inputState('ai.prompt')).buffer.includes('controlled first question'));const edited=(await inputState('ai.prompt')).buffer;await click('ai.recovery.edit');assert.equal((await inputState('ai.prompt')).buffer,edited);

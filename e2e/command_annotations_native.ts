@@ -74,11 +74,11 @@ try{
  await click('notifications.history.close');await hidden('notifications.history');await visible('transfer.manager');
  await click('toolbar.transfers');await hidden('transfer.manager');
  report.checks.push('The notifications bubble opens and closes over the retained transfer panel without dismissing it');
- await click('toolbar.ai');await visible('ai.panel');
+ await click('ai.strip');await visible('ai.panel');
  await click('toolbar.transfers');await visible('transfer.manager');await visible('ai.panel');
  await click('ai.composer.permission');await visible('ai.permission.menu');await visible('ai.panel');await visible('transfer.manager');
  await h.key('escape');await hidden('ai.permission.menu');
- await click('toolbar.ai');await hidden('ai.panel');await visible('transfer.manager');
+ await click('ai.strip');await hidden('ai.panel');await visible('transfer.manager');
  await click('toolbar.transfers');await hidden('transfer.manager');
  report.checks.push('AI and transfers coexist, and opening the AI permission menu keeps both panels visible');
  await h.key('n',{cmd:true,alt:true});await visible('notes.floating');

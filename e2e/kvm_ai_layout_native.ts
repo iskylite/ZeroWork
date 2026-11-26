@@ -42,10 +42,10 @@ try{
  // The hidden Local assistant is laid out at 100×14 before KVM becomes active.
  await click('workspace.empty.local');await visible('terminal.surface');await h.sleep(350);
  const row=await visible('sidebar.host');await h.clickAt(row.rect.x+65,row.rect.y+row.rect.h/2);await h.key('return');await visible('bmc.content');await h.sleep(600);
- await click('toolbar.ai');await capture('opened');
+ await click('ai.strip');await capture('opened');
  await click('ai.maximize');await capture('maximized',true);
  await click('ai.maximize');await capture('restored');
- await click('ai.collapse');await click('toolbar.ai');await h.resizeWindow(1000,700);await capture('reopened-compact',false,false);
+ await click('ai.collapse');await click('ai.strip');await h.resizeWindow(1000,700);await capture('reopened-compact',false,false);
  const prompt=await visible('ai.prompt');await h.clickAt(prompt.rect.x+30,prompt.rect.y+20);await h.type_('KVM layout draft');assert.equal((await h.inputState('ai.prompt')).buffer,'KVM layout draft');
  assert((await h.request('POST','/zerowork/windows',{action:'quit'})).ok);
  const quitStarted=performance.now();while(app.exitCode===null&&app.signalCode===null&&performance.now()-quitStarted<15000){

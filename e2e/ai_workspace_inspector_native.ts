@@ -10,6 +10,7 @@ import { createServer, type ServerResponse } from 'node:http';
 import { join, resolve } from 'node:path';
 
 const diffTrial = process.argv.includes('--workspace-turn-diff');
+const referenceLight = process.argv.includes('--reference-light');
 const diffPrompt = 'Write an isolated verification marker';
 const nextPrompt = 'Explain the last status without doing any work';
 const diffBody = 'verified file change from this turn\n';
@@ -94,7 +95,7 @@ try {
   const port = await new Promise<number>((ok,fail)=>{server.once('error',fail);server.listen(0,'127.0.0.1',()=>ok((server.address() as {port:number}).port));});
   // The only model is a controlled loopback fixture. It holds two responses
   // open together; distinct prompts and response markers verify real routing.
-  await writeFile(join(data, 'config.toml'), '[meta]\nconfig_revision=1\n[ai]\ndefault_provider="fixture"\n[[ai.providers]]\nid="fixture"\nkind="openai_compat"\nendpoint="http://127.0.0.1:'+port+'/v1/chat/completions"\nenabled=true\n[[ai.providers.models]]\nname="fixture"\ncontext_window=200000\ndefault=true\n');
+  await writeFile(join(data, 'config.toml'), '[meta]\nconfig_revision=1\n'+(referenceLight ? '[ui]\ntheme="reference-light"\n' : '')+'[ai]\ndefault_provider="fixture"\n[[ai.providers]]\nid="fixture"\nkind="openai_compat"\nendpoint="http://127.0.0.1:'+port+'/v1/chat/completions"\nenabled=true\n[[ai.providers.models]]\nname="fixture"\ncontext_window=200000\ndefault=true\n');
   const identity = await stat(project), agent = randomBytes(16).toString('hex'), conversation = randomBytes(16).toString('hex');
   const baseline = [
     { schema: 1, event: { kind: 'create', conversation, agent, owner: diffTrial ? {group:1} : { session: 1 }, revision: 2 } },
@@ -131,7 +132,7 @@ try {
   try {
     await h.waitForServerReady(16000);
     assert.equal(Number(JSON.parse(await readFile(join(rpc, 'owner.json'), 'utf8')).pid), child.pid);
-    await h.resizeWindow(diffTrial ? 1660 : 1280, diffTrial ? 1000 : 800);
+    await h.resizeWindow(diffTrial ? 1660 : referenceLight ? 1440 : 1280, diffTrial ? 1000 : referenceLight ? 900 : 800);
     if (diffTrial) {
       await click('workspace.empty.local');
       await visible('terminal.surface');
@@ -149,7 +150,7 @@ try {
       await click('groups.join.accept');
       await click('groups.tab');
       await visible('groups.workspace');
-      await click('toolbar.ai');
+      await h.key('j', { cmd: true }); await visible('ai.panel');
       await click('ai.sessions');
       await click('ai.session.restore.2');
       step = 'restored group data authority';
@@ -216,9 +217,35 @@ try {
     await click('toolbar.new_session');
     await click('session.menu.ai');
     await visible('ai.workspace.shell');
+    step = 'standalone chrome, conversation rail and inspector geometry';
+    const x = (n: any) => n.rect.x;
+    const trailing = (n: any) => n.rect.x + n.rect.w;
+    const center = await visible('ai.workspace.center');
+    const capsule = await visible('workspace.tabs.capsule');
+    assert(Math.abs(x(capsule) - x(center)) <= 2, 'tab capsule must start above conversation instead of covering native traffic lights');
+    assert(trailing(await visible('ai.workspace.left')) < x(center), 'conversation rail uses the workspace gutter');
+    await click('ai.workspace.collapse');
+    await h.waitFor(async () => x(await visible('workspace.tabs.capsule')) >= 96 && x(await visible('workspace.tabs.capsule')) < x(capsule) - 10 || null);
+    await click('ai.workspace.expand');
+    await click('ai.workspace.inspector.toggle');
+    const rail = await visible('ai.workspace.inspector'), tabs = await visible('ai.workspace.inspector.tabs');
+    assert(x(tabs) > x(rail) && trailing(tabs) < trailing(rail), 'tabs fit inside inspection pane');
+    for (const tab of ['files', 'members', 'board', 'graph', 'rounds']) {
+      const node = await visible('ai.workspace.inspector.tab.' + tab);
+      assert(x(node) >= x(tabs) && trailing(node) <= trailing(tabs) + 1 && node.rect.w >= 35 && node.rect.h >= 24);
+      await click(node.test_id);
+    }
+    await click('ai.workspace.inspector.tab.files');
+    await click('ai.workspace.inspector.close');
     assert(!(await h.query('ai.workspace.file.0')).some(shown), 'historical root must not leak into new conversation');
     await click('ai.workspace.history');
-    await click('ai.session.restore.2'); // explicit user recovery, never assume a saved binding is live
+    // The welcome view has a second Restore action for the same conversation.
+    // Click the opened history menu's button, not the welcome action behind it.
+    step = 'restore fixture from the history menu';
+    const restore = await h.waitFor(async () => (await h.query('ai.sessions.menu')).filter(shown).flatMap(flatten)
+      .find((n:any) => n.test_id === 'ai.session.restore.2' && shown(n)) ?? null, 12000);
+    assert((await h.clickAt(restore.rect.x + restore.rect.w / 2, restore.rect.y + restore.rect.h / 2)).ok);
+    assert(content(await visible('ai.history.resumed')).includes('以上是旧会话记录'), 'history boundary must keep its visible meaning');
     await click('ai.workspace.file.0'); // src (directory)
     if (referenceTrial) {
       const previewText = async (label: string) => {
@@ -296,6 +323,10 @@ try {
     step = 'expanded source'; await h.waitFor(async () => content(await h.query('ai.workspace.files')).includes('example.zig') || null, 12000);
     await click('ai.workspace.file.1');
     step = 'disk text'; await h.waitFor(async () => content(await h.query('ai.workspace.preview')).includes('const answer = 42') || null, 12000);
+    if (process.env.ZW_AI_INSPECTOR_CAPTURE) {
+      await h.mouseMove(2, 2);
+      assert((await h.screenshot(resolve(process.env.ZW_AI_INSPECTOR_CAPTURE))).ok, 'could not capture standalone inspector');
+    }
     await click('ai.workspace.file.2'); // alias (symlink)
     step = 'symlink refusal'; await h.waitFor(async () => content(await h.query('ai.workspace.preview')).includes('不打开符号链接') || null, 12000);
     assert(!content(await h.query('ai.workspace.preview')).includes('out-of-scope marker'));

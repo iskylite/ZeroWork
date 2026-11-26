@@ -78,7 +78,7 @@ const capture=async(name:string)=>{
  await h.screenshot(join(out,name+'.png'));
 };
 try{
- await h.waitForServerReady(60000);await h.resizeWindow(1200,900);await click('workspace.empty.local');await visible('terminal.surface');await click('toolbar.ai');await click('ai.prompt');await h.type_('验证 composer 交互');await click('ai.send');
+ await h.waitForServerReady(60000);await h.resizeWindow(1200,900);await click('workspace.empty.local');await visible('terminal.surface');await click('ai.strip');await click('ai.prompt');await h.type_('验证 composer 交互');await click('ai.send');
  await visible('ai.interaction.option.0');assert((await visible('ai.interaction.title')).text.includes('如何处理'));
  assert(!(await h.query('ai.host_approval')).some(shown));assert(!(await h.query('ai.prompt')).some(shown));
  assert(!(await h.query('ai.stop')).some(shown));assert(!(await h.query('ai.send')).some(shown));const panel=await visible('ai.interaction.panel');assert(!flat(await h.query('ai.conversation')).some((n:any)=>n.test_id==='ai.interaction.panel'));

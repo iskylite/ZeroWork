@@ -212,7 +212,7 @@ try {
     await h.resizeWindow(1350,900);
     await click('workspace.empty.local');
     if(reuse)await setupExistingGroup();
-    await click('toolbar.ai');
+    await click('ai.strip');
     await send('MAIN_WORK_IN_PROGRESS');
     await waitForFile(mainStarted,['ai.interaction.approve','ai.host_approval.accept']);
     const terminal=await visible('terminal.surface');

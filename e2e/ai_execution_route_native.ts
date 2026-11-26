@@ -155,7 +155,7 @@ async function normalQuit(){
 }
 try{
  await h.waitForServerReady(60000);assert.equal(Number(JSON.parse(await readFile(join(rpc,'owner.json'),'utf8')).pid),app.pid);
- await h.resizeWindow(1440,900);await click('workspace.empty.local');await visible('terminal.surface');await click('toolbar.ai');await click('ai.maximize');
+ await h.resizeWindow(1440,900);await click('workspace.empty.local');await visible('terminal.surface');await click('ai.strip');await click('ai.maximize');
  for(const stage of stages){
   report.active_stage=stage;await send(stage);const approved=new Set<string>(),start=performance.now();
   while(!finalEmitted&&performance.now()-start<100000){

@@ -54,7 +54,7 @@ const click=async(id:string)=>{await visible(id);assert((await h.clickTestId(id)
 const send=async(text:string,steer=false)=>{await click('ai.prompt');await h.type_(text);if(steer)await h.key('return',{cmd:true,shift:true});else await click('ai.send')};
 const check=async()=>{
  await h.waitForServerReady(40000);await h.resizeWindow(1400,900);
- await click('workspace.empty.local');await visible('terminal.surface');await click('toolbar.ai');
+ await click('workspace.empty.local');await visible('terminal.surface');await click('ai.strip');
  await send('ACTIVE_REQUEST');await h.waitFor(async()=>requests===1||null,12000);
  await send('NORMAL_QUEUE');await visible('ai.pending.card.0');await h.mouseMove(5,5);await visible('ai.pending.remove.0');
  await click('ai.pending.remove.0');await absent('ai.pending.card.0');

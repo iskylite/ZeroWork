@@ -40,7 +40,7 @@ const mode=process.argv[4]??'stale';
 const snapshots:any[]=[];
 const snap=async(label:string)=>{const state=await route('drafts');snapshots.push({label,...state});await writeFile(join(out,'states.json'),JSON.stringify(snapshots,null,2));return state;};
 const input=async(value:string)=>{await click('ai.prompt');await h.key('a',{cmd:true});await h.type_(value);};
-const panel=async()=>{if(!(await h.query('ai.panel')).some(shown))await click('toolbar.ai');await visible('ai.prompt');};
+const panel=async()=>{if(!(await h.query('ai.panel')).some(shown))await click('ai.strip');await visible('ai.prompt');};
 const end=async()=>{await click('ai.close');await h.waitFor(async()=>{if((await h.query('ai.close.confirmation.confirm')).some(shown))await click('ai.close.confirmation.confirm');return !(await h.query('ai.panel')).some(shown)||null;},15000);};
 try{
  await h.waitForServerReady();await h.resizeWindow(1100,800);await route('legacy_preflight',{legacy:true});

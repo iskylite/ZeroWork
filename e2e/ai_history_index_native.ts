@@ -114,7 +114,7 @@ async function openAi() {
     await h.resizeWindow(1440, 960);
     await click('workspace.empty.local');
     await visible('terminal.surface');
-    await click('toolbar.ai');
+    await click('ai.strip');
     await visible('ai.empty.configured');
     assert(!(await query('ai.empty.unconfigured')).some(shown));
 }

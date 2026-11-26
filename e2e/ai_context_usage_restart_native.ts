@@ -61,7 +61,7 @@ async function launch() {
     await h.waitForServerReady(30000);
     assert.equal(Number(JSON.parse(await readFile(join(rpc, 'owner.json'), 'utf8')).pid), app.pid);
     await h.resizeWindow(1280, 900);
-    await click('workspace.empty.local'); await visible('terminal.surface'); await click('toolbar.ai');
+    await click('workspace.empty.local'); await visible('terminal.surface'); await click('ai.strip');
 }
 async function stop() {
     if (app && app.exitCode === null && app.signalCode === null) {

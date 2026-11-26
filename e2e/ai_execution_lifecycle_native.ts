@@ -410,7 +410,7 @@ async function normalClose(){
 }
 try{acceptance:{
  await h.waitForServerReady(60000);assert.equal(Number(JSON.parse(await readFile(join(rpc,'owner.json'),'utf8')).pid),app.pid);
- await h.resizeWindow(1440,900);await click('workspace.empty.local');await visible('terminal.surface');await click('toolbar.ai');await click('ai.maximize');
+ await h.resizeWindow(1440,900);await click('workspace.empty.local');await visible('terminal.surface');await click('ai.strip');await click('ai.maximize');
  if(takeoverOnly){
   await send('TAKEOVER');const approved=new Set<string>(),startedAt=performance.now();
   const allowed=['takeover-group','takeover-open-a','takeover-open-b','takeover-run-a','takeover-run-b','takeover-fresh-a'];
@@ -445,7 +445,7 @@ try{acceptance:{
      const a=takeoverState.session_a.session_id,b=takeoverState.session_b.session_id;assert.notEqual(a,b);
      const paneA=await controlledPane(a),paneB=await controlledPane(b);takeoverState.control_tags_before=[];
      for(const[id,pane]of[[a,paneA],[b,paneB]]as const){const right=pane.surface.rect.x+pane.surface.rect.w-pane.tag.rect.x-pane.tag.rect.w,bottom=pane.surface.rect.y+pane.surface.rect.h-pane.tag.rect.y-pane.tag.rect.h;assert(Math.abs(pane.tag.rect.h-28)<=.5);assert(Math.abs(right-12)<=.5);assert(Math.abs(bottom-10)<=.5);assert.equal(text(pane.title),'AI 控制 • 只读');takeoverState.control_tags_before.push({session_id:id,surface:pane.surface.rect,tag:pane.tag.rect,right,bottom,title:text(pane.title),button:pane.button.rect})}
-     await capture('takeover-01-two-real-executions-active');await click('toolbar.ai');await visible('ai.stop');
+     await capture('takeover-01-two-real-executions-active');await click('ai.strip');await visible('ai.stop');
      await click('ai.task_finish.takeover');await visible('ai.task_finish.takeover.target.'+a);await visible('ai.task_finish.takeover.target.'+b);takeoverState.target_menu=[a,b];await capture('takeover-02-exact-target-menu');await click('ai.task_finish.takeover.target.'+a);
      const notice=text(await visible('ai.host_notice.body'));assert(notice.includes('你已接管终端'));assert(notice.includes(takeoverState.session_a.title));assert(notice.includes('命令')&&notice.includes('AI')&&notice.includes('重新申请权限'));takeoverState.native_notice=notice;
      await visible('ai.stop');takeoverState.provider_active_after_handoff=true;await capture('takeover-03-original-task-host-notice');
@@ -459,7 +459,7 @@ try{acceptance:{
     assert(surface.rect.x>=pane.rect.x-.5&&surface.rect.y>=pane.rect.y-.5&&surface.rect.x+surface.rect.w<=pane.rect.x+pane.rect.w+.5&&surface.rect.y+surface.rect.h<=pane.rect.y+pane.rect.h+.5);
     assert((await h.clickAt(surface.rect.x+surface.rect.w/2,surface.rect.y+surface.rect.h/2)).ok);assert((await h.type_(takeoverInput)).ok);assert((await h.key('return')).ok);takeoverState.user_input_sent=true;
     await h.waitFor(async()=>{try{return await readFile(takeoverFiles.doneA,'utf8')===takeoverInput+'\n'||null}catch{return null}},15000);
-    await click('toolbar.ai');await visible('ai.stop');assert(text(await visible('ai.host_notice.body')).includes(takeoverState.native_notice));await capture('takeover-04-read-ended-by-normal-user-input');
+    await click('ai.strip');await visible('ai.stop');assert(text(await visible('ai.host_notice.body')).includes(takeoverState.native_notice));await capture('takeover-04-read-ended-by-normal-user-input');
     releaseTakeover('before_user_input',[{id:'takeover-finished-a',name:'host.get_execution',arguments:{execution_ref:takeoverState.execution_a,max_bytes:8192}}]);
    }
    if(takeoverHeld?.kind==='fresh_output'){

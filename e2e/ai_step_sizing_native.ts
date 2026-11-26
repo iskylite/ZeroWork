@@ -39,7 +39,7 @@ const flat=(n:any):any[]=>Array.isArray(n)?n.flatMap(flat):n?[n,...(n.children??
 const resultCard=()=>h.waitFor(async()=>flat(await h.query('ai.panel')).find((n:any)=>/^ai\.tool\.result\.\d+\./.test(n.test_id??'')&&shown(n))??null,15000);
 const report:any={status:'running',checks:[],heights:{},isolated:iso};
 try{
- await h.waitForServerReady(60000);await h.resizeWindow(1200,900);await click('workspace.empty.local');await visible('terminal.surface');await click('toolbar.ai');await click('ai.maximize');
+ await h.waitForServerReady(60000);await h.resizeWindow(1200,900);await click('workspace.empty.local');await visible('terminal.surface');await click('ai.strip');await click('ai.maximize');
  await send();await visible('ai.thinking');await header('ai.thinking');
  await h.waitFor(async()=>Math.abs((await visible('ai.thinking')).rect.h-58)<1||null,5000);
  assert.equal((await h.query('ai.step.copy')).length,0);report.heights.shortThought=(await visible('ai.thinking')).rect.h;await cap('01-short-thinking');

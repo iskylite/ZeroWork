@@ -68,7 +68,7 @@ try {
   await waitForServerReady();
   assert.equal(Number(JSON.parse(await readFile(join(rpc,"owner.json"),"utf8")).pid),child.pid);
   assert((await resizeWindow(1440,1000)).ok);
-  await click("workspace.empty.local"); await visible("terminal.surface"); await click("toolbar.ai"); await click("ai.maximize");
+  await click("workspace.empty.local"); await visible("terminal.surface"); await click("ai.strip"); await click("ai.maximize");
   await click("ai.prompt"); assert((await type_("Render the Markdown fixture without tools")).ok); await click("ai.send");
   await waitFor(async()=>{
     const nodes=flat(await visible("ai.panel"));

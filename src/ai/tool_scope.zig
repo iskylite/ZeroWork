@@ -61,6 +61,8 @@ pub const Scope = struct {
     /// User-chosen targets on the independent AI's retained tab; not a child
     /// grant and never sufficient without membership in this exact snapshot.
     explicit_inventory: bool = false,
+    /// Independent selections freeze the complete handle, not just a reusable ID.
+    explicit_targets: ExplicitTargets = .{},
 
     pub fn memberIds(self: *const Scope) []const u64 {
         return self.inventory orelse self.members.slice();

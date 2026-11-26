@@ -224,8 +224,11 @@ pub const Bridge = struct {
     /// Submitted is the current trusted composer submission. A model or tool
     /// argument has no entry point for creating an intent grant.
     pub fn configureRouting(self: *Bridge, broker: *approvals.Broker, context: host_tools.Context, submitted: []const u8, selected: ?identity.SessionHandle) !void {
+        return self.configureScopeRouting(broker, context, submitted, selected, null);
+    }
+    pub fn configureScopeRouting(self: *Bridge, broker: *approvals.Broker, context: host_tools.Context, submitted: []const u8, selected: ?identity.SessionHandle, captured: ?scope.Scope) !void {
         self.route_source = if (context.binding == .session) selected else null;
-        try broker.execution_route.captureIntent(context, submitted, self.route_source, self.session_retention);
+        try broker.execution_route.captureScopeIntent(context, submitted, self.route_source, self.session_retention, captured);
         self.route_broker = broker;
         broker.updatePermissionPolicy(self.permissionPolicy().engine);
     }
@@ -240,7 +243,7 @@ pub const Bridge = struct {
         self.mutex.unlock();
         if (binding == null or broker == null or captured == null) return;
         if (source) |handle| _ = captured.?.validate(&.{@backingInt(handle.session_id)}) catch return;
-        broker.?.execution_route.captureFollowup(binding.?.context, submitted, source, self.session_retention) catch {};
+        broker.?.execution_route.captureScopeIntent(binding.?.context, submitted, source, self.session_retention, captured) catch {};
     }
     /// Before backend preflight, freeze any trusted intent to this exact
     /// command. The backend still owns capability, forbidden and mode gates.
@@ -440,6 +443,12 @@ pub const Bridge = struct {
             const owner = for (app.workspace.tabs.items) |tab| {
                 if (tab.content_owner == .session and @backingInt(tab.content_owner.session.session_id) == id) break tab.content_owner.session;
             } else return error.StaleSession;
+            // Resolve the scoped ID to the exact frozen grant before loading
+            // any adapter. Child-owned sessions have their own live task grant.
+            if (captured.explicit_inventory and !captured.explicit_targets.contains(owner)) {
+                const binding = self.host_binding orelse return error.TargetOutsideAssistant;
+                if (!captured.child_inventory or !app.childOwnsReadySession(binding.context, owner)) return error.TargetOutsideAssistant;
+            }
             const manifest = app.sessions.manifestFor(owner) orelse continue;
             if (!manifest.integration.ai) continue;
             if (@import("ai_transfer_source.zig").resolve(app, owner, false)) |_| {
@@ -480,7 +489,9 @@ pub const Bridge = struct {
             if (manifest.ai_adapter_factory) |factory| {
                 child.adapter = try factory(self.allocator);
                 const adapter = child.adapter.?;
-                adapter.vtable.delegate(adapter.context, if (captured.owner == .group) captured.owner else null);
+                // The adapter is per exact target. An independent AI session
+                // owns the request but is not the terminal transport.
+                adapter.vtable.delegate(adapter.context, if (captured.owner == .group or captured.explicit_inventory) captured.owner else null);
                 adapter.vtable.files(adapter.context, if (self.files) |files| files else null);
                 adapter.vtable.prepare(adapter.context, app, owner) catch |err| switch (err) {
                     error.ServiceUnavailable, error.AdapterNotConnected, error.RequiredServiceUnavailable, error.WorkerBusy => {

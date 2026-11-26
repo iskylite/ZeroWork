@@ -471,6 +471,44 @@ pub const Host = struct {
         };
     }
 
+    fn snapshotState(value: ?routes.Snapshot) Info.State {
+        return if (value) |snapshot| switch (snapshot.phase) {
+            .ready => .running,
+            .connecting => .connecting,
+            .paused => .paused,
+            .closing => .stopping,
+            .failed, .cleanup_unknown => .failed,
+            .closed => if (snapshot.failure != null) .failed else .off,
+        } else .off;
+    }
+
+    pub const Summary = struct { label: []const u8, active: bool };
+    // Read the same current owner as the details window without opening it or
+    // consulting UI state left behind by a previously viewed session.
+    pub fn currentForwarding(self: *Host) ?Summary {
+        const legacy = self.activeSession() orelse return null;
+        const tab = self.workspace.sessionTab(legacy) orelse return null;
+        if (tab.closing or tab.archived or self.activeOwner() == null) return null;
+        if (rendererForwarding(tab)) |forwarding| {
+            const data = automaticForwardingData(tab, forwarding);
+            return forwardingSummary(data.state, data.configured, data.status_label);
+        }
+        const host = self.configured(legacy) orelse return null;
+        if (host.protocol != .ssh) return null;
+        return forwardingSummary(snapshotState(self.activeSnapshot()), host.socks_enabled or self.desiredForward(legacy) != null, null);
+    }
+
+    fn forwardingSummary(state: Info.State, configured_: bool, label: ?[]const u8) Summary {
+        return .{ .label = label orelse switch (state) {
+            .running => "运行中",
+            .connecting => "启动中",
+            .paused => "连接已断开",
+            .stopping => "停止中",
+            .failed => "启动失败",
+            .off => if (configured_) "配置已就绪" else "未配置",
+        }, .active = state == .running or state == .connecting or state == .paused };
+    }
+
     pub fn showInfo(self: *Host) void {
         const info = self.info orelse return;
         self.info_owner = self.activeOwner() orelse return;
@@ -500,14 +538,7 @@ pub const Host = struct {
         const value = self.activeSnapshot();
         const stats: routes.listener.Stats = if (value) |snapshot| snapshot.stats else .{};
         const exit = if (value) |snapshot| self.backend.exitHost(snapshot.owner) else null;
-        const state: Info.State = if (value) |snapshot| switch (snapshot.phase) {
-            .ready => .running,
-            .connecting => .connecting,
-            .paused => .paused,
-            .closing => .stopping,
-            .failed, .cleanup_unknown => .failed,
-            .closed => if (snapshot.failure != null) .failed else .off,
-        } else .off;
+        const state = snapshotState(value);
         const desired = self.desiredForward(self.activeSession() orelse return);
         const mode = if (desired) |d| d.mode else .socks5;
         var log_buffer: [4096]u8 = undefined;

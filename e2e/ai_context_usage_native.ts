@@ -76,7 +76,7 @@ try {
     await h.waitForServerReady(60000);
     assert.equal(Number(JSON.parse(await readFile(join(rpc, 'owner.json'), 'utf8')).pid), app.pid);
     await h.resizeWindow(1440, 900);
-    await click('workspace.empty.local'); await visible('terminal.surface'); await click('toolbar.ai');
+    await click('workspace.empty.local'); await visible('terminal.surface'); await click('ai.strip');
     const send = async (value: string) => { const turn = replies + 1; await click('ai.prompt'); await h.type_(value); await click('ai.send'); await h.waitFor(async () => (await h.query('ai.turn.complete')).filter(shown).length === turn || null, 15000); };
     const usageMenu = async () => { await click('ai.composer.usage'); return visible('ai.usage.menu'); };
     const summary = async () => text(await visible('ai.usage.summary'));

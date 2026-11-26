@@ -50,11 +50,11 @@ const visible=(id:string)=>h.waitFor(async()=>(await h.query(id)).find(shown)??n
 const click=async(id:string)=>{await visible(id);assert((await h.clickTestId(id)).ok,id);};
 const text=async(id:string)=>flat(await visible(id)).map(n=>n.text??'').join('');
 const expectControls=async(permission:string,mode:string)=>{assert((await text('ai.composer.permission')).includes(permission));assert((await text('ai.composer.execution')).includes(mode));};
-const newLocal=async()=>{if((await h.query('ai.panel')).some(shown))await click('ai.collapse');await click('toolbar.new_session');await click('session.menu.local');await visible('terminal.surface');await click('toolbar.ai');};
+const newLocal=async()=>{if((await h.query('ai.panel')).some(shown))await click('ai.collapse');await click('toolbar.new_session');await click('session.menu.local');await visible('terminal.surface');await click('ai.strip');};
 const capture=async(name:string)=>{assert((await h.screenshot(join(out,name+'.png'))).ok);await writeFile(join(out,name+'.json'),JSON.stringify(await h.query('ai.panel'),null,2));};
 const report:any={status:'running',checks:[]};
 try{
- await launch();await click('workspace.empty.local');await visible('terminal.surface');await click('toolbar.ai');await expectControls('确认后执行','自行判断');
+ await launch();await click('workspace.empty.local');await visible('terminal.surface');await click('ai.strip');await expectControls('确认后执行','自行判断');
  const firstTab=flat(await h.query('tabs.strip')).find(n=>/^tabs\.tab\.\d+$/.test(n.test_id??'')).test_id;
  await click('ai.prompt');await h.type_('验证默认值隔离');await click('ai.send');await h.waitFor(()=>held||null,15000);
  await newLocal();await expectControls('确认后执行','自行判断');
@@ -62,14 +62,14 @@ try{
  await click('ai.composer.execution');await click('ai.execution.interactive');await expectControls('自动执行','交互式');
  const saved=await readFile(configPath,'utf8');assert(/permission_mode\s*=\s*"auto"/.test(saved));assert(/execution_mode\s*=\s*"interactive"/.test(saved));
  report.checks.push('With a directory background restored at startup, composer choices immediately persist both defaults to the global config');await capture('01-saved-defaults');
- await click('ai.collapse');await click(firstTab);await click('toolbar.ai');await expectControls('确认后执行','自行判断');await visible('ai.stop');
+ await click('ai.collapse');await click(firstTab);await click('ai.strip');await expectControls('确认后执行','自行判断');await visible('ai.stop');
  held.end(frame({tool_calls:[{index:0,id:'defaults-context',type:'function',function:{name:'host__get_ucurrent_ucontext',arguments:'{}'}}]})+'data: [DONE]\n\n');held=null;
  await h.waitFor(()=>continuations.length>0||null,15000);await visible('ai.turn.complete');await expectControls('确认后执行','自行判断');
  const result=continuations[0].messages.find((m:any)=>m.role==='tool');assert(result);const feedback=JSON.parse(result.content);assert.equal(feedback.status,'succeeded');const context=JSON.parse(feedback.content.find((item:any)=>item.type==='structured').text);assert.equal(context.execution_mode,'auto');assert.equal(context.permission_mode,'confirm');
  report.checks.push('The other running agent retains confirm/auto and successfully executes a context tool after defaults change');await capture('02-existing-agent-unchanged');
  await newLocal();await expectControls('自动执行','交互式');report.checks.push('A new connection initializes from the saved defaults');
  await quit();await launch();
- if((await h.query('workspace.empty.local')).some(shown)){await click('workspace.empty.local');await visible('terminal.surface');await click('toolbar.ai');}else await newLocal();
+ if((await h.query('workspace.empty.local')).some(shown)){await click('workspace.empty.local');await visible('terminal.surface');await click('ai.strip');}else await newLocal();
  await expectControls('自动执行','交互式');
  await click('ai.composer.permission');await click('ai.permission.confirm');
  await click('ai.composer.execution');await click('ai.execution.ask');await expectControls('确认后执行','每次询问');

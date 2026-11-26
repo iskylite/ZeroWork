@@ -37,7 +37,7 @@ const text=(n:any):string=>n?[n.text??'',...(n.children??[]).map(text)].join(' '
 const report:any={status:'running',checks:[]};
 try{
  await h.waitForServerReady();await h.resizeWindow(1440,1000);
- await click('workspace.empty.local');await click('toolbar.ai');await click('ai.prompt');
+ await click('workspace.empty.local');await click('ai.strip');await click('ai.prompt');
  await h.type_('检查目录文件');await click('ai.send');
  await h.waitFor(async()=>text((await h.query('ai.conversation')).find(shown)).includes('TABLE_COMPLETE')||null,20000);
  await h.waitFor(async()=>!(await h.query('ai.stop')).some(shown)||null,15000);

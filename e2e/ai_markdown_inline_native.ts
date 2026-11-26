@@ -101,7 +101,7 @@ try {
   assert((await resizeWindow(1440, 1000)).ok);
   await click("workspace.empty.local");
   await visible("terminal.surface");
-  await click("toolbar.ai");
+  await click("ai.strip");
   await click("ai.prompt");
   assert((await type_(prompt)).ok);
   await click("ai.send");

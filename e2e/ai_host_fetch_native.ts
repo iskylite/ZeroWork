@@ -94,7 +94,7 @@ try{
  // Inspect the actual local proxy state without changing it. This test is
  // intentionally specific to the current required production proxy boundary.
  const proxy=execFileSync('/usr/sbin/scutil',['--proxy'],{encoding:'utf8'});assert(/HTTPSEnable\s*:\s*1/.test(proxy),'this acceptance case requires the configured HTTPS proxy');report.system_https_proxy_enabled=true;
- await h.resizeWindow(1440,900);await click('workspace.empty.local');await visible('terminal.surface');await click('toolbar.ai');await click('ai.maximize');
+ await h.resizeWindow(1440,900);await click('workspace.empty.local');await visible('terminal.surface');await click('ai.strip');await click('ai.maximize');
  await send('REJECT');await pending();await h.resizeWindow(860,480);
  await h.waitFor(async()=>{const node=(await h.query('ai.panel')).find(shown);return node&&node.rect.x+node.rect.w<=860.5&&node.rect.y+node.rect.h<=480.5?true:null;},10000);
  const panel=await visible('ai.panel'),viewport=await visible('ai.conversation.viewport'),bar=await visible('ai.host_approval.address_bar'),accept=await visible('ai.host_approval.accept'),reject=await visible('ai.host_approval.reject');

@@ -42,7 +42,7 @@ const labels=(items:any[])=>items.map(n=>n.label);
 const send=async(value:string)=>{await click('ai.prompt');await h.type_(value);await click('ai.send')};
 const report:any={status:'running',checks:[]};
 try{
- await h.waitForServerReady(60000);await h.resizeWindow(1440,1000);await click('workspace.empty.local');await visible('terminal.surface');await click('toolbar.ai');await click('ai.maximize');await send('按实际时间顺序输出每个步骤。');
+ await h.waitForServerReady(60000);await h.resizeWindow(1440,1000);await click('workspace.empty.local');await visible('terminal.surface');await click('ai.strip');await click('ai.maximize');await send('按实际时间顺序输出每个步骤。');
  const expected=['THOUGHT1','MESSAGE1','THOUGHT2','MESSAGE2','TOOL','THOUGHT3','MESSAGE3','TOOL','THOUGHT4','MESSAGE4','THOUGHT5','MESSAGE5'];
  await h.waitFor(async()=>held&&labels(await timeline()).includes('MESSAGE5')||null,20000);assert.equal(failed,null);
  let items=await timeline();assert.deepEqual(labels(items),expected);

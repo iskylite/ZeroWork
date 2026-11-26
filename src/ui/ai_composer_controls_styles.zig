@@ -83,8 +83,8 @@ pub fn hoverOptional() ?ui.BoxStyle {
 pub fn workspaceRowHover() ?ui.BoxStyle {
     return .{ .background = theme.popupSelection(), .border = .{ .radius = 7 } };
 }
-pub fn attachmentDivider() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 1 }, .flex_shrink = 0, .background = theme.current().fg_3.withAlpha(50) };
+pub fn attachmentGroupSpacing() ui.BoxStyle {
+    return .{ .width = .fill(), .height = .{ .px = 6 }, .flex_shrink = 0 };
 }
 pub fn icon(size: f32) ui.Style {
     return .{ .width = .{ .px = size }, .height = .{ .px = size }, .flex_shrink = 0 };

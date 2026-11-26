@@ -1,6 +1,6 @@
 # 当前主界面设计规范
 
-本规范与三个 `mist-workspace*.svg` 共同定义当前设计。风格与投影映射见 [风格指南](../standards/STYLE_GUIDE.md)，目录、编辑与验收规则见 [设计要求](../standards/DESIGN_REQUIREMENTS.md)。设计画布只包含产品 UI。
+本规范与三个 `mist-workspace*.svg` 提供主工作区的材质、字号、胶囊与留白参考。V0.8 实际工具归属、独立 AI 布局和吉祥物交互以 [对应设计](../../DESIGN/V0.8_WORKSPACE_AI_WEB.md) 为准，不从此处的旧工具分组恢复线条或按钮。风格与投影映射见 [风格指南](../standards/STYLE_GUIDE.md)，目录、编辑与验收规则见 [设计要求](../standards/DESIGN_REQUIREMENTS.md)。设计画布只包含产品 UI。
 
 ## 设计稿
 

@@ -212,6 +212,7 @@ const Anchor = struct {
 };
 
 pub const View = struct {
+    targets: ?*@import("ai_target_bar.zig").View = null,
     cx: *ui.Cx,
     scope: *ui.Scope,
     callbacks: Callbacks,
@@ -290,7 +291,7 @@ pub const View = struct {
     attachment_rows: [attachment_kinds.len]*ui.Node = undefined,
     attachment_disabled: [attachment_kinds.len]*ui.Signal(bool) = undefined,
     workspace_disabled: *ui.Signal(bool) = undefined,
-    workspace_divider: *ui.Node = undefined,
+    workspace_gap: *ui.Node = undefined,
     workspace_row: *ui.Node = undefined,
     usage_body: *ui.Node = undefined,
     usage_scope: ?*ui.Scope = null,
@@ -483,9 +484,11 @@ pub const View = struct {
             const choice = try self.scope.createState(Choice, .{ .view = self, .kind = .attachment, .action = .{ .attachment = kind } });
             self.attachment_rows[index] = try self.mountAttachmentRow(parent, row.label, row.icon, row.id, self.attachment_disabled[index], self.hover_style, self.cx.on(Choice, choice, Choice.choose));
         }
-        self.workspace_divider = try ui.box(self.cx, S.attachmentDivider(), .{});
-        self.workspace_divider.setDisplay(.none);
-        try parent.appendChild(self.cx.allocator, self.workspace_divider);
+        self.workspace_gap = try ui.box(self.cx, S.attachmentGroupSpacing(), .{});
+        self.workspace_gap.meta.ownership.meta.test_id = "ai.attachment.workspace.gap";
+        self.workspace_gap.setHitTestVisible(false);
+        self.workspace_gap.setDisplay(.none);
+        try parent.appendChild(self.cx.allocator, self.workspace_gap);
         self.workspace_disabled = try self.scope.createSignal(bool, true);
         const workspace_hover = try S.theme.paintSignal(?ui.BoxStyle, self.cx, self.scope, S.workspaceRowHover, .{});
         self.workspace_row = try self.mountAttachmentRow(parent, "设置本地工作区…", "folder", "ai.attachment.workspace", self.workspace_disabled, workspace_hover, self.cx.on(View, self, chooseWorkspace));
@@ -887,7 +890,7 @@ pub const View = struct {
         self.paintModeChip();
         const colors = S.theme.current();
         for (self.mode_styles, 0..) |style, index| {
-            const active = index == @intFromEnum(self.swarm_mode);
+            const active = index == @backingInt(self.swarm_mode);
             style.set(S.executionOption(active));
             _ = self.mode_glyphs[index].setTint(if (active) colors.accent_ink else colors.fg_2);
             _ = self.mode_checks[index].setTint(colors.accent_ink);
@@ -908,7 +911,7 @@ pub const View = struct {
         self.mode_chevron.setDisplay(if (self.mode_compact) .none else .flex);
     }
 
-        /// Discovery changes the control revision, but the model picker can rebind
+    /// Discovery changes the control revision, but the model picker can rebind
     /// to the new catalog at flush's safe point without closing under the user.
     pub fn preserveModelPopup(self: *View) void {
         self.keep_model_popup_on_update = true;
@@ -921,6 +924,7 @@ pub const View = struct {
     pub fn setInteraction(self: *View, active: bool) void {
         if (active and !self.interaction_active) self.dismiss();
         self.interaction_active = active;
+        if (self.targets) |targets| targets.setInteraction(active);
         self.trailing.setDisplay(if (active) .none else .flex);
         self.mode_wrapper.setDisplay(if (active or self.source == null or self.source.?.value.swarm_mode == null) .none else .flex);
         for (self.buttons, 0..) |button, index| button.setDisplay(if (active or index == 3) .none else .flex);
@@ -1039,6 +1043,12 @@ pub const View = struct {
         if (!ui.Color.eql(self.slider_thumb.getBackground(), slider_ink)) self.slider_thumb.setBackground(slider_ink);
         const fill = self.slider_track.children.items[0];
         if (!ui.Color.eql(fill.getBackground(), slider_ink)) fill.setBackground(slider_ink);
+    }
+    pub fn canOpen(self: *const View, kind: S.Kind) bool {
+        return !self.interaction_active and self.source != null and !self.disabled[@backingInt(kind)].peek();
+    }
+    pub fn openChoice(self: *View, kind: S.Kind) void {
+        if (self.canOpen(kind) and !self.popups[@backingInt(kind)].widget.open.?.peek()) self.toggle(kind);
     }
     fn toggle(self: *View, requested: S.Kind) void {
         const kind: S.Kind = if (requested == .effort) .model else requested;
@@ -1278,8 +1288,7 @@ pub const View = struct {
         };
         const has_workspace = source != null and source.?.workspace != null;
         self.workspace_row.setDisplay(if (has_workspace) .flex else .none);
-        self.workspace_divider.setDisplay(if (has_workspace) .flex else .none);
-        self.workspace_divider.setBackground(S.attachmentDivider().background.?);
+        self.workspace_gap.setDisplay(if (has_workspace) .flex else .none);
         self.workspace_disabled.set(!has_workspace or !editable);
         var any_attachment = has_workspace and editable;
         for (attachment_kinds, 0..) |kind, index| {
@@ -1554,13 +1563,15 @@ pub const View = struct {
         if (slot_changed) return .needs_layout;
         if (self.interaction_active) return .done;
         const row_width = self.root.globalRect().w;
+        if (self.targets) |targets| if (targets.root.style.display != .none and targets.setCompact(row_width < 620)) return .needs_layout;
+        const target_width = if (self.targets) |targets| if (targets.root.style.display != .none) targets.root.globalRect().w + 8 else 0 else 0;
         const mode_label = self.labels[5].?.getText().?.content;
         const natural_execution_width = 48 + self.cx.text.measureTextWidth(mode_label, 10, 400, false);
         const model_width = @ceil(self.cx.text.measureTextWidth(self.labels[2].?.getText().?.content, 10, 400, false));
         const effort_width = if (self.labels[3].?.style.display != .none) @ceil(self.cx.text.measureTextWidth(self.labels[3].?.getText().?.content, 10, 400, false)) else 0;
         const model_chrome = S.compactModelWidth(0, effort_width, self.model_brand.style.display != .none);
         const mode_visible = self.mode_wrapper.style.display != .none;
-        const fixed_width = self.buttons[0].globalRect().w + self.buttons[1].globalRect().w + self.buttons[4].globalRect().w + actions_width + 48;
+        const fixed_width = self.buttons[0].globalRect().w + self.buttons[1].globalRect().w + self.buttons[4].globalRect().w + actions_width + 48 + target_width;
         const mode_compact = row_width < fixed_width + natural_execution_width + model_chrome + 84 + 8 + 44;
         if (mode_visible and mode_compact != self.mode_compact) {
             self.mode_compact = mode_compact;
@@ -1615,7 +1626,7 @@ pub const View = struct {
                 .effort => self.slider.wrapper,
                 .attachment => if (firstEnabled(self.attachment_disabled)) |index| self.attachment_rows[index] else self.workspace_row,
                 .usage => self.buttons[4],
-                .mode => self.mode_rows[@intFromEnum(self.swarm_mode)],
+                .mode => self.mode_rows[@backingInt(self.swarm_mode)],
                 .execution => self.execution_rows[if (self.source) |source| @as(usize, @intCast(@backingInt(source.value.execution_mode_override orelse source.value.global_execution_mode))) else 0],
             };
             self.cx.setFocus(node);

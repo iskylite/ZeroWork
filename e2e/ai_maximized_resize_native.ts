@@ -31,7 +31,7 @@ async function dragStart(id:string,dx:number,dy:number){
 }
 try{
  await h.waitForServerReady(60000);await h.resizeWindow(1440,900);
- await click('workspace.empty.local');await visible('terminal.surface');await click('toolbar.ai');
+ await click('workspace.empty.local');await visible('terminal.surface');await click('ai.strip');
  const normal=(await visible('ai.panel')).rect;await click('ai.maximize');
  const full=await h.waitFor(async()=>{const r=(await visible('ai.panel')).rect;return r.w>normal.w+100?r:null},5000);
  for(const edge of ['n','s','w','e','nw','ne','sw','se'])await visible('ai.float.resize.'+edge);

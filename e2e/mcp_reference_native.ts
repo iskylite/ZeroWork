@@ -91,7 +91,7 @@ const drive=async()=>{if(error)throw Error(error);
  }
 };
 try{
- await h.waitForServerReady(60000);await h.resizeWindow(1280,900);await click('workspace.empty.local');await visible('terminal.surface');await click('toolbar.ai');
+ await h.waitForServerReady(60000);await h.resizeWindow(1280,900);await click('workspace.empty.local');await visible('terminal.surface');await click('ai.strip');
  for(phase=Number(process.env.ZW_MCP_START_PHASE??0);phase<2&&!process.env.ZW_MCP_UI_ONLY;phase++){
   round=0;lastQuestion='';await click('ai.prompt');await h.type_('Run official MCP reference acceptance phase '+phase);await click('ai.send');
   await until(async()=>{await drive();return text(await h.query('ai.response')).includes(`MCP_REFERENCE_PHASE_${phase}_PASSED`)?true:null},180000);await capture(`phase-${phase}-passed`);

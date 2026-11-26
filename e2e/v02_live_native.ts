@@ -335,7 +335,7 @@ try {
  await click("toolbar.transfers");await capture("08-roundtrip-completed");
  await key("escape");await key("escape");
  if(sftpAi){
-  await click("toolbar.ai");await visible("ai.prompt");
+  await key("j",{cmd:true});await visible("ai.prompt");
   await readonlyAiTurn("list_remote_files",remoteFixture,localFilename);
   await readonlyAiTurn("read_remote_file",remoteFixture+"/"+localFilename,sourceBytes.toString("utf8").trim());
   assert(!(await query("terminal.input")).some(shown));report.sftp_ai.status="passed";

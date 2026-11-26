@@ -82,7 +82,7 @@ const submit=async(text:string)=>{await click('ai.prompt');await h.type_(text);a
 const report:any={status:'running',binary,isolated,transport:ssh?'ssh-exec':'local',fault,vision:process.env.ZW_TEST_VISION==='1',checks:[],input:'synthetic public Harness; screenshots are actual native Metal pixels'};
 try{
  await h.waitForServerReady(60000);assert.equal(Number(JSON.parse(await readFile(join(rpc,'owner.json'),'utf8')).pid),app.pid);
- await h.resizeWindow(1200,1000);await click(ssh?'sidebar.host':'workspace.empty.local');if(ssh)await click('sidebar.host.connect');await visible('terminal.surface');await h.sleep(1500);await click('toolbar.ai');
+ await h.resizeWindow(1200,1000);await click(ssh?'sidebar.host':'workspace.empty.local');if(ssh)await click('sidebar.host.connect');await visible('terminal.surface');await h.sleep(1500);await click('ai.strip');
  await submit('执行文件与图片展示验收');
  await visible(approval);await assert.rejects(readFile(target));await capture('01-create-approval');await click(approve);
  if(fault!=='none'){

@@ -80,7 +80,7 @@ const returnToAssistant=async(count:number)=>{
  await click('settings.close');
  await h.waitFor(async()=>!(await h.query('settings.panel')).some(shown)||null,5000);
  // Clicking the settings entry dismisses the floating assistant.
- await click('toolbar.ai');
+ await click('ai.strip');
  await visible('ai.prompt');
  return waitGroups(count);
 };
@@ -110,7 +110,7 @@ const checkWidths=async(expanded:boolean)=>{
  return group.rect.w;
 };
 try{acceptance:{
- await h.waitForServerReady(60000);await h.resizeWindow(1440,1000);await click('workspace.empty.local');await visible('terminal.surface');await click('toolbar.ai');
+ await h.waitForServerReady(60000);await h.resizeWindow(1440,1000);await click('workspace.empty.local');await visible('terminal.surface');await click('ai.strip');
  await send('请检查当前会话');await h.waitFor(async()=>held||null,20000);await waitGroups(1);
  assert.equal((await groups())[0].rect.h,32,'singleton begins collapsed');
  const header=(await groupHeaders())[0];
