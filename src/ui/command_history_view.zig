@@ -13,6 +13,7 @@ pub const Mode = enum { closed, preview, pinned };
 const floating_surface = @import("floating_surface.zig");
 pub const View = struct {
     workspace_chrome: bool = false,
+    mascot: ?*@import("mascot_island.zig").View = null,
     unavailable: *ui.Signal(bool),
     cx: *ui.Cx,
     scope: *ui.Scope,
@@ -184,8 +185,18 @@ pub const View = struct {
         const h = @min(@min(@as(f32, 475), @max(120, pane.h - 24)), 86 + content_height);
         const trigger = self.buttons[0].globalRect();
         const parent = self.root.parent.?.globalRect();
-        const card: ui.ComputedRect = if (self.workspace_chrome)
-            @import("mascot_island.zig").panelRect(parent, trigger, w, h)
+        const placement = @import("mascot_island.zig");
+        const card: ui.ComputedRect = if (self.mascot) |mascot| blk: {
+            const footprint = mascot.toolFootprint() orelse {
+                self.hide();
+                return;
+            };
+            break :blk placement.lateralPanelRect(parent, footprint.bounds, trigger, w, h, 250, 100) orelse {
+                self.hide();
+                return;
+            };
+        } else if (self.workspace_chrome)
+            placement.panelRect(parent, trigger, w, h)
         else
             .{ .x = pane.x + pane.w - w - 12, .y = pane.y + pane.h - h - 12, .w = w, .h = h };
         self.root.setStyleInline(self.cx.allocator, .{ .inset = .{ .left = .{ .px = card.x - parent.x }, .top = .{ .px = card.y - parent.y } }, .width = .{ .px = card.w }, .height = .{ .px = card.h } });

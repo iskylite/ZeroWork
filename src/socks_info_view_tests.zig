@@ -192,6 +192,12 @@ test "socks card action buttons share geometry and preserve accessible state col
             try std.testing.expect(contrast(paint.hover, paint.ink) >= 4.5);
             try std.testing.expect(contrast(paint.pressed, paint.ink) >= 4.5);
         }
+        try std.testing.expect(!view.intro.isDisplayedInTree());
+        try std.testing.expectEqualStrings("", view.intro.getText().?.content);
+        const gradient = view.control_button.style.gradient().?;
+        try std.testing.expectEqual(theme.states().primary, gradient.from);
+        try std.testing.expectEqual(theme.states().primary_to, gradient.to);
+        try std.testing.expect(view.config_button.style.gradient() == null and view.test_button.style.gradient() == null);
         const test_at = center(view.test_button.globalRect());
         cx.handleClick(test_at[0], test_at[1]);
         try std.testing.expectEqual(@as(usize, 0), sink.actions);
@@ -215,6 +221,7 @@ test "socks card action buttons share geometry and preserve accessible state col
         try std.testing.expectEqual(S.buttonPaint(.secondary).normal, view.test_button.getBackground());
         try std.testing.expectEqual(S.buttonPaint(.destructive).normal, view.control_button.getBackground());
         try std.testing.expectEqual(S.buttonPaint(.destructive).ink, view.control_text.getText().?.color);
+        try std.testing.expect(view.control_button.style.gradient() == null);
         try std.testing.expect(view.test_button.behavior.interaction.focusable);
         try view.update(.{ .state = .stopping, .host = "db", .port = 1080 });
         settle(cx);
@@ -380,16 +387,17 @@ test "socks card docks beside the entire mascot rail, keyboard works, and draggi
     try std.testing.expect(!fix.view.logs_open.peek());
     _ = try fix.expectDisjoint(fix.view.root);
 
-    // Reflow to a narrow pane with the same live tool; choose a viewport-safe
-    // above/below direction and scroll the body. Neither side fits its width.
-    fix.mascot.anchor_x = 0.5;
-    fix.mascot.anchor_y = 0.46;
+    // Reflow along a side (never above/below the rail), including a shorter
+    // viewport where the forwarding content must scroll.
+    fix.mascot.anchor_x = 1;
+    fix.mascot.anchor_y = 1;
     fix.resize(430, 325);
     settle(cx);
     const narrow = try fix.expectDisjoint(fix.view.root);
     const tools = fix.mascot.toolFootprint().?.bounds;
-    try std.testing.expect(narrow.y + narrow.h < tools.y or narrow.y > tools.y + tools.h);
+    try std.testing.expect(narrow.x + narrow.w < tools.x or narrow.x > tools.x + tools.w);
     try std.testing.expect(fix.view.body.container.globalRect().h < fix.view.body.content.globalRect().h);
+    fix.mascot.anchor_x = 0.5;
     fix.resize(260, 250);
     settle(cx);
     try std.testing.expect(!fix.view.open.peek() and !fix.view.root.isDisplayedInTree());
@@ -737,4 +745,37 @@ test "socks card workspace host keeps background-only rows independent and rejec
     info.hide();
     host.showInfo();
     try std.testing.expect(!info.open.peek());
+}
+
+test "mascot click expands temporarily then retracts ordinary tools when the pointer goes away" {
+    const cx = try ui.Cx.init(std.testing.allocator, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(900, 600);
+    try cx.setTestFrameStep(60);
+    const scope = try ui.Scope.init(std.testing.allocator, null, cx.owner);
+    defer scope.dispose();
+    var fix: DockFixture = .{ .cx = cx };
+    try fix.mount(scope, 1, 1);
+    defer {
+        fix.mascot.setVisible(false);
+        settle(cx);
+    }
+    const at = center(fix.mascot.grab.globalRect());
+    cx.handleMouseMove(at[0], at[1]);
+    cx.handleMouseDown(at[0], at[1], .{});
+    cx.handleMouseUp(at[0], at[1]);
+    settle(cx);
+    try std.testing.expect(fix.mascot.pinned and fix.buttons[4].isDisplayedInTree());
+    cx.handleMouseMove(4, 4);
+    settle(cx);
+    try std.testing.expect(!fix.mascot.pinned and !fix.mascot.expanded);
+    try std.testing.expect(!fix.buttons[4].isDisplayedInTree());
+    try std.testing.expect(fix.buttons[1].isDisplayedInTree()); // active forwarding stays advertised
+    cx.focus_manager.setFocusWithReason(fix.mascot.grab, .tab);
+    cx.handleKeyDown(.@"return", .{});
+    settle(cx);
+    try std.testing.expect(fix.buttons[4].isDisplayedInTree());
+    cx.clearFocus();
+    settle(cx);
+    try std.testing.expect(!fix.buttons[4].isDisplayedInTree());
 }

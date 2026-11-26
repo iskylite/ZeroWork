@@ -70,6 +70,8 @@ pub const View = struct {
     dirty: bool = false,
     content_scope: ?*ui.Scope = null,
     anchor_id: ?u32 = null,
+    mascot: ?*@import("mascot_island.zig").View = null,
+    dock_to_rail: bool = false,
     anchor_rect: ui.widgets.popover.AnchorRect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
     status_top: f32 = 0,
     sample_request: ?struct { key: OperationKey, id: u64 } = null,
@@ -99,16 +101,20 @@ pub const View = struct {
     rendered_age_second: ?i128 = null,
 
     pub fn mount(cx: *ui.Cx, scope: *ui.Scope, callbacks: Callbacks) !*View {
+        return mountDocked(cx, scope, callbacks, false);
+    }
+    pub fn mountDocked(cx: *ui.Cx, scope: *ui.Scope, callbacks: Callbacks, dock_to_rail: bool) !*View {
         const self = try cx.allocator.create(View);
         var registered = false;
         errdefer if (!registered) cx.allocator.destroy(self);
-        self.* = .{ .cx = cx, .scope = scope, .callbacks = callbacks, .open = try scope.createSignal(bool, false), .node_open = try scope.createSignal(bool, false) };
+        self.* = .{ .cx = cx, .scope = scope, .callbacks = callbacks, .dock_to_rail = dock_to_rail, .open = try scope.createSignal(bool, false), .node_open = try scope.createSignal(bool, false) };
         try scope.onCleanup(View, self, cleanup);
         registered = true;
         // Scope children dispose in creation order. Release this view's focus
         // while all Button/Tooltip signals still exist.
         const focus_guard = try scope.childScope();
-        const popup = try ui.widgets.Popover(.{ .open = self.open, .group = @import("floating_surface.zig").workspace_popup, .trigger = .manual, .close_on_outside_click = false, .anchor = .{ .virtual = .{ .ctx = self, .getRect = anchor } }, .position = .top, .width = S.width, .max_width = S.width, .offset = .{ .static = S.anchor_gap }, .viewport_padding = S.margin, .constrain_width_to_viewport = true, .flip = true, .shift_main_axis = true, .on_open_change = cx.on(View, self, openChanged), .enter_transition = .none, .exit_transition = .none }).mount(scope, cx);
+        const popup_props: ui.widgets.popover.PopoverProps = .{ .open = .bindTo(self.open), .group = @import("floating_surface.zig").workspace_popup, .trigger = .manual, .close_on_outside_click = false, .anchor = .{ .virtual = .{ .ctx = self, .getRect = anchor } }, .position = @as(ui.widgets.popover.PopoverPosition, if (dock_to_rail) .bottom_start else .top), .width = if (dock_to_rail) null else S.width, .max_width = if (dock_to_rail) null else S.width, .offset = .{ .static = if (dock_to_rail) 0 else S.anchor_gap }, .viewport_padding = if (dock_to_rail) 0 else S.margin, .constrain_width_to_viewport = !dock_to_rail, .flip = !dock_to_rail, .shift_main_axis = !dock_to_rail, .clip_subtree_to_chrome = dock_to_rail, .on_open_change = cx.on(View, self, openChanged), .enter_transition = .none, .exit_transition = .none };
+        const popup = try ui.widgets.Popover(popup_props).mount(scope, cx);
         self.scope = popup.scope;
         self.root = popup.wrapper;
         self.chrome = popup.chrome;
@@ -239,8 +245,17 @@ pub const View = struct {
             self.anchor_rect = next;
             self.chrome.markLayoutDirty();
         }
-        self.chrome.setStyle(self.cx.allocator, .height, .{ .px = self.panelHeight() });
-        self.chrome.setStyle(self.cx.allocator, .width, S.panel(self.panelHeight(), self.cx.viewport.width).width.?);
+        if (self.dock_to_rail) {
+            const r = self.docked() orelse {
+                self.dismiss();
+                return;
+            };
+            self.chrome.setStyleInline(self.cx.allocator, .{ .width = .{ .px = r.w }, .height = .{ .px = r.h } });
+            @import("mascot_island.zig").View.publishPanelOrigin(self.chrome, r);
+        } else {
+            self.chrome.setStyle(self.cx.allocator, .height, .{ .px = self.panelHeight() });
+            self.chrome.setStyle(self.cx.allocator, .width, S.panel(self.panelHeight(), self.cx.viewport.width).width.?);
+        }
         self.positionPointer();
     }
     pub fn isVisible(self: *const View) bool {
@@ -289,14 +304,27 @@ pub const View = struct {
     }
     fn positionPointer(self: *View) void {
         const pointer = self.pointer orelse return;
+        if (self.dock_to_rail) {
+            pointer.setDisplay(.none);
+            return;
+        }
         const w = @min(S.width, @max(0, self.cx.viewport.width - S.margin * 2));
         const center = self.anchor_rect.x + self.anchor_rect.w / 2;
         const left = std.math.clamp(center - w / 2, S.margin, @max(S.margin, self.cx.viewport.width - w - S.margin));
         const p = std.math.clamp(center - left - S.pointer_size / 2, S.margin, @max(S.margin, w - S.margin - S.pointer_size));
         pointer.setStyleInline(self.cx.allocator, S.pointer(p));
     }
+    fn docked(self: *View) ?ui.ComputedRect {
+        const m = self.mascot orelse return null;
+        const trigger = m.slot(.chain).globalRect();
+        return m.workspacePanelRect(trigger, S.width, S.height(if (self.source) |source| source.hop_count else 1), 284, 190);
+    }
     fn anchor(raw: *anyopaque) ui.widgets.popover.AnchorRect {
         const self: *View = @ptrCast(@alignCast(raw));
+        if (self.dock_to_rail) {
+            const r = self.docked() orelse return .{ .x = -1e6, .y = -1e6, .w = 0, .h = 0 };
+            return .{ .x = r.x, .y = r.y, .w = 0, .h = 0 };
+        }
         if (self.visible) if (self.cx.root) |root| if (self.anchor_id) |id| if (find(root, id)) |trigger| {
             const rect = trigger.globalRect();
             if (trigger.isDisplayedInTree() and rect.w > 0) return .{ .x = rect.x, .y = rect.y, .w = rect.w, .h = rect.h };

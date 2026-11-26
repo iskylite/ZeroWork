@@ -40,6 +40,8 @@ pub const View = struct {
     current: ?Owned = null,
     pending: ?Owned = null,
     anchor_id: ?u32 = null,
+    mascot: ?*@import("mascot_island.zig").View = null,
+    chrome: *ui.Node = undefined,
     anchor_rect: ui.widgets.popover.AnchorRect = .{ .x = 8, .y = 8, .w = 0, .h = 0 },
     focus_member: ?u64 = null,
     requested: bool = false,
@@ -48,12 +50,17 @@ pub const View = struct {
     hooks: struct { context: *anyopaque, resolve: *const fn (*anyopaque, u32, bool) void, select: ?*const fn (*anyopaque, u32, Handle, bool) void = null },
 
     pub fn mount(cx: *ui.Cx, scope: *ui.Scope, hooks: @FieldType(View, "hooks")) !*View {
+        return mountDocked(cx, scope, hooks, null);
+    }
+    pub fn mountDocked(cx: *ui.Cx, scope: *ui.Scope, hooks: @FieldType(View, "hooks"), mascot: ?*@import("mascot_island.zig").View) !*View {
         const self = try cx.allocator.create(View);
-        self.* = .{ .cx = cx, .scope = undefined, .root = undefined, .open = try scope.createSignal(bool, false), .content = undefined, .control = undefined, .control_label = try scope.createText("全部开启", .{}), .control_style = try scope.createSignal(@FieldType(ui.widgets.ControlShellConfig, "style"), S.control(true)), .disabled = try scope.createSignal(bool, false), .control_hover = try scope.createSignal(?@FieldType(ui.widgets.ControlShellConfig, "style"), S.controlHover(true)), .hooks = hooks };
+        self.* = .{ .cx = cx, .scope = undefined, .root = undefined, .open = try scope.createSignal(bool, false), .content = undefined, .control = undefined, .control_label = try scope.createText("全部开启", .{}), .control_style = try scope.createSignal(@FieldType(ui.widgets.ControlShellConfig, "style"), S.control(true)), .disabled = try scope.createSignal(bool, false), .control_hover = try scope.createSignal(?@FieldType(ui.widgets.ControlShellConfig, "style"), S.controlHover(true)), .hooks = hooks, .mascot = mascot };
         try scope.onCleanup(View, self, cleanup);
-        const popup = try ui.widgets.Popover(.{ .trigger = .manual, .position = .top_end, .open = self.open, .width = S.width, .max_height = S.maximum_height, .offset = .{ .static = @as(f32, 6) }, .constrain_width_to_viewport = true, .viewport_padding = 8, .on_open_change = cx.on(View, self, changed), .anchor = .{ .virtual = .{ .ctx = self, .getRect = anchorRect } } }).mount(scope, cx);
+        const popup_props: ui.widgets.popover.PopoverProps = .{ .trigger = .manual, .position = @as(ui.widgets.popover.PopoverPosition, if (mascot != null) .bottom_start else .top_end), .open = .bindTo(self.open), .width = if (mascot != null) null else S.width, .max_height = S.maximum_height, .offset = .{ .static = if (mascot != null) 0 else @as(f32, 6) }, .constrain_width_to_viewport = mascot == null, .viewport_padding = if (mascot != null) 0 else 8, .flip = mascot == null, .clip_subtree_to_chrome = mascot != null, .enter_transition = @as(@FieldType(ui.widgets.popover.PopoverProps, "enter_transition"), if (mascot != null) .none else .scale_fade), .exit_transition = @as(@FieldType(ui.widgets.popover.PopoverProps, "exit_transition"), if (mascot != null) .none else .scale_fade), .on_open_change = cx.on(View, self, changed), .anchor = .{ .virtual = .{ .ctx = self, .getRect = anchorRect } } };
+        const popup = try ui.widgets.Popover(popup_props).mount(scope, cx);
         self.scope = popup.scope;
         self.root = popup.content;
+        self.chrome = popup.chrome;
         self.root.setStyleInline(cx.allocator, S.panel());
         try cx.root.?.appendChild(cx.allocator, popup.wrapper);
         self.root.meta.ownership.meta.test_id = "group.broadcast.card";
@@ -131,6 +138,19 @@ pub const View = struct {
             return .done;
         }
         const rect = trigger.globalRect();
+        if (self.mascot != null) {
+            const r = self.docked() orelse {
+                self.dismiss();
+                return .done;
+            };
+            const w = self.root.style.width;
+            const h = self.root.style.height;
+            if (w != .px or h != .px or w.px != r.w or h.px != r.h) {
+                self.root.setStyleInline(self.cx.allocator, .{ .width = .{ .px = r.w }, .height = .{ .px = r.h } });
+                self.chrome.setStyleInline(self.cx.allocator, .{ .width = .{ .px = r.w }, .height = .{ .px = r.h } });
+            }
+            @import("mascot_island.zig").View.publishPanelOrigin(self.chrome, r);
+        }
         const next: ui.widgets.popover.AnchorRect = .{ .x = rect.x, .y = rect.y, .w = rect.w, .h = rect.h };
         if (self.requested) {
             self.requested = false;
@@ -218,8 +238,17 @@ pub const View = struct {
         self.dismiss();
         if (!self.running) self.hooks.resolve(self.hooks.context, self.group_id, false);
     }
+    fn docked(self: *View) ?ui.ComputedRect {
+        const m = self.mascot orelse return null;
+        return m.workspacePanelRect(m.slot(.broadcast).globalRect(), S.width, S.maximum_height, 272, 155);
+    }
+
     fn anchorRect(raw: *anyopaque) ui.widgets.popover.AnchorRect {
         const self: *View = @ptrCast(@alignCast(raw));
+        if (self.mascot != null) {
+            const r = self.docked() orelse return .{ .x = -1e6, .y = -1e6, .w = 0, .h = 0 };
+            return .{ .x = r.x, .y = r.y, .w = 0, .h = 0 };
+        }
         if (self.cx.root) |root| if (self.anchor_id) |id| if (find(root, id)) |trigger| {
             const rect = trigger.globalRect();
             if (trigger.isDisplayedInTree() and rect.w > 0) return .{ .x = rect.x, .y = rect.y, .w = rect.w, .h = rect.h };

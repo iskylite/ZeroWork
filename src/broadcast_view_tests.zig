@@ -1,6 +1,7 @@
 const std = @import("std");
 const ui = @import("ui");
 const Broadcast = @import("ui/broadcast_view.zig");
+const Mascot = @import("ui/mascot_island.zig");
 const Handle = @import("host/identity.zig").SessionHandle;
 const a = std.testing.allocator;
 fn find(root: *ui.Node, id: []const u8) ?*ui.Node {
@@ -16,7 +17,11 @@ const Fixture = struct {
     selects: usize = 0,
     selected: bool = true,
     accepted: usize = 0,
+    mascot: ?*Mascot.View = null,
     fn init(self: *Fixture) !void {
+        return self.initDocked(false);
+    }
+    fn initDocked(self: *Fixture, docked: bool) !void {
         self.* = .{ .cx = try ui.Cx.init(a, std.testing.io), .scope = undefined, .anchor = undefined, .view = undefined };
         try self.cx.setTestFrameStep(100);
         self.cx.setViewport(1440, 900);
@@ -25,7 +30,24 @@ const Fixture = struct {
         self.anchor = try ui.widgets.Button(.{ .label = "广播", .variant = .ghost }).mount(self.scope, self.cx);
         self.anchor.setStyleInline(a, .{ .position = .absolute, .inset = .{ .left = .{ .px = 1060 }, .top = .{ .px = 850 } }, .width = .{ .px = 86 }, .height = .{ .px = 26 } });
         try self.cx.root.?.appendChild(a, self.anchor);
-        self.view = try Broadcast.View.mount(self.cx, self.scope, .{ .context = self, .resolve = resolve, .select = select });
+        if (docked) {
+            const hooks = struct {
+                fn save(_: *anyopaque, _: f32, _: f32) void {}
+                fn noop(_: *anyopaque, _: Mascot.Slot) void {}
+                fn panel(raw: *anyopaque, slot: Mascot.Slot) ?*ui.Node {
+                    const f: *Fixture = @ptrCast(@alignCast(raw));
+                    return if (slot == .broadcast and (f.view.open.peek() or f.view.requested)) f.view.chrome else null;
+                }
+            };
+            const m = try Mascot.View.mount(self.cx, self.scope, self.cx.root.?, .{ .context = self, .save_anchor = hooks.save, .open_preview = hooks.noop, .close_preview = hooks.noop, .panel = hooks.panel, .pin_preview = hooks.noop }, 1, 1);
+            m.setActivity(.{ .forward_available = true, .chain_available = true, .history_available = true, .broadcast_available = true });
+            m.expanded = true;
+            m.pinned = true;
+            self.mascot = m;
+            self.anchor = m.slot(.broadcast);
+        }
+        self.view = try Broadcast.View.mountDocked(self.cx, self.scope, .{ .context = self, .resolve = resolve, .select = select }, self.mascot);
+        if (self.mascot) |m| self.cx.focus_manager.setFocusWithReason(m.grab, .tab);
         self.frame();
     }
     fn deinit(self: *Fixture) void {
@@ -35,6 +57,7 @@ const Fixture = struct {
     }
     fn frame(self: *Fixture) void {
         for (0..10) |_| {
+            self.cx.requestRedraw();
             self.cx.advanceFrameClock();
             self.cx.layout();
             _ = self.cx.render();
@@ -127,4 +150,23 @@ test "retained broadcast_view_tests paint matches a fresh mount in every builtin
         errdefer std.debug.print("theme={s}\n", .{id});
         try support.expectPaintEqual(retained.view.root, fresh.view.root);
     }
+}
+
+test "mascot broadcast remains actionable on each side of the function rail" {
+    var f: Fixture = undefined;
+    try f.initDocked(true);
+    defer f.deinit();
+    const m = f.mascot.?;
+    try f.show(2);
+    for ([_]f32{ 1, 0 }) |side| {
+        m.anchor_x = side;
+        f.frame();
+        const rail = m.toolFootprint().?.bounds;
+        const panel = f.view.chrome.globalRect();
+        try std.testing.expect(f.view.open.peek() and f.view.chrome.getOpacity() >= 0.99);
+        if (side == 1) try std.testing.expect(panel.x + panel.w + 11.9 < rail.x) else try std.testing.expect(panel.x >= rail.x + rail.w + 11.9);
+    }
+    const control = f.view.control.globalRect();
+    f.cx.handleClick(control.x + control.w / 2, control.y + control.h / 2);
+    try std.testing.expectEqual(@as(usize, 1), f.accepted);
 }

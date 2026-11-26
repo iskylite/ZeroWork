@@ -115,6 +115,7 @@ pub const View = struct {
         const root = try ui.box(cx, .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .gap = 6, .margin = .{ .top = 14 }, .flex_shrink = 0 }, .{});
         try parent.appendChild(cx.allocator, root);
         root.meta.ownership.meta.test_id = "socks.info.background";
+        root.setDisplay(.none);
         const header = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 20 }, .direction = .row, .align_items = .center, .gap = 8, .flex_shrink = 0 }, .{});
         try root.appendChild(cx.allocator, header);
         try header.appendChild(cx.allocator, try ui.text(cx, "后台转发", S.text(13, 600, 20, S.theme.current().fg_1)));
@@ -187,10 +188,10 @@ pub const View = struct {
             }
             if (shown == 0) try self.addEmpty(self.list.content);
             if (self.inline_section) |section| {
-                if (rows.len == 0) try self.addEmpty(section.list.content);
-                try section.count.setTextContent(self.cx.allocator, try std.fmt.bufPrint(&buffer, "{d} 条", .{rows.len}));
+                section.root.setDisplay(if (rows.len == 0) .none else .flex);
+                try section.count.setTextContent(self.cx.allocator, if (rows.len == 0) "" else try std.fmt.bufPrint(&buffer, "{d} 条", .{rows.len}));
                 const slots: f32 = @floatFromInt(@min(3, rows.len));
-                section.list.container.setStyleInline(self.cx.allocator, .{ .height = .{ .px = if (rows.len == 0) 20 else slots * 62 + (slots - 1) * 6 } });
+                section.list.container.setStyleInline(self.cx.allocator, .{ .height = .{ .px = if (rows.len == 0) 0 else slots * 62 + (slots - 1) * 6 } });
             }
             self.count_text.set(try std.fmt.bufPrint(&buffer, "后台转发 ×{d}", .{rows.len}));
             self.remote_entry.setDisplay(if (rows.len == 0 or self.inline_section != null) .none else .flex);

@@ -2039,3 +2039,36 @@ test "transfer projection numeric progress retains row controls scopes and toolt
     try std.testing.expectEqualStrings("传输中", id(p.root, "transfer.task.status").?.getText().?.content);
     try std.testing.expect(text(p.root, "已完成") != null);
 }
+
+test "mascot transfer-task popover is lateral to the entire rail on both screen edges" {
+    const h = try H.init(1440, 900);
+    defer h.deinit();
+    const M = @import("ui/mascot_island.zig");
+    const hooks = struct {
+        fn save(_: *anyopaque, _: f32, _: f32) void {}
+        fn noop(_: *anyopaque, _: M.Slot) void {}
+        fn panel(_: *anyopaque, _: M.Slot) ?*ui.Node {
+            return null;
+        }
+    };
+    var capture: WindowLegacy = .{};
+    const mascot = try M.View.mount(h.cx, h.scope, h.root, .{ .context = &capture, .save_anchor = hooks.save, .open_preview = hooks.noop, .close_preview = hooks.noop, .panel = hooks.panel, .pin_preview = hooks.noop }, 1, 1);
+    mascot.setActivity(.{ .transfer_active = true, .forward_available = true, .chain_available = true, .history_available = true, .broadcast_available = true });
+    var manager = try backend.Manager.init(std.testing.allocator, .{ .ctx = &capture, .open = Engine.open, .cancel = Engine.cancel, .poll = Engine.poll }, 1, .{});
+    defer manager.deinit();
+    const p = try V.mountGlobalPopover(h.cx, h.scope, &manager, .{ .context = &capture, .action = WindowLegacy.action, .owner = WindowLegacy.ownerCall });
+    try h.root.appendChild(h.cx.allocator, p.root);
+    p.mascot = mascot;
+    p.setAnchor(mascot.slot(.transfer));
+    p.show();
+    h.frames();
+    const right = mascot.toolFootprint().?.bounds;
+    try std.testing.expect(p.root.globalRect().x + p.root.globalRect().w + 11.9 < right.x);
+    mascot.anchor_x = 0;
+    h.frames();
+    const left = mascot.toolFootprint().?.bounds;
+    try std.testing.expect(p.root.globalRect().x >= left.x + left.w + 11.9);
+    h.cx.setViewport(240, 220);
+    h.frames();
+    try std.testing.expect(!p.root.isDisplayedInTree());
+}

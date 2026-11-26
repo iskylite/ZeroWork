@@ -7,58 +7,6 @@ const ButtonStyle = @FieldType(ui.widgets.ControlShellConfig, "style");
 
 pub const rail_gap: f32 = 12;
 const viewport_padding: f32 = 8;
-const dock_padding: f32 = 12;
-
-const DockSide = enum { left, right, above, below };
-
-/// Dock in one of the four half-planes *outside* the complete tools
-/// footprint. Never ask a generic positioner to shift onto the rail.
-/// Rank by a stable size budget so counters, text wrapping, and scroll
-/// height changes cannot make the panel repeatedly switch sides.
-fn dockRect(bounds: ui.ComputedRect, footprint: mascot_island.ToolFootprint, trigger: ui.ComputedRect, desired_w: f32, height_budget: f32, natural_h: f32) ?ui.ComputedRect {
-    const frame = footprint.bounds;
-    const near = [2]DockSide{
-        if (frame.x + frame.w / 2 > bounds.x + bounds.w / 2) .left else .right,
-        if (frame.y + frame.h / 2 > bounds.y + bounds.h / 2) .above else .below,
-    };
-    const far = [2]DockSide{ if (near[0] == .left) .right else .left, if (near[1] == .above) .below else .above };
-    const order = if (footprint.horizontal) [4]DockSide{ near[1], far[1], near[0], far[0] } else [4]DockSide{ near[0], far[0], near[1], far[1] };
-    const left = bounds.x + dock_padding;
-    const top = bounds.y + dock_padding;
-    const right = bounds.x + bounds.w - dock_padding;
-    const bottom = bounds.y + bounds.h - dock_padding;
-    var best: ?ui.ComputedRect = null;
-    var best_rank: f32 = 0;
-    for (order) |side| {
-        const x1 = if (side == .right) @max(left, frame.x + frame.w + rail_gap) else left;
-        const x2 = if (side == .left) @min(right, frame.x - rail_gap) else right;
-        const y1 = if (side == .below) @max(top, frame.y + frame.h + rail_gap) else top;
-        const y2 = if (side == .above) @min(bottom, frame.y - rail_gap) else bottom;
-        const w = @min(desired_w, x2 - x1);
-        const available_h = y2 - y1;
-        if (w < S.minimum_width or available_h < S.chrome_height + 36) continue;
-        const h = @min(natural_h, available_h);
-        const rank = w * @min(height_budget, available_h);
-        if (rank <= best_rank) continue;
-        best_rank = rank;
-        const anchor_y = if (trigger.y + trigger.h / 2 > bounds.y + bounds.h / 2) trigger.y + trigger.h - h else trigger.y;
-        best = .{
-            .x = switch (side) {
-                .left => x2 - w,
-                .right => x1,
-                .above, .below => std.math.clamp(trigger.x + (trigger.w - w) / 2, x1, x2 - w),
-            },
-            .y = switch (side) {
-                .left, .right => std.math.clamp(anchor_y, y1, y2 - h),
-                .above => y2 - h,
-                .below => y1,
-            },
-            .w = w,
-            .h = h,
-        };
-    }
-    return best;
-}
 
 pub const State = enum { off, connecting, running, paused, stopping, failed };
 pub const Data = struct {
@@ -102,7 +50,7 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, hooks: Hooks) !*View {
 /// status chip keeps its original automatic top/bottom placement.
 pub fn mountAnchored(cx: *ui.Cx, scope: *ui.Scope, hooks: Hooks, dock_to_rail: bool) !*View {
     const self = try cx.allocator.create(View);
-    self.* = .{ .dock_to_rail = dock_to_rail, .cx = cx, .scope = scope, .hooks = hooks, .root = undefined, .body = undefined, .header = undefined, .footer = undefined, .status = undefined, .address = undefined, .bind_note = undefined, .exit = undefined, .route = undefined, .statistics = undefined, .message = undefined, .control_text = undefined, .test_button = undefined, .copy_button = undefined, .config_button = undefined, .control_button = undefined, .pointer = undefined, .protocol = undefined, .owner = undefined, .title_icon = undefined, .close_button = undefined, .test_disabled = try scope.createSignal(bool, true), .control_disabled = try scope.createSignal(bool, false) };
+    self.* = .{ .dock_to_rail = dock_to_rail, .cx = cx, .scope = scope, .hooks = hooks, .root = undefined, .body = undefined, .header = undefined, .footer = undefined, .status = undefined, .address = undefined, .bind_note = undefined, .exit = undefined, .route = undefined, .statistics = undefined, .message = undefined, .control_text = undefined, .test_button = undefined, .copy_button = undefined, .config_button = undefined, .control_button = undefined, .pointer = undefined, .protocol = undefined, .owner = undefined, .title_icon = undefined, .close_button = undefined, .test_disabled = try scope.createSignal(bool, true), .control_disabled = try scope.createSignal(bool, false), .control_primary_hidden = try scope.createSignal(bool, true), .config_primary_hidden = try scope.createSignal(bool, true) };
     try scope.onCleanup(View, self, View.cleanup);
     const focus_guard = try scope.childScope();
     self.open = try scope.createSignal(bool, false);
@@ -334,6 +282,8 @@ pub const View = struct {
     endpoint: *ui.Node = undefined,
     test_disabled: *ui.Signal(bool),
     control_disabled: *ui.Signal(bool),
+    control_primary_hidden: *ui.Signal(bool),
+    config_primary_hidden: *ui.Signal(bool),
     logs_text: *ui.Node = undefined,
     logs_visible: bool = false,
     logs_root: *ui.Node = undefined,
@@ -401,7 +351,6 @@ pub const View = struct {
         self.read_only = data.read_only;
         self.has_rule = data.configured or data.state != .off;
         const has_endpoint = !data.read_only or data.state == .running;
-        self.intro.setDisplay(if (!data.read_only or data.configured) .flex else .none);
         self.empty.setDisplay(if (self.has_rule or data.read_only) .none else .flex);
         self.rule.setDisplay(if (self.has_rule or data.read_only) .flex else .none);
         // The existing controls follow their rule; when unconfigured the same
@@ -465,14 +414,17 @@ pub const View = struct {
             .stopping => "停止中",
             .failed => "启动失败",
         });
-        try self.intro.setTextContent(self.cx.allocator, data.intro_label orelse switch (data.state) {
+        const intro = data.intro_label orelse switch (data.state) {
             .running => "监听已就绪，可连接下方地址",
             .connecting => "正在建立转发，请稍候",
             .failed => "转发未运行，请检查错误后重试",
             .paused => "SSH 连接已断开，等待恢复",
             .stopping => "正在释放监听与连接，请稍候",
-            .off => if (self.has_rule) "配置已就绪" else "尚未配置转发规则",
-        });
+            .off => "",
+        };
+        const show_intro = (!data.read_only or data.configured) and intro.len > 0 and !std.mem.eql(u8, intro, "配置已就绪");
+        try self.intro.setTextContent(self.cx.allocator, if (show_intro) intro else "");
+        self.intro.setDisplay(if (show_intro) .flex else .none);
         self.test_disabled.set(data.state != .running or data.mode != .socks5 or known_port == null);
         self.copy_button.setDisplay(if (has_endpoint and self.has_rule and data.mode == .socks5) .flex else .none);
         self.test_button.setDisplay(if (!data.read_only and self.has_rule and data.mode == .socks5) .flex else .none);
@@ -548,6 +500,8 @@ pub const View = struct {
         const labels = [_]*ui.Node{ self.test_text, self.config_text, self.control_text };
         for (buttons, labels, [_]Action{ .test_proxy, .config, .start }) |node, label, a| {
             const role = self.buttonRole(a);
+            if (a == .start) self.control_primary_hidden.set(role != .primary);
+            if (a == .config) self.config_primary_hidden.set(role != .primary);
             const skin = S.buttonPaint(role);
             self.paintActionFill(node, skin, role != .disabled);
             setColor(label, skin.ink);
@@ -679,7 +633,7 @@ pub const View = struct {
         const measured = self.body.content.globalRect().h;
         const height_budget = if (logs) S.logs_height else S.normal_height;
         const natural_h = if (logs or measured <= 0) height_budget else S.chrome_height + measured;
-        const target = dockRect(bounds, footprint, trigger, if (logs) S.logs_width else S.width, height_budget, natural_h) orelse {
+        const target = mascot_island.lateralPanelRect(bounds, footprint.bounds, trigger, if (logs) S.logs_width else S.width, natural_h, S.minimum_width, S.chrome_height + 36) orelse {
             // Too little room to offer a legible panel. Do not cover the tool
             // strip or place invisible controls over it; leave the strip usable.
             self.hide();
@@ -829,6 +783,12 @@ fn button(self: *View, parent: *ui.Node, label: []const u8, action: Action) !*ui
         .disabled = if (disabled) |signal| ui.Source(bool){ .signal = signal } else ui.Source(bool){ .value = false },
         .on_click = self.cx.on(Click, click, Click.invoke),
     }).mount(self.scope, self.cx);
+    // Use the same themed primary treatment as “测试全链路”. A retained
+    // footer action changes role; its primary material must switch off for
+    // Stop/Cancel/disabled without changing the real button interaction.
+    if (action == .start or action == .config) {
+        try S.theme.stylePrimary(self.cx, self.scope, node, if (action == .start) self.control_primary_hidden else self.config_primary_hidden);
+    }
     if (icon_only) {
         try node.appendChild(self.cx.allocator, try ui.iconTint(self.cx, ui.icons.get(if (action == .copy_export) "copy" else "file-text").?, S.theme.current().fg_2, S.icon(16)));
     } else {

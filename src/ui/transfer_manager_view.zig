@@ -454,6 +454,7 @@ pub const Panel = struct {
     dirty: bool = false,
     in_action: bool = false,
     anchor_id: ?u32 = null,
+    mascot: ?*@import("mascot_island.zig").View = null,
     pending_refresh: ?struct { now: u64, stats: Statistics } = null,
     revision: u64 = 0,
     window_disabled: *ui.Signal(bool),
@@ -1698,7 +1699,7 @@ pub const Panel = struct {
         }
         const global = p.options.presentation == .global_popover;
         const desired_width: f32 = if (global) 640 else 560;
-        const width = @max(@as(f32, 1), @min(desired_width, bounds.w - 24));
+        var width = @max(@as(f32, 1), @min(desired_width, bounds.w - 24));
         var list_height: f32 = 0;
         for (p.visible.items, 0..) |_, i| list_height += itemHeight(i, p);
         if (list_height == 0) list_height = 100;
@@ -1713,7 +1714,18 @@ pub const Panel = struct {
         if (p.anchor_id) |id| {
             if (findNode(p.cx.root orelse return .done, id)) |anchor| {
                 const r = anchor.globalRect();
-                const card = @import("mascot_island.zig").panelRect(bounds, r, width, height);
+                const placement = @import("mascot_island.zig");
+                const card = if (p.mascot) |mascot| blk: {
+                    const footprint = mascot.toolFootprint() orelse {
+                        p.hide();
+                        return .done;
+                    };
+                    break :blk placement.lateralPanelRect(bounds, footprint.bounds, r, width, height, 288, 166) orelse {
+                        p.hide();
+                        return .done;
+                    };
+                } else placement.panelRect(bounds, r, width, height);
+                width = card.w;
                 right = bounds.x + bounds.w - card.x - card.w;
                 top = card.y - bounds.y;
                 height = card.h;

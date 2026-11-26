@@ -79,6 +79,27 @@ pub fn panelRect(bounds: ui.ComputedRect, anchor: ui.ComputedRect, desired_w: f3
     };
 }
 
+/// Workspace tool panels always use a horizontal side of the complete rail
+/// envelope. Both sides are legal; an undersized workspace never falls back
+/// on top of the rail or on its click targets.
+pub fn lateralPanelRect(bounds: ui.ComputedRect, tools: ui.ComputedRect, trigger: ui.ComputedRect, width: f32, height: f32, min_w: f32, min_h: f32) ?ui.ComputedRect {
+    const clear: f32 = 12;
+    const left = bounds.x + clear;
+    const right = bounds.x + bounds.w - clear;
+    const top = bounds.y + clear;
+    const bottom = bounds.y + bounds.h - clear;
+    const left_edge = @min(right, tools.x - clear);
+    const right_edge = @max(left, tools.x + tools.w + clear);
+    const left_room = left_edge - left;
+    const right_room = right - right_edge;
+    const to_left = left_room >= right_room;
+    const w = @min(width, if (to_left) left_room else right_room);
+    const h = @min(height, bottom - top);
+    if (w < min_w or h < min_h) return null;
+    const anchor_y = if (trigger.y + trigger.h / 2 >= bounds.y + bounds.h / 2) trigger.y + trigger.h - h else trigger.y;
+    return .{ .x = if (to_left) left_edge - w else right_edge, .y = std.math.clamp(anchor_y, top, bottom - h), .w = w, .h = h };
+}
+
 pub const Slot = enum(u8) { transfer = 0, forward = 1, broadcast = 2, chain = 3, history = 4 };
 
 pub const Activity = struct {
@@ -182,7 +203,7 @@ pub const View = struct {
         }
         // Read-only previews for surfaces whose click creates an editing draft
         // or opens a separate graphical connection dialog. Hover must do neither.
-        self.glance = try ui.widgets.Popover(.{ .group = @import("floating_surface.zig").workspace_popup, .trigger = .manual, .position = .top, .flip = true, .shift_main_axis = true, .viewport_padding = 8, .width = @as(f32, 260), .max_width = @as(f32, 260), .constrain_width_to_viewport = true, .size_policy = .fit_content, .offset = .{ .static = 6 }, .anchor = .{ .virtual = .{ .ctx = self, .getRect = glanceAnchor } } }).mount(scope, cx);
+        self.glance = try ui.widgets.Popover(.{ .group = @import("floating_surface.zig").workspace_popup, .trigger = .manual, .position = .bottom_start, .flip = false, .shift_main_axis = false, .viewport_padding = 0, .width = @as(f32, 260), .max_width = @as(f32, 260), .constrain_width_to_viewport = false, .size_policy = .fit_content, .offset = .{ .static = 0 }, .enter_transition = .none, .exit_transition = .none, .anchor = .{ .virtual = .{ .ctx = self, .getRect = glanceAnchor } } }).mount(scope, cx);
         self.glance.trigger.setDisplay(.none);
         self.glance.content.meta.ownership.meta.test_id = "workspace.mascot.preview";
         self.glance.content.setStyleInline(cx.allocator, .{ .width = .fill(), .padding = ui.Padding.all(12), .gap = 5, .background = theme.current().overlay, .glass = theme.overlayGlass(), .border = .{ .radius = 11 }, .shadow = .{ .offset_y = 8, .blur = 18, .color = theme.current().shadow } });
@@ -206,15 +227,20 @@ pub const View = struct {
 
     fn glanceAnchor(raw: *anyopaque) ui.widgets.popover.AnchorRect {
         const self: *View = @ptrCast(@alignCast(raw));
-        const r = (if (self.glance_kind) |which| self.slot(which) else self.body).globalRect();
-        return .{ .x = r.x, .y = r.y, .w = r.w, .h = r.h };
+        const r = self.glanceRect() orelse return .{ .x = -1e6, .y = -1e6, .w = 0, .h = 0 };
+        return .{ .x = r.x, .y = r.y, .w = 0, .h = 0 };
+    }
+    fn glanceRect(self: *View) ?ui.ComputedRect {
+        const trigger = (if (self.glance_kind) |which| self.slot(which) else self.body).globalRect();
+        const h = @max(@as(f32, 96), self.glance.chrome.globalRect().h);
+        return self.workspacePanelRect(trigger, 260, h, 260, 96);
     }
     pub fn showGlance(self: *View, which: Slot, title: []const u8, detail: []const u8, meta: []const u8) !void {
         try self.glance_title.setTextContent(self.cx.allocator, title);
         try self.glance_detail.setTextContent(self.cx.allocator, detail);
         try self.glance_meta.setTextContent(self.cx.allocator, meta);
         self.glance_kind = which;
-        self.glance.show.invoke();
+        if (self.glanceRect() != null) self.glance.show.invoke() else self.glance_kind = null;
     }
     pub fn closeGlance(self: *View) void {
         self.glance.close.invoke();
@@ -295,6 +321,32 @@ pub const View = struct {
         const dir = directionFor(c, canvas.w, canvas.h, n);
         const destination = unionRect(boxAt(c, S.body_size, S.body_size), railRect(c, dir, railLength(@floatFromInt(n))));
         return .{ .bounds = translateRect(destination, canvas.x, canvas.y), .horizontal = dir == .left or dir == .right };
+    }
+
+    pub fn workspacePanelRect(self: *View, trigger: ui.ComputedRect, width: f32, height: f32, min_w: f32, min_h: f32) ?ui.ComputedRect {
+        const footprint = self.toolFootprint() orelse return null;
+        const workspace = self.root.globalRect();
+        const cx = self.cx;
+        const x = @max(cx.safe_area_left, workspace.x);
+        const y = @max(cx.safe_area_top, workspace.y);
+        return lateralPanelRect(.{
+            .x = x,
+            .y = y,
+            .w = @max(0, @min(cx.viewport.width - cx.safe_area_right, workspace.x + workspace.w) - x),
+            .h = @max(0, @min(cx.viewport.height - cx.safe_area_bottom, workspace.y + workspace.h) - y),
+        }, footprint.bounds, trigger, width, height, min_w, min_h);
+    }
+
+    pub fn publishPanelOrigin(node: *ui.Node, target: ui.ComputedRect) void {
+        const parent = node.parent orelse return;
+        const base = parent.globalRect();
+        const x = target.x - base.x;
+        const y = target.y - base.y;
+        if (@abs(node.style.translate_x - x) > 0.01 or @abs(node.style.translate_y - y) > 0.01) {
+            node.style.translate_x = x;
+            node.style.translate_y = y;
+            node.markCompositePropDirty();
+        }
     }
 
     fn applicable(self: *const View, index: usize) bool {
@@ -499,7 +551,10 @@ pub const View = struct {
         var tool_focused = false;
         var panel_open = false;
         var inside_panel = false;
-        var forward_panel: ?*ui.Node = null;
+        var bridge_panel: ?struct { slot: Slot, node: *ui.Node } = null;
+        if (self.glance_kind != null and self.glance.open.?.peek()) {
+            if (self.glanceRect()) |r| publishPanelOrigin(self.glance.chrome, r) else self.closeGlance();
+        }
         for (self.slots, 0..) |node, i| {
             const which: Slot = @fromBackingInt(@intCast(i));
             if (self.hooks.panel(self.hooks.context, which)) |panel| {
@@ -509,7 +564,7 @@ pub const View = struct {
                         (which != .forward or self.within(t)) and @import("floating_input.zig").containsPress(self.cx, panel, t)
                     else
                         false);
-                    if (which == .forward) forward_panel = panel;
+                    bridge_panel = .{ .slot = which, .node = panel };
                 }
             }
             if (self.applicable(i) and node.isDisplayedInTree()) if (focus) |f| {
@@ -518,19 +573,26 @@ pub const View = struct {
             if (self.applicable(i) and self.within(node) and
                 (if (target) |t| t.isDescendantOf(node) else false)) hovered = which;
         }
-        if (forward_panel) |panel| {
-            if (!inside_panel and hovered == null and panel.isDisplayedInTree() and panel.getOpacity() >= 0.99) {
-                inside_panel = bridgeContains(self.slot(.forward).globalRect(), panel.globalRect(), self.cx.mouse_x, self.cx.mouse_y);
+        if (bridge_panel) |item| {
+            if (!inside_panel and hovered == null and item.node.isDisplayedInTree() and item.node.getOpacity() >= 0.99) {
+                inside_panel = bridgeContains(self.slot(item.slot).globalRect(), item.node.globalRect(), self.cx.mouse_x, self.cx.mouse_y);
             }
         }
         const body_hover = if (target) |t| (t.isDescendantOf(self.root) and (self.within(self.body) or self.within(self.rail))) else false;
         if (!body_hover) self.ignore_badge_until_leave = false;
-        const hovering = !self.dragging and (body_hover and !self.ignore_badge_until_leave or hovered != null or panel_open or tool_focused);
+        // Clicking the badge latches the current interaction, not the rail
+        // indefinitely. Keyboard activation still keeps the trail open while
+        // the trigger/one of its tools has visible keyboard focus.
+        const badge_keyboard = self.pinned and (if (focus) |node| node == self.grab else false);
+        const hovering = !self.dragging and (body_hover and !self.ignore_badge_until_leave or hovered != null or panel_open or tool_focused or badge_keyboard);
         if (hovering) {
             self.expanded = true;
             self.collapse_after_ms = now + leave_ms;
-        } else if (!self.pinned and !self.dragging and self.expanded) {
-            if (now >= self.collapse_after_ms) self.expanded = false else self.schedule(self.collapse_after_ms - now);
+        } else if (!self.dragging and self.expanded) {
+            if (now >= self.collapse_after_ms) {
+                self.expanded = false;
+                self.pinned = false;
+            } else self.schedule(self.collapse_after_ms - now);
         }
         self.previewTick(if (inside_panel) null else hovered, inside_panel, now);
         const dt = if (self.last_ms) |old| now - old else 0;
@@ -620,4 +682,17 @@ test "mascot preview follows the anchor and does not cover its trigger or clip a
         try std.testing.expect(r.x >= bounds.x and r.y >= bounds.y and r.x + r.w <= bounds.x + bounds.w and r.y + r.h <= bounds.y + bounds.h);
         try std.testing.expect(r.y + r.h <= anchor.y or r.y >= anchor.y + anchor.h);
     }
+}
+
+test "mascot side panels stay outside the complete function group" {
+    const bounds: ui.ComputedRect = .{ .x = 220, .y = 20, .w = 760, .h = 520 };
+    const right_rail: ui.ComputedRect = .{ .x = 922, .y = 310, .w = 44, .h = 216 };
+    const left_rail: ui.ComputedRect = .{ .x = 232, .y = 50, .w = 44, .h = 200 };
+    const tight: ui.ComputedRect = .{ .x = 800, .y = 180, .w = 150, .h = 270 };
+    const transfer = lateralPanelRect(bounds, right_rail, right_rail, 640, 400, 288, 166).?;
+    try std.testing.expect(transfer.x + transfer.w + 12 <= right_rail.x);
+    try std.testing.expect(transfer.y >= bounds.y + 12 and transfer.y + transfer.h + 12 <= bounds.y + bounds.h);
+    const chain = lateralPanelRect(bounds, left_rail, left_rail, 380, 312, 284, 190).?;
+    try std.testing.expect(chain.x >= left_rail.x + left_rail.w + 12);
+    try std.testing.expect(lateralPanelRect(tight, right_rail, right_rail, 380, 312, 284, 190) == null);
 }

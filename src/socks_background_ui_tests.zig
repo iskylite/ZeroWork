@@ -374,6 +374,11 @@ test "background SOCKS unified section keeps count hover and actions across traf
     try root.appendChild(cx.allocator, view.local_entry);
     try root.appendChild(cx.allocator, view.popover.wrapper);
     try view.attachInline(body);
+    try view.update(&.{});
+    frames(cx);
+    try std.testing.expect(!view.inline_section.?.root.isDisplayedInTree());
+    try std.testing.expectEqualStrings("", view.inline_section.?.count.getText().?.content);
+    try std.testing.expectEqual(@as(usize, 0), view.inline_section.?.list.content.children.items.len);
     var closed: bool = false;
     view.inline_closed = .{ .context = &closed, .close = struct {
         fn run(raw: *anyopaque) void {
@@ -395,6 +400,7 @@ test "background SOCKS unified section keeps count hover and actions across traf
     try view.update(&rows);
     frames(cx);
     const section = view.inline_section.?;
+    try std.testing.expect(section.root.isDisplayedInTree());
     try std.testing.expectEqualStrings("4 条", section.count.getText().?.content);
     try std.testing.expectEqual(@as(usize, 4), section.list.content.children.items.len);
     try std.testing.expectEqual(@as(usize, 1), view.list.content.children.items.len);
@@ -443,6 +449,8 @@ test "background SOCKS unified section keeps count hover and actions across traf
     try std.testing.expect(last.y >= viewport.y);
     try view.update(&.{});
     frames(cx);
-    try std.testing.expectEqualStrings("0 条", section.count.getText().?.content);
+    try std.testing.expect(!section.root.isDisplayedInTree());
+    try std.testing.expectEqualStrings("", section.count.getText().?.content);
+    try std.testing.expectEqual(@as(usize, 0), section.list.content.children.items.len);
     try std.testing.expect(find(body, "socks.background.open_terminal") == null);
 }

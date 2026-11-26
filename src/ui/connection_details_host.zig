@@ -44,7 +44,7 @@ pub const Host = struct {
         self.ssh_status.bind(controls, context, theme_action);
     }
 
-    pub fn mount(cx: *ui.Cx, scope: *ui.Scope, workspace: *Workspace, application: *ApplicationHost, trigger: *ui.Node, trigger_icon: *ui.Node, trigger_hover: *ui.Signal(?S.ButtonStyle), status_bar: *ui.Node) !*Host {
+    pub fn mount(cx: *ui.Cx, scope: *ui.Scope, workspace: *Workspace, application: *ApplicationHost, trigger: *ui.Node, trigger_icon: *ui.Node, trigger_hover: *ui.Signal(?S.ButtonStyle), status_bar: *ui.Node, dock_to_rail: bool) !*Host {
         const self = try cx.allocator.create(Host);
         var registered = false;
         errdefer if (!registered) cx.allocator.destroy(self);
@@ -63,7 +63,7 @@ pub const Host = struct {
         try cx.root.?.appendChild(cx.allocator, self.feedback.wrapper);
         const owner: @import("scoped_modal.zig").Owner = .{ .resolve = .{ .context = self, .get = resolveOwner } };
         self.logs = try Logs.View.mountWithOwner(cx, scope, .{ .context = self, .copy_logs = copy }, owner);
-        self.view = try View.mount(cx, scope, .{ .context = self, .request_sample = requestSample, .cancel_sample = cancelSample, .copy = copy, .logs = openLogs });
+        self.view = try View.mountDocked(cx, scope, .{ .context = self, .request_sample = requestSample, .cancel_sample = cancelSample, .copy = copy, .logs = openLogs }, dock_to_rail);
         self.view.node_owner = owner;
         try cx.root.?.appendChild(cx.allocator, self.view.root);
         self.ssh_status = try SSH.Host.mount(cx, scope, .{ .context = self, .capture = captureStatus, .copy = copy, .logs = openLogs, .reconnect = reconnect, .hide_chain = hideChain });

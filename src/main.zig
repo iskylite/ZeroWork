@@ -18298,7 +18298,7 @@ const AppNavHost = struct {
         const details = self.connection_details_host orelse return;
         const controls = details.ssh_status.controls orelse return;
         const BV = @import("ui/broadcast_view.zig");
-        if (self.broadcast_view == null) self.broadcast_view = BV.View.mount(self.cx, workspace.scope, .{ .context = self, .resolve = resolveBroadcast, .select = selectBroadcastMember }) catch return;
+        if (self.broadcast_view == null) self.broadcast_view = BV.View.mountDocked(self.cx, workspace.scope, .{ .context = self, .resolve = resolveBroadcast, .select = selectBroadcastMember }, self.mascot) catch return;
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
         const allocator = arena.allocator();
@@ -20183,7 +20183,7 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     wiz_host.probe_presentation = nav_host.probe_connection_host;
     menu_host.asset_action_view = try @import("ui/asset_action_view.zig").View.mount(cx, scope, .{ .context = menu_host, .submit = MenuHost.submitAssetAction, .anchor = MenuHost.assetActionAnchor, .completed = MenuHost.assetActionCompleted, .close = MenuHost.assetActionClosed, .view_group = MenuHost.viewAssetGroup, .view_sessions = MenuHost.viewAssetSessions });
     try background_view.isolate(menu_host.asset_action_view.?.scope, menu_host.asset_action_view.?.dialog);
-    const details_host = try @import("ui/connection_details_host.zig").Host.mount(cx, scope, workspace, application_host, status_bar.chain_trigger, status_bar.chain_icon, status_bar.chain_hover, status_bar.bar);
+    const details_host = try @import("ui/connection_details_host.zig").Host.mount(cx, scope, workspace, application_host, status_bar.chain_trigger, status_bar.chain_icon, status_bar.chain_hover, status_bar.bar, nav_host.mist != null);
     details_host.bindEditor(wiz_host, WizardHost.openCapturedAsset);
     details_host.bindStatus(status_bar.controls, nav_host, AppNavHost.showGlobalTheme);
     nav_host.connection_details_host = details_host;
@@ -20216,6 +20216,9 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
         const mascot = try @import("ui/mascot_island.zig").View.mount(cx, scope, terminal_area, .{ .context = nav_host, .save_anchor = AppNavHost.saveMascotAnchor, .open_preview = AppNavHost.showMascotPreview, .close_preview = AppNavHost.hideMascotPreview, .panel = AppNavHost.mascotPanel, .pin_preview = AppNavHost.pinMascotPreview }, app_config.value.ui.mascot_anchor_x, app_config.value.ui.mascot_anchor_y);
         nav_host.mascot = mascot;
         socks_info.bindMascot(mascot);
+        command_history.mascot = mascot;
+        download_list.mascot = mascot;
+        details_host.view.mascot = mascot;
         if (nav_host.transfer_anchor) |node| {
             try MistChrome.move(cx, mascot.slot(.transfer), node);
             fitMascotSlot(cx, node);

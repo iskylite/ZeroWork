@@ -36,6 +36,9 @@ const Fixture = struct {
     copied: ?[]u8 = null,
     copy_error: bool = false,
     fn init(self: *Fixture) !void {
+        return self.initDocked(false);
+    }
+    fn initDocked(self: *Fixture, docked: bool) !void {
         self.* = .{ .cx = try ui.Cx.init(a, std.testing.io), .scope = undefined, .trigger = undefined, .view = undefined };
         self.cx.setViewport(1440, 900);
         self.cx.root = try ui.box(self.cx, .{ .width = .fill(), .height = .fill() }, .{});
@@ -43,7 +46,7 @@ const Fixture = struct {
         self.trigger = try ui.widgets.Button(.{ .a11y_label = "通信链路", .base_style = S.trigger(), .hover_style = S.triggerHover() }).mount(self.scope, self.cx);
         self.trigger.setStyleInline(a, .{ .position = .absolute, .inset = .{ .right = .{ .px = 12 }, .bottom = .{ .px = 12 } } });
         try self.cx.root.?.appendChild(a, self.trigger);
-        self.view = try D.View.mount(self.cx, self.scope, .{ .context = self, .request_sample = request, .cancel_sample = cancel, .copy = copy, .logs = logs, .edit = edit });
+        self.view = try D.View.mountDocked(self.cx, self.scope, .{ .context = self, .request_sample = request, .cancel_sample = cancel, .copy = copy, .logs = logs, .edit = edit }, docked);
         try self.cx.root.?.appendChild(a, self.view.root);
         self.cx.layout();
     }
@@ -443,5 +446,53 @@ test "material connection node cards advance below their detail popover" {
             try std.testing.expectEqual(@as(f32, 60), card.globalRect().h);
             try std.testing.expectEqual(theme.layerBackground(1), f.view.chrome.getBackground());
         }
+    }
+}
+
+test "mascot connection-chain popup stays on either side of all tools" {
+    const M = @import("ui/mascot_island.zig");
+    const hooks = struct {
+        fn save(_: *anyopaque, _: f32, _: f32) void {}
+        fn noop(_: *anyopaque, _: M.Slot) void {}
+        fn panel(raw: *anyopaque, slot: M.Slot) ?*ui.Node {
+            const f: *Fixture = @ptrCast(@alignCast(raw));
+            return if (slot == .chain and (f.view.isVisible())) f.view.chrome else null;
+        }
+    };
+    var f: Fixture = undefined;
+    try f.initDocked(true);
+    defer f.deinit();
+    try f.cx.setTestFrameStep(50);
+    const m = try M.View.mount(f.cx, f.scope, f.cx.root.?, .{ .context = &f, .save_anchor = hooks.save, .open_preview = hooks.noop, .close_preview = hooks.noop, .panel = hooks.panel, .pin_preview = hooks.noop }, 1, 1);
+    m.setActivity(.{ .transfer_active = true, .forward_available = true, .chain_available = true, .history_available = true, .broadcast_available = true });
+    m.expanded = true;
+    m.pinned = true;
+    f.cx.focus_manager.setFocusWithReason(m.grab, .tab);
+    f.view.mascot = m;
+    for (0..10) |_| {
+        f.cx.requestRedraw();
+        f.cx.advanceFrameClock();
+        f.cx.layout();
+        _ = f.cx.render();
+    }
+    const trigger = m.slot(.chain);
+    try f.view.show(try snapshot(2), trigger, trigger.globalRect().y);
+    try std.testing.expect(f.view.isVisible());
+    for ([_]f32{ 1, 0 }) |side| {
+        m.anchor_x = side;
+        for (0..10) |_| {
+            f.cx.requestRedraw();
+            f.cx.advanceFrameClock();
+            f.cx.layout();
+            f.view.reanchor(860);
+            _ = f.cx.render();
+        }
+        const tools = m.toolFootprint().?.bounds;
+        const rect = f.view.chrome.globalRect();
+        errdefer std.debug.print("chain side={d} visible={} displayed={} opacity={d} anchor={any} tools={any} rect={any} workspace={any}\n", .{ side, f.view.isVisible(), f.view.chrome.isDisplayedInTree(), f.view.chrome.getOpacity(), trigger.globalRect(), tools, rect, m.root.globalRect() });
+        try std.testing.expect(f.view.isVisible() and f.view.chrome.isDisplayedInTree() and f.view.chrome.getOpacity() >= 0.99);
+        if (side == 1) try std.testing.expect(rect.x + rect.w + 11.9 < tools.x) else try std.testing.expect(rect.x >= tools.x + tools.w + 11.9);
+        const action = findId(f.view.chrome, "connection.details.sample").?;
+        try std.testing.expectEqual(theme.states().primary_to, action.style.gradient().?.to);
     }
 }
