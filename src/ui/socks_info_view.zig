@@ -2,7 +2,63 @@
 const std = @import("std");
 const ui = @import("ui");
 const S = @import("socks_info_styles.zig");
+const mascot_island = @import("mascot_island.zig");
 const ButtonStyle = @FieldType(ui.widgets.ControlShellConfig, "style");
+
+pub const rail_gap: f32 = 12;
+const viewport_padding: f32 = 8;
+const dock_padding: f32 = 12;
+
+const DockSide = enum { left, right, above, below };
+
+/// Dock in one of the four half-planes *outside* the complete tools
+/// footprint. Never ask a generic positioner to shift onto the rail.
+/// Rank by a stable size budget so counters, text wrapping, and scroll
+/// height changes cannot make the panel repeatedly switch sides.
+fn dockRect(bounds: ui.ComputedRect, footprint: mascot_island.ToolFootprint, trigger: ui.ComputedRect, desired_w: f32, height_budget: f32, natural_h: f32) ?ui.ComputedRect {
+    const frame = footprint.bounds;
+    const near = [2]DockSide{
+        if (frame.x + frame.w / 2 > bounds.x + bounds.w / 2) .left else .right,
+        if (frame.y + frame.h / 2 > bounds.y + bounds.h / 2) .above else .below,
+    };
+    const far = [2]DockSide{ if (near[0] == .left) .right else .left, if (near[1] == .above) .below else .above };
+    const order = if (footprint.horizontal) [4]DockSide{ near[1], far[1], near[0], far[0] } else [4]DockSide{ near[0], far[0], near[1], far[1] };
+    const left = bounds.x + dock_padding;
+    const top = bounds.y + dock_padding;
+    const right = bounds.x + bounds.w - dock_padding;
+    const bottom = bounds.y + bounds.h - dock_padding;
+    var best: ?ui.ComputedRect = null;
+    var best_rank: f32 = 0;
+    for (order) |side| {
+        const x1 = if (side == .right) @max(left, frame.x + frame.w + rail_gap) else left;
+        const x2 = if (side == .left) @min(right, frame.x - rail_gap) else right;
+        const y1 = if (side == .below) @max(top, frame.y + frame.h + rail_gap) else top;
+        const y2 = if (side == .above) @min(bottom, frame.y - rail_gap) else bottom;
+        const w = @min(desired_w, x2 - x1);
+        const available_h = y2 - y1;
+        if (w < S.minimum_width or available_h < S.chrome_height + 36) continue;
+        const h = @min(natural_h, available_h);
+        const rank = w * @min(height_budget, available_h);
+        if (rank <= best_rank) continue;
+        best_rank = rank;
+        const anchor_y = if (trigger.y + trigger.h / 2 > bounds.y + bounds.h / 2) trigger.y + trigger.h - h else trigger.y;
+        best = .{
+            .x = switch (side) {
+                .left => x2 - w,
+                .right => x1,
+                .above, .below => std.math.clamp(trigger.x + (trigger.w - w) / 2, x1, x2 - w),
+            },
+            .y = switch (side) {
+                .left, .right => std.math.clamp(anchor_y, y1, y2 - h),
+                .above => y2 - h,
+                .below => y1,
+            },
+            .w = w,
+            .h = h,
+        };
+    }
+    return best;
+}
 
 pub const State = enum { off, connecting, running, paused, stopping, failed };
 pub const Data = struct {
@@ -42,22 +98,22 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, hooks: Hooks) !*View {
     return mountAnchored(cx, scope, hooks, false);
 }
 
-/// The workspace tool rail is vertical; keep the bubble beside the tool, not
-/// over the mascot or the other tools. The legacy status chip stays top/bottom.
-pub fn mountAnchored(cx: *ui.Cx, scope: *ui.Scope, hooks: Hooks, beside_rail: bool) !*View {
+/// The workspace mode docks outside the entire live tool rail. The legacy
+/// status chip keeps its original automatic top/bottom placement.
+pub fn mountAnchored(cx: *ui.Cx, scope: *ui.Scope, hooks: Hooks, dock_to_rail: bool) !*View {
     const self = try cx.allocator.create(View);
-    self.* = .{ .beside_rail = beside_rail, .cx = cx, .scope = scope, .hooks = hooks, .root = undefined, .body = undefined, .header = undefined, .footer = undefined, .status = undefined, .address = undefined, .bind_note = undefined, .exit = undefined, .route = undefined, .statistics = undefined, .message = undefined, .control_text = undefined, .test_button = undefined, .copy_button = undefined, .config_button = undefined, .control_button = undefined, .pointer = undefined, .protocol = undefined, .owner = undefined, .title_icon = undefined, .close_button = undefined, .test_disabled = try scope.createSignal(bool, true), .control_disabled = try scope.createSignal(bool, false) };
+    self.* = .{ .dock_to_rail = dock_to_rail, .cx = cx, .scope = scope, .hooks = hooks, .root = undefined, .body = undefined, .header = undefined, .footer = undefined, .status = undefined, .address = undefined, .bind_note = undefined, .exit = undefined, .route = undefined, .statistics = undefined, .message = undefined, .control_text = undefined, .test_button = undefined, .copy_button = undefined, .config_button = undefined, .control_button = undefined, .pointer = undefined, .protocol = undefined, .owner = undefined, .title_icon = undefined, .close_button = undefined, .test_disabled = try scope.createSignal(bool, true), .control_disabled = try scope.createSignal(bool, false) };
     try scope.onCleanup(View, self, View.cleanup);
     const focus_guard = try scope.childScope();
     self.open = try scope.createSignal(bool, false);
-    const popup = try ui.widgets.Popover(.{ .group = @import("floating_surface.zig").workspace_popup, .open = self.open, .trigger = .manual, .close_on_outside_click = false, .position = @as(ui.widgets.popover.PopoverPosition, if (beside_rail) .left_end else .top), .width = S.width, .max_width = S.width, .offset = .{ .static = @as(f32, 6) }, .viewport_padding = 8, .flip = true, .shift_main_axis = true, .constrain_width_to_viewport = true, .enter_transition = .none, .exit_transition = .none, .anchor = .{ .virtual = .{ .ctx = self, .getRect = View.anchorRect } }, .on_open_change = cx.on(View, self, View.openChanged) }).mount(scope, cx);
+    const popup = try ui.widgets.Popover(self.popupProps(S.width, false)).mount(scope, cx);
     self.scope = popup.scope;
     self.wrapper = popup.wrapper;
     self.portaled = popup.portaled;
     self.frame = popup.content;
     self.frame.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .fill(), .min_height = 0, .direction = .column, .gap = 0, .padding = .{} });
     try focus_guard.onCleanup(View, self, View.releaseFocus);
-    var panel_style = S.panel();
+    var panel_style = self.panelStyle();
     panel_style.position = .absolute;
     panel_style.width = .{ .px = S.width };
     panel_style.height = .{ .px = S.normal_height };
@@ -149,7 +205,7 @@ pub fn mountAnchored(cx: *ui.Cx, scope: *ui.Scope, hooks: Hooks, beside_rail: bo
     self.protocol = try text(self, "TCP · 不支持 UDP", 12, 400, .primary, false);
     self.protocol.setStyleInline(cx.allocator, .{ .width = .fill(), .flex = 1, .min_width = 0 });
     try details_row.appendChild(cx.allocator, self.protocol);
-    _ = try button(self, details_row, "查看日志", .logs);
+    self.logs_button = try button(self, details_row, "查看日志", .logs);
     try self.rule.appendChild(cx.allocator, details_row);
     try self.current_content.appendChild(cx.allocator, self.rule);
     self.message = try text(self, "", 12, 400, .secondary, false);
@@ -163,11 +219,11 @@ pub fn mountAnchored(cx: *ui.Cx, scope: *ui.Scope, hooks: Hooks, beside_rail: bo
     self.message.setDisplay(.none);
     try self.current_content.appendChild(cx.allocator, self.message);
     self.logs_open = try scope.createSignal(bool, false);
-    const logs_popup = try ui.widgets.Popover(.{ .on_group_dismiss = cx.on(View, self, View.hide), .group = @import("floating_surface.zig").workspace_popup, .open = self.logs_open, .trigger = .manual, .position = .top, .width = S.logs_width, .max_width = S.logs_width, .offset = .{ .static = @as(f32, 6) }, .viewport_padding = 8, .flip = true, .shift_main_axis = true, .constrain_width_to_viewport = true, .enter_transition = .none, .exit_transition = .none, .anchor = .{ .virtual = .{ .ctx = self, .getRect = View.anchorRect } }, .on_open_change = cx.on(View, self, View.logsOpenChanged) }).mount(scope, cx);
+    const logs_popup = try ui.widgets.Popover(self.popupProps(S.logs_width, true)).mount(scope, cx);
     self.logs_wrapper = logs_popup.wrapper;
     self.logs_portaled = logs_popup.portaled;
     self.logs_root = logs_popup.chrome;
-    var logs_style = S.panel();
+    var logs_style = self.panelStyle();
     logs_style.position = .absolute;
     logs_style.width = .{ .px = S.logs_width };
     logs_style.height = .{ .px = S.logs_height };
@@ -230,7 +286,9 @@ pub const View = struct {
     cx: *ui.Cx,
     scope: *ui.Scope,
     hooks: Hooks,
-    beside_rail: bool,
+    dock_to_rail: bool,
+    mascot: ?*mascot_island.View = null,
+    dock_target: ?ui.ComputedRect = null,
     current_content: *ui.Node = undefined,
     current_available: bool = true,
     connections_tip: ui.widgets.TooltipResult = undefined,
@@ -252,8 +310,10 @@ pub const View = struct {
     statistics: *ui.Node,
     message: *ui.Node,
     control_text: *ui.Node,
+    test_text: *ui.Node = undefined,
     test_button: *ui.Node,
     copy_button: *ui.Node,
+    logs_button: *ui.Node = undefined,
     copy_feedback: *@import("copy_button.zig").Button = undefined,
     config_button: *ui.Node,
     control_button: *ui.Node,
@@ -274,8 +334,6 @@ pub const View = struct {
     endpoint: *ui.Node = undefined,
     test_disabled: *ui.Signal(bool),
     control_disabled: *ui.Signal(bool),
-    button_paints: [6]struct { style: *ui.Signal(ButtonStyle), interaction: *ui.Signal(?ButtonStyle), action: Action } = undefined,
-    button_count: usize = 0,
     logs_text: *ui.Node = undefined,
     logs_visible: bool = false,
     logs_root: *ui.Node = undefined,
@@ -294,6 +352,40 @@ pub const View = struct {
     /// and status-bar layout changes.  `anchor` remains for callers that only
     /// have a snapshot (and for deterministic unit tests).
     anchor_node: ?*ui.Node = null,
+
+    fn popupProps(self: *View, width: f32, logs: bool) ui.widgets.popover.PopoverProps {
+        const dock = self.dock_to_rail;
+        return .{
+            .on_group_dismiss = if (logs) self.cx.on(View, self, View.hide) else null,
+            .group = @import("floating_surface.zig").workspace_popup,
+            .open = .bindTo(if (logs) self.logs_open else self.open),
+            .trigger = .manual,
+            .close_on_outside_click = logs,
+            .position = if (dock) .bottom_start else .top,
+            .width = if (dock) null else width,
+            .max_width = if (dock) null else width,
+            .offset = .{ .static = if (dock) 0 else 6 },
+            .viewport_padding = viewport_padding,
+            .flip = !dock,
+            .shift_main_axis = !dock,
+            .constrain_width_to_viewport = !dock,
+            .clip_subtree_to_chrome = dock,
+            .enter_transition = .none,
+            .exit_transition = .none,
+            .anchor = .{ .virtual = .{ .ctx = self, .getRect = if (dock) View.dockAnchor else View.anchorRect } },
+            .on_open_change = if (logs) self.cx.on(View, self, View.logsOpenChanged) else self.cx.on(View, self, View.openChanged),
+        };
+    }
+
+    pub fn bindMascot(self: *View, mascot: *mascot_island.View) void {
+        self.mascot = mascot;
+    }
+    fn panelStyle(self: *const View) ui.BoxStyle {
+        var style = S.panel();
+        // Keep even the visible shadow inside the 12px dock clearance.
+        if (self.dock_to_rail) style.shadow = .{ .blur = 8, .offset_y = 3, .color = S.theme.current().shadow };
+        return style;
+    }
 
     /// All borrowed strings are copied before return. Nodes and callbacks remain stable,
     /// so callbacks may synchronously update/hide this view without disposing their context.
@@ -330,6 +422,10 @@ pub const View = struct {
         self.statistics.setDisplay(if (data.uploaded != null or data.downloaded != null) .flex else .none);
         self.details_row.setDisplay(if (!data.read_only or data.configured) .flex else .none);
         try self.config_text.setTextContent(self.cx.allocator, if (self.has_rule) "配置" else "添加转发");
+        const config_width: f32 = if (self.has_rule) 60 else 80;
+        if (self.config_button.style.width != .px or self.config_button.style.width.px != config_width) {
+            self.config_button.setStyleInline(self.cx.allocator, .{ .width = .{ .px = config_width } });
+        }
         try self.mode_label.setTextContent(self.cx.allocator, switch (data.mode) {
             .socks5 => "SOCKS5 · 动态目标",
             .local => "本地 L",
@@ -418,15 +514,16 @@ pub const View = struct {
             repaintIcons(self.root, previous);
             repaintIcons(self.logs_root, previous);
         }
-        self.root.setStyleInline(self.cx.allocator, S.panel());
-        self.logs_root.setStyleInline(self.cx.allocator, S.panel());
+        self.root.setStyleInline(self.cx.allocator, self.panelStyle());
+        self.logs_root.setStyleInline(self.cx.allocator, self.panelStyle());
         self.logs_body.container.setStyleInline(self.cx.allocator, .{ .background = S.theme.popupInset(), .border = .{ .radius = 8, .width = 0, .color = ui.Color.TRANSPARENT } });
         self.rule.setBackground(S.theme.popupInset());
         self.pointer.setStyleInline(self.cx.allocator, S.pointer());
         _ = self.title_icon.setTint(colors.accent);
         _ = self.pointer.setTint(colors.fg_3);
         self.close_button.setStyleInline(self.cx.allocator, S.iconButton(28));
-        for (self.button_paints[0..self.button_count]) |paint| paint.style.set(buttonStyle(paint.action));
+        for ([_]*ui.Node{ self.test_button, self.config_button, self.control_button }) |node|
+            ui.hooks.updateFocusRingConfig(self.cx, node, .{ .color = colors.accent_ink, .offset = -2 });
         for (self.painted_text.items) |item| setColor(item.node, S.text(item.role));
         self.paint_colors = colors;
         self.paintState();
@@ -440,24 +537,49 @@ pub const View = struct {
             .failed => S.text(.danger),
             .off => c.fg_2,
         });
-        const active = self.state == .running or self.state == .paused or self.state == .connecting;
-        setColor(self.control_text, if (active) c.danger_ink else if (self.state == .stopping) c.fg_3 else ui.Color.WHITE);
-        setColor(self.config_text, if (self.has_rule) c.fg_2 else ui.Color.WHITE);
-        for (self.button_paints[0..self.button_count]) |paint| {
-            var style = buttonStyle(paint.action);
-            if (paint.action == .config and !self.has_rule) style.background = c.accent;
-            if (paint.action == .start) style.background = if (active or self.state == .stopping) S.theme.popupAction() else c.accent;
-            paint.style.set(style);
-            paint.interaction.set(.{ .background = if (paint.action == .start) style.background else c.hover });
-        }
-        // Publish the settled action color after layout: the widget transition
-        // can otherwise retain its previous gray paint in an idle native window.
-        const control_background = if (active or self.state == .stopping) S.theme.popupAction() else c.accent;
-        if (!ui.Color.eql(self.control_button.getBackground(), control_background)) {
-            self.control_button.setBackgroundRaw(control_background);
-            self.control_button.markRenderDirty();
-        }
+        self.paintActions();
         setColor(self.message, if (self.message_is_error) c.danger_ink else c.fg_2);
+    }
+    fn paintActions(self: *View) void {
+        // One footer paint owner, after the native widget's state transition
+        // tick. Reopening a retained card or changing action role while it is
+        // detached must never restore a former button's accent.
+        const buttons = [_]*ui.Node{ self.test_button, self.config_button, self.control_button };
+        const labels = [_]*ui.Node{ self.test_text, self.config_text, self.control_text };
+        for (buttons, labels, [_]Action{ .test_proxy, .config, .start }) |node, label, a| {
+            const role = self.buttonRole(a);
+            const skin = S.buttonPaint(role);
+            self.paintActionFill(node, skin, role != .disabled);
+            setColor(label, skin.ink);
+        }
+        const icon = S.buttonPaint(.icon);
+        self.paintActionFill(self.copy_button, icon, !self.test_disabled.peek());
+        self.paintActionFill(self.logs_button, icon, true);
+    }
+    fn paintActionFill(self: *View, node: *ui.Node, skin: S.ButtonPaint, enabled: bool) void {
+        const hover = enabled and if (self.cx.hovered_node) |hovered|
+            hovered.isDescendantOf(node) and node.globalRect().contains(self.cx.mouse_x, self.cx.mouse_y)
+        else
+            false;
+        const press = hover and if (self.cx.pressed_node) |pressed| pressed.isDescendantOf(node) else false;
+        const color = if (press) skin.pressed else if (hover) skin.hover else skin.normal;
+        if (!ui.Color.eql(color, node.getBackground())) {
+            node.setBackgroundRaw(color);
+            node.markRenderDirty();
+        }
+    }
+    fn buttonRole(self: *const View, a: Action) S.ButtonRole {
+        return switch (a) {
+            .test_proxy => if (self.test_disabled.peek()) .disabled else .secondary,
+            .config => if (self.has_rule) .secondary else .primary,
+            .start, .stop => switch (self.state) {
+                .running, .paused, .connecting => .destructive,
+                .stopping => .disabled,
+                .off, .failed => .primary,
+            },
+            .copy_export, .logs => .icon,
+            else => .secondary,
+        };
     }
     pub fn show(self: *View, anchor: ui.ComputedRect) void {
         self.anchor_node = null;
@@ -483,10 +605,12 @@ pub const View = struct {
         self.logs_root.setDisplay(.none);
         self.open.set(false);
         self.root.setDisplay(.none);
+        self.dock_target = null;
         self.cx.requestRedraw();
     }
     /// Public for layout tests and host resize integration.
     pub fn updateGeometry(self: *View) bool {
+        if (self.dock_to_rail) return self.updateDockGeometry();
         if (self.logs_visible) {
             const upper = availableHeight(self);
             const height = @max(@as(f32, 1), @min(S.logs_height, @min(self.cx.viewport.height - 16, upper - 14)));
@@ -501,7 +625,7 @@ pub const View = struct {
             return false;
         };
         const upper = availableHeight(self);
-        const available = @max(@as(f32, 1), if (self.beside_rail) self.cx.viewport.height - 16 else @min(self.cx.viewport.height - 16, upper - 14));
+        const available = @max(@as(f32, 1), @min(self.cx.viewport.height - 16, upper - 14));
         const width = @max(@as(f32, 1), @min(S.width, self.cx.viewport.width - 16));
         // Hug the measured content; only a viewport-constrained body scrolls.
         // The popover remains anchored to the same bottom-bar trigger.
@@ -528,6 +652,69 @@ pub const View = struct {
         }
         return changed;
     }
+
+    fn updateDockGeometry(self: *View) bool {
+        const logs = self.logs_visible;
+        if (!logs and self.root.style.display == .none) return false;
+        if (self.anchor_node) |node| if (!node.isDisplayedInTree()) {
+            self.hide();
+            return true;
+        };
+        const raw = anchorRect(self);
+        const trigger: ui.ComputedRect = .{ .x = raw.x, .y = raw.y, .w = raw.w, .h = raw.h };
+        const footprint = if (self.mascot) |mascot| mascot.toolFootprint() orelse {
+            self.hide();
+            return true;
+        } else mascot_island.ToolFootprint{ .bounds = trigger, .horizontal = false };
+        const cx = self.cx;
+        const workspace = if (self.mascot) |mascot| mascot.root.globalRect() else ui.ComputedRect{ .x = 0, .y = 0, .w = cx.viewport.width, .h = cx.viewport.height };
+        const x = @max(cx.safe_area_left, workspace.x);
+        const y = @max(cx.safe_area_top, workspace.y);
+        const bounds: ui.ComputedRect = .{
+            .x = x,
+            .y = y,
+            .w = @max(0, @min(cx.viewport.width - cx.safe_area_right, workspace.x + workspace.w) - x),
+            .h = @max(0, @min(cx.viewport.height - cx.safe_area_bottom, workspace.y + workspace.h) - y),
+        };
+        const measured = self.body.content.globalRect().h;
+        const height_budget = if (logs) S.logs_height else S.normal_height;
+        const natural_h = if (logs or measured <= 0) height_budget else S.chrome_height + measured;
+        const target = dockRect(bounds, footprint, trigger, if (logs) S.logs_width else S.width, height_budget, natural_h) orelse {
+            // Too little room to offer a legible panel. Do not cover the tool
+            // strip or place invisible controls over it; leave the strip usable.
+            self.hide();
+            return true;
+        };
+        const same_position = if (self.dock_target) |old| std.meta.eql(old, target) else false;
+        self.dock_target = target;
+        if (!same_position) self.cx.requestRedraw();
+        const panel = if (logs) self.logs_root else self.root;
+        var changed = sizeNode(self.cx, panel, target.w, target.h);
+        if (!logs) changed = sizeNode(self.cx, self.body.container, null, @max(1, target.h - S.chrome_height)) or changed;
+        // Zenit applies virtual-anchor placement in its before-render phase,
+        // ahead of this frame's final rail layout. Publish this same requested
+        // origin now so a drag or resize cannot paint even one stale frame
+        // over a newly moved rail. Keep the virtual anchor for its lifecycle.
+        if (panel.parent) |parent| {
+            const base = parent.globalRect();
+            const tx = target.x - base.x;
+            const ty = target.y - base.y;
+            if (@abs(panel.style.translate_x - tx) > 0.01 or @abs(panel.style.translate_y - ty) > 0.01) {
+                panel.style.translate_x = tx;
+                panel.style.translate_y = ty;
+                panel.markCompositePropDirty();
+            }
+        }
+        return changed;
+    }
+
+    fn sizeNode(cx: *ui.Cx, node: *ui.Node, width: ?f32, height: f32) bool {
+        const same_w = if (width) |w| node.style.width == .px and @abs(node.style.width.px - w) <= 0.01 else true;
+        const same_h = node.style.height == .px and @abs(node.style.height.px - height) <= 0.01;
+        if (same_w and same_h) return false;
+        node.setStyleInline(cx.allocator, .{ .width = if (width) |w| .{ .px = w } else null, .height = .{ .px = height } });
+        return true;
+    }
     fn availableHeight(self: *View) f32 {
         const rect = anchorRect(self);
         return if (rect.y < self.cx.viewport.height / 2) self.cx.viewport.height - rect.y - rect.h else rect.y;
@@ -536,6 +723,14 @@ pub const View = struct {
         const self: *View = @ptrCast(@alignCast(raw));
         const rect = if (self.anchor_node) |node| node.globalRect() else self.anchor orelse ui.ComputedRect{ .x = 8, .y = self.cx.viewport.height - 32, .w = 0, .h = 0 };
         return .{ .x = rect.x, .y = rect.y, .w = rect.w, .h = rect.h };
+    }
+    /// Keep Zenit's popup lifecycle, focus, clipping and escaping. A zero-
+    /// area virtual anchor supplies a pre-validated top-left origin; flip
+    /// and main-axis shift are explicitly off in workspace mode.
+    fn dockAnchor(raw: *anyopaque) ui.widgets.popover.AnchorRect {
+        const self: *View = @ptrCast(@alignCast(raw));
+        const r = self.dock_target orelse return .{ .x = -1.0e6, .y = -1.0e6, .w = 0, .h = 0 };
+        return .{ .x = r.x, .y = r.y, .w = 0, .h = 0 };
     }
     fn closeLogs(self: *View) void {
         if (!self.logs_visible) return;
@@ -579,6 +774,7 @@ pub const View = struct {
     fn afterLayout(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
         const self: *View = @ptrCast(@alignCast(raw));
         self.retheme();
+        if (self.open.peek()) self.paintActions();
         return if (self.updateGeometry()) .needs_layout else .done;
     }
     fn cleanup(self: *View) void {
@@ -605,6 +801,7 @@ fn text(self: *View, value: []const u8, size: f32, weight: u16, role: S.TextRole
 }
 fn setColor(node: *ui.Node, color: ui.Color) void {
     if (node.getText()) |value| {
+        if (ui.Color.eql(value.color, color)) return;
         var next = value;
         next.color = color;
         node.setText(next);
@@ -616,18 +813,32 @@ fn button(self: *View, parent: *ui.Node, label: []const u8, action: Action) !*ui
     click.* = .{ .view = self, .action = action };
     try self.scope.onCleanup(Click, click, Click.cleanup);
     const disabled = if (action == .test_proxy or action == .copy_export) self.test_disabled else if (action == .start) self.control_disabled else null;
-    const paint = try self.scope.createSignal(ButtonStyle, buttonStyle(action));
-    const interaction = try self.scope.createSignal(?ButtonStyle, .{ .background = S.theme.states().hover });
-    self.button_paints[self.button_count] = .{ .style = paint, .interaction = interaction, .action = action };
-    self.button_count += 1;
-    const node = try ui.widgets.Button(.{ .base_style = ui.Source(ButtonStyle){ .signal = paint }, .variant = .ghost, .hover_style = ui.Source(?ButtonStyle){ .signal = interaction }, .pressed_style = ui.Source(?ButtonStyle){ .signal = interaction }, .icon_only = icon_only, .a11y_label = label, .disabled = if (disabled) |signal| ui.Source(bool){ .signal = signal } else ui.Source(bool){ .value = false }, .on_click = self.cx.on(Click, click, Click.invoke) }).mount(self.scope, self.cx);
-    if (action == .start) node.applyTransition(self.cx.allocator, &(comptime ui.transition("background 0ms")));
+    const skin = S.buttonPaint(self.buttonRole(action));
+    const focus: ui.FocusRingConfig = if (icon_only) .{} else .{ .color = S.theme.current().accent_ink, .offset = -2 };
+    const node = try ui.widgets.Button(.{
+        .base_style = buttonStyle(action, skin.normal),
+        .variant = .ghost,
+        .icon_only = icon_only,
+        .hover_style = @as(?ButtonStyle, .{ .background = if (icon_only) skin.hover else skin.normal }),
+        .pressed_style = @as(?ButtonStyle, .{ .background = if (icon_only) skin.pressed else skin.normal }),
+        .a11y_label = label,
+        // Opt into a keyboard-only focus outline from mount. A transparent
+        // default ring is actually a filled focus surface in Zenit, which
+        // would promote a secondary control to its theme accent on focus.
+        .focus_ring = focus,
+        .disabled = if (disabled) |signal| ui.Source(bool){ .signal = signal } else ui.Source(bool){ .value = false },
+        .on_click = self.cx.on(Click, click, Click.invoke),
+    }).mount(self.scope, self.cx);
     if (icon_only) {
-        try node.appendChild(self.cx.allocator, try ui.iconTint(self.cx, ui.icons.get(if (action == .copy_export) "copy" else "file-text").?, S.theme.current().fg_2, S.icon(if (action == .config) @as(f32, 14) else 16)));
+        try node.appendChild(self.cx.allocator, try ui.iconTint(self.cx, ui.icons.get(if (action == .copy_export) "copy" else "file-text").?, S.theme.current().fg_2, S.icon(16)));
     } else {
+        // Theme recipe uses opacity 0.5 for an unspecified disabled ghost.
+        // This family already supplies an opaque, quiet disabled color pair.
+        node.setStyleInline(self.cx.allocator, .{ .opacity = 1, .flex_shrink = 0 });
         const copy = try text(self, label, 13, 500, .secondary, false);
         if (action == .start) self.control_text = copy;
         if (action == .config) self.config_text = copy;
+        if (action == .test_proxy) self.test_text = copy;
         try node.appendChild(self.cx.allocator, copy);
     }
     if (action == .copy_export) self.copy_feedback = try @import("copy_button.zig").Button.attach(self.cx, self.scope, node);
@@ -650,19 +861,19 @@ fn repaintIcons(node: *ui.Node, previous: S.theme.Colors) void {
     for (node.children.items) |child| repaintIcons(child, previous);
 }
 
-fn buttonStyle(action: Action) ButtonStyle {
+fn buttonStyle(action: Action, background: ui.Color) ButtonStyle {
     const icon_only = action == .copy_export or action == .logs;
     return .{
         .width = .{ .px = switch (action) {
             .copy_export, .logs => 28,
-            .logs_back, .config, .test_proxy => 72,
-            else => 88,
+            .logs_back, .test_proxy, .config => 60,
+            else => 80,
         } },
-        .height = .{ .px = if (icon_only) 28 else 30 },
-        .background = S.theme.popupAction(),
-        .corner_radius = 8,
+        .height = .{ .px = if (icon_only) 28 else S.button_height },
+        .background = background,
+        .corner_radius = S.button_radius,
         .border_width = 0,
-        .padding = .{},
+        .padding = if (icon_only) .{} else .{ .left = 8, .right = 8 },
         .gap = 0,
         .flex_shrink = 0,
         .align_items = .center,

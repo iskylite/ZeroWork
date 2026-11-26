@@ -14,8 +14,8 @@ pub fn root() ui.BoxStyle {
 }
 
 pub fn body() ui.BoxStyle {
-    const c = theme.current();
-    return .{ .position = .absolute, .width = .{ .px = body_size }, .height = .{ .px = body_size }, .padding = .{}, .align_items = .center, .justify = .center, .background = c.surface_1, .glass = theme.overlayGlass(), .border = .{ .width = 0, .color = ui.Color.TRANSPARENT, .radius = body_size / 2 }, .shadow = .{ .offset_y = 6, .blur = 18, .color = c.shadow }, .cursor = .grab, .hit_behavior = .@"opaque" };
+    // The PNG carries its own alpha. Do not paint a base plate or material.
+    return .{ .position = .absolute, .width = .{ .px = body_size }, .height = .{ .px = body_size }, .padding = .{}, .align_items = .center, .justify = .center, .background = ui.Color.TRANSPARENT, .hit_shape = .{ .rounded_rect = body_size / 2 }, .cursor = .grab, .hit_behavior = .@"opaque" };
 }
 
 pub fn logo() ui.BoxStyle {
@@ -23,7 +23,7 @@ pub fn logo() ui.BoxStyle {
 }
 
 pub fn grab() ui.BoxStyle {
-    return .{ .position = .absolute, .width = .{ .px = body_size }, .height = .{ .px = body_size }, .padding = .{}, .background = ui.Color.TRANSPARENT, .border = .{ .width = 0, .color = ui.Color.TRANSPARENT, .radius = body_size / 2 }, .cursor = .grab, .hit_behavior = .@"opaque" };
+    return .{ .position = .absolute, .width = .{ .px = body_size }, .height = .{ .px = body_size }, .padding = .{}, .background = ui.Color.TRANSPARENT, .hit_shape = .{ .rounded_rect = body_size / 2 }, .cursor = .grab, .hit_behavior = .@"opaque" };
 }
 
 pub fn rail() ui.BoxStyle {

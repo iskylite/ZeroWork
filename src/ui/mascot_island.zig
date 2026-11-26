@@ -9,6 +9,11 @@ const leave_ms: f64 = 270;
 const slot_count = 5;
 const Direction = enum { left, right, up, down };
 
+pub const ToolFootprint = struct {
+    bounds: ui.ComputedRect,
+    horizontal: bool,
+};
+
 fn boundedCenter(value: f32, length: f32, inset: f32) f32 {
     const edge = @min(inset, length / 2);
     return std.math.clamp(value, edge, length - edge);
@@ -34,6 +39,20 @@ fn onAxis(center: [2]f32, dir: Direction, distance: f32) [2]f32 {
 }
 fn boxAt(c: [2]f32, w: f32, h: f32) ui.ComputedRect {
     return .{ .x = c[0] - w / 2, .y = c[1] - h / 2, .w = w, .h = h };
+}
+fn unionRect(a: ui.ComputedRect, b: ui.ComputedRect) ui.ComputedRect {
+    const x = @min(a.x, b.x);
+    const y = @min(a.y, b.y);
+    return .{ .x = x, .y = y, .w = @max(a.x + a.w, b.x + b.w) - x, .h = @max(a.y + a.h, b.y + b.h) - y };
+}
+fn railRect(c: [2]f32, dir: Direction, len: f32) ui.ComputedRect {
+    const center = onAxis(c, dir, S.body_size / 2 + S.rail_gap + len / 2);
+    const cross = S.slot_size + 2 * S.rail_padding;
+    const horizontal = dir == .left or dir == .right;
+    return boxAt(center, if (horizontal) len else cross, if (horizontal) cross else len);
+}
+fn translateRect(r: ui.ComputedRect, x: f32, y: f32) ui.ComputedRect {
+    return .{ .x = r.x + x, .y = r.y + y, .w = r.w, .h = r.h };
 }
 fn advance(value: f32, target: bool, dt_ms: f64, reduced: bool) f32 {
     if (reduced) return if (target) 1 else 0;
@@ -139,6 +158,9 @@ pub const View = struct {
         try root.appendChild(cx.allocator, body);
         try root.appendChild(cx.allocator, grab);
         const self = try scope.createState(View, .{ .cx = cx, .scope = scope, .hooks = hooks, .root = root, .body = body, .rail = rail, .logo = logo, .grab = grab, .anchor_x = std.math.clamp(initial_x, 0, 1), .anchor_y = std.math.clamp(initial_y, 0, 1) });
+        grab.behavior.interaction.focusable = true;
+        grab.behavior.interaction.a11y = .{ .role = .button, .label = "工作区工具" };
+        try ui.hooks.useFocusRing(scope, cx, grab, .{ .color = theme.current().accent_ink, .width = 1.5, .offset = 1 });
         for (&self.slots, 0..) |*slot_node, index| {
             slot_node.* = try ui.box(cx, S.slot(), .{});
             slot_node.*.meta.ownership.meta.test_id = switch (@as(Slot, @fromBackingInt(@intCast(index)))) {
@@ -171,6 +193,8 @@ pub const View = struct {
         try root.appendChild(cx.allocator, self.glance.wrapper);
         try parent.appendChild(cx.allocator, root);
         _ = try ui.interaction.drag.Binding.attach(scope, cx, grab, .{ .axis = .both, .activation_distance = 0, .active_cursor = .grabbing }, View.drag, self);
+        grab.behavior.events.capture_context = self;
+        grab.behavior.events.on_event_capture = mascotKey;
         try cx.addAfterLayoutHook(self, afterLayout);
         try scope.onCleanup(View, self, cleanup);
         return self;
@@ -257,6 +281,22 @@ pub const View = struct {
         return .{ .x = x1, .y = y1, .w = x2 - x1, .h = y2 - y1 };
     }
 
+    /// A panel opened from the rail expands it. Compute the live landing
+    /// envelope from this layout's workspace/direction, rather than using
+    /// stale absolute boxes from before a drag or resize. The animated slots
+    /// and active collapsed controls always stay in this envelope.
+    pub fn toolFootprint(self: *View) ?ToolFootprint {
+        if (!self.root.isDisplayedInTree()) return null;
+        const canvas = self.root.globalRect();
+        if (canvas.w <= 0 or canvas.h <= 0) return null;
+        const c = self.userCenter(canvas.w, canvas.h);
+        var n: usize = 0;
+        for (0..slot_count) |i| n += @intFromBool(self.applicable(i));
+        const dir = directionFor(c, canvas.w, canvas.h, n);
+        const destination = unionRect(boxAt(c, S.body_size, S.body_size), railRect(c, dir, railLength(@floatFromInt(n))));
+        return .{ .bounds = translateRect(destination, canvas.x, canvas.y), .horizontal = dir == .left or dir == .right };
+    }
+
     fn applicable(self: *const View, index: usize) bool {
         return switch (index) {
             0 => true,
@@ -281,6 +321,28 @@ pub const View = struct {
         const travel_y = @max(0, height - S.body_size - S.margin * 2);
         const padding = S.margin + S.body_size / 2;
         return .{ boundedCenter(padding + self.anchor_x * travel_x, width, padding), boundedCenter(padding + self.anchor_y * travel_y, height, padding) };
+    }
+
+    fn mascotKey(event: ui.events.Event, raw: ?*anyopaque) ui.events.EventResult {
+        const self: *View = @ptrCast(@alignCast(raw orelse return .ignored));
+        if (event == .key_down and (event.key_down.key == .@"return" or event.key_down.key == .space)) {
+            self.togglePin();
+            return .stop;
+        }
+        return .ignored;
+    }
+    fn togglePin(self: *View) void {
+        if (self.expanded and self.pinned) {
+            self.pinned = false;
+            self.expanded = false;
+            self.ignore_badge_until_leave = true;
+            self.collapse_after_ms = 0;
+        } else {
+            self.pinned = true;
+            self.ignore_badge_until_leave = false;
+            self.expanded = true;
+        }
+        self.cx.requestRedraw();
     }
 
     fn drag(event: ui.interaction.drag.Event, raw: *anyopaque) void {
@@ -308,17 +370,7 @@ pub const View = struct {
                 self.dragging = false;
                 const moved = @abs(event.delta.x) + @abs(event.delta.y);
                 if (moved < 3) {
-                    if (self.expanded and self.pinned) {
-                        self.pinned = false;
-                        self.expanded = false;
-                        self.ignore_badge_until_leave = true;
-                        self.collapse_after_ms = 0;
-                    } else {
-                        self.pinned = true;
-                        self.ignore_badge_until_leave = false;
-                        self.expanded = true;
-                    }
-                    self.cx.requestRedraw();
+                    self.togglePin();
                 } else {
                     self.hooks.save_anchor(self.hooks.context, self.anchor_x, self.anchor_y);
                 }
@@ -360,6 +412,25 @@ pub const View = struct {
         if (!node.isDisplayedInTree()) return false;
         const r = node.globalRect();
         return r.w > 0 and r.h > 0 and r.contains(self.cx.mouse_x, self.cx.mouse_y);
+    }
+    // A geometric route through the visual gap, not another input layer.
+    // Other tools keep their real hit targets and can take over the preview.
+    fn bridgeContains(source: ui.ComputedRect, panel: ui.ComputedRect, x: f32, y: f32) bool {
+        if (source.w <= 0 or source.h <= 0 or panel.w <= 0 or panel.h <= 0) return false;
+        if (source.x >= panel.x + panel.w) return bridgeAxis(source.x, panel.x + panel.w, source.y, source.h, panel.y, panel.h, x, y);
+        if (panel.x >= source.x + source.w) return bridgeAxis(source.x + source.w, panel.x, source.y, source.h, panel.y, panel.h, x, y);
+        if (source.y >= panel.y + panel.h) return bridgeAxis(source.y, panel.y + panel.h, source.x, source.w, panel.x, panel.w, y, x);
+        if (panel.y >= source.y + source.h) return bridgeAxis(source.y + source.h, panel.y, source.x, source.w, panel.x, panel.w, y, x);
+        return false;
+    }
+    fn bridgeAxis(from: f32, to: f32, src: f32, src_len: f32, dst: f32, dst_len: f32, at: f32, cross: f32) bool {
+        if (from == to or at < @min(from, to) or at > @max(from, to)) return false;
+        const f = (at - from) / (to - from);
+        const start = src + src_len / 2;
+        const inset = @min(@as(f32, 8), dst_len / 2);
+        const end = std.math.clamp(start, dst + inset, dst + dst_len - inset);
+        const middle = start + (end - start) * f;
+        return @abs(cross - middle) <= src_len / 2 + 3;
     }
     fn schedule(self: *View, ms: f64) void {
         self.cx.scheduleRedrawAfterNs(@intFromFloat(@ceil(@max(1, ms) * std.time.ns_per_ms)));
@@ -423,22 +494,38 @@ pub const View = struct {
         const dir = directionFor(c, rect.w, rect.h, n);
         const now = self.cx.frame_time_ms;
         const target = self.cx.node_registry.resolve(self.cx.dispatcher.hovered_handle, null);
+        const focus = if (self.cx.focus_manager.focus_visible) self.cx.focus_manager.current_focus else null;
         var hovered: ?Slot = null;
+        var tool_focused = false;
         var panel_open = false;
         var inside_panel = false;
+        var forward_panel: ?*ui.Node = null;
         for (self.slots, 0..) |node, i| {
             const which: Slot = @fromBackingInt(@intCast(i));
             if (self.hooks.panel(self.hooks.context, which)) |panel| {
                 panel_open = true;
-                if (self.preview == which) inside_panel = self.within(panel) or
-                    (if (target) |t| @import("floating_input.zig").containsPress(self.cx, panel, t) else false);
+                if (self.preview == which) {
+                    inside_panel = self.within(panel) or (if (target) |t|
+                        (which != .forward or self.within(t)) and @import("floating_input.zig").containsPress(self.cx, panel, t)
+                    else
+                        false);
+                    if (which == .forward) forward_panel = panel;
+                }
             }
+            if (self.applicable(i) and node.isDisplayedInTree()) if (focus) |f| {
+                tool_focused = tool_focused or f.isDescendantOf(node);
+            };
             if (self.applicable(i) and self.within(node) and
                 (if (target) |t| t.isDescendantOf(node) else false)) hovered = which;
         }
+        if (forward_panel) |panel| {
+            if (!inside_panel and hovered == null and panel.isDisplayedInTree() and panel.getOpacity() >= 0.99) {
+                inside_panel = bridgeContains(self.slot(.forward).globalRect(), panel.globalRect(), self.cx.mouse_x, self.cx.mouse_y);
+            }
+        }
         const body_hover = if (target) |t| (t.isDescendantOf(self.root) and (self.within(self.body) or self.within(self.rail))) else false;
         if (!body_hover) self.ignore_badge_until_leave = false;
-        const hovering = !self.dragging and (body_hover and !self.ignore_badge_until_leave or hovered != null or panel_open);
+        const hovering = !self.dragging and (body_hover and !self.ignore_badge_until_leave or hovered != null or panel_open or tool_focused);
         if (hovering) {
             self.expanded = true;
             self.collapse_after_ms = now + leave_ms;
@@ -457,10 +544,7 @@ pub const View = struct {
         dirty = display(self.rail, has_rail) or dirty;
         if (has_rail) {
             const len = railLength(@as(f32, @floatFromInt(active_n)) + @as(f32, @floatFromInt(n - active_n)) * t);
-            const center = onAxis(c, dir, S.body_size / 2 + S.rail_gap + len / 2);
-            const cross = S.slot_size + 2 * S.rail_padding;
-            const horizontal = dir == .left or dir == .right;
-            dirty = self.place(2, self.rail, boxAt(center, if (horizontal) len else cross, if (horizontal) cross else len)) or dirty;
+            dirty = self.place(2, self.rail, railRect(c, dir, len)) or dirty;
             self.rail.setOpacityRaw(if (active_n > 0) 1 else t);
         }
         var active_rank: usize = 0;

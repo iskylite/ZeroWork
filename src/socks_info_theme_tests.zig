@@ -9,7 +9,7 @@ const layers = @import("ui/background_layers.zig");
 const assets = @import("config/background_asset.zig");
 
 fn frame(cx: *ui.Cx) []const ui.DisplayItem {
-    // Actual Buttons animate role changes for 150ms; compare their settled paint.
+    // Observe settled control/overlay geometry after changing palette or role.
     for (0..12) |_| {
         cx.frame_count += 1;
         cx.frame_time_ms += 16;
@@ -82,7 +82,8 @@ test "socks global material paints retained foreground from every theme with loc
         try std.testing.expectEqual(c.fg_1, view.address.getText().?.color);
         try std.testing.expectEqual(c.fg_2, view.route.getText().?.color);
         try std.testing.expectEqual(ForwardColors.text(.success), view.status.getText().?.color);
-        try std.testing.expectEqual(c.danger_ink, view.control_text.getText().?.color);
+        try std.testing.expectEqual(ForwardColors.buttonPaint(.destructive).normal, view.control_button.getBackground());
+        try std.testing.expectEqual(ForwardColors.buttonPaint(.destructive).ink, view.control_text.getText().?.color);
         try std.testing.expectEqual(c.fg_2, view.message.getText().?.color);
         try std.testing.expectEqual(@as(f32, 12), view.root.style.backdrop_blur());
         try std.testing.expectEqual(socks.State.running, view.state);
@@ -120,7 +121,13 @@ test "socks global material paints retained foreground from every theme with loc
             .off => c.fg_2,
         };
         try std.testing.expectEqual(expected, view.status.getText().?.color);
-        try std.testing.expectEqual(if (state == .running or state == .paused or state == .connecting or state == .stopping) theme.popupAction() else c.accent, view.control_button.getBackground());
+        const role: ForwardColors.ButtonRole = switch (state) {
+            .running, .paused, .connecting => .destructive,
+            .stopping => .disabled,
+            .off, .failed => .primary,
+        };
+        try std.testing.expectEqual(ForwardColors.buttonPaint(role).normal, view.control_button.getBackground());
+        try std.testing.expectEqual(ForwardColors.buttonPaint(role).ink, view.control_text.getText().?.color);
         try std.testing.expectEqual(c.danger_ink, view.message.getText().?.color);
         try std.testing.expectEqual(state, view.state);
         try std.testing.expectEqual(@as(usize, 0), receipt.actions);

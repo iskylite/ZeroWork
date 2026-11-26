@@ -1,6 +1,8 @@
 const std = @import("std");
 const ui = @import("ui");
 const view_mod = @import("ui/socks_info_view.zig");
+const mascot_mod = @import("ui/mascot_island.zig");
+const S = @import("ui/socks_info_styles.zig");
 
 const Sink = struct { actions: usize = 0, last: ?view_mod.Action = null };
 fn action(raw: *anyopaque, a: view_mod.Action) void {
@@ -124,11 +126,328 @@ fn expectRuleActions(view: *view_mod.View) !void {
 }
 
 fn settle(cx: *ui.Cx) void {
-    for (0..12) |_| {
-        cx.advanceFrameClock();
-        cx.layout();
-        _ = cx.render();
+    for (0..12) |_| paintFrame(cx);
+}
+fn paintFrame(cx: *ui.Cx) void {
+    // Drive simulated time even when the actual window would be sleeping
+    // between one-shot hover and dismissal deadlines.
+    cx.requestRedraw();
+    cx.advanceFrameClock();
+    cx.layout();
+    _ = cx.render();
+}
+
+fn center(r: ui.ComputedRect) [2]f32 {
+    return .{ r.x + r.w / 2, r.y + r.h / 2 };
+}
+
+fn noContact(a: ui.ComputedRect, b: ui.ComputedRect) bool {
+    const gap = view_mod.rail_gap - 0.25;
+    return a.x + a.w + gap <= b.x or b.x + b.w + gap <= a.x or a.y + a.h + gap <= b.y or b.y + b.h + gap <= a.y;
+}
+
+test "socks card action buttons share geometry and preserve accessible state colors and real feedback" {
+    const theme = S.theme;
+    const restore = theme.currentName();
+    defer theme.select(restore);
+    const contrast = @import("ui/theme_states.zig").contrast;
+    for ([_]theme.Name{ .dark, .light, .sauber }) |name| {
+        theme.select(name);
+        const cx = try ui.Cx.init(std.testing.allocator, std.testing.io);
+        defer cx.deinit();
+        cx.setViewport(1000, 680);
+        try cx.setTestFrameStep(60);
+        const scope = try ui.Scope.init(std.testing.allocator, null, cx.owner);
+        defer scope.dispose();
+        cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
+        var sink: Sink = .{};
+        const view = try view_mod.mount(cx, scope, .{ .context = &sink, .action = action });
+        if (!view.portaled) try cx.root.?.appendChild(cx.allocator, view.wrapper);
+        defer {
+            view.hide();
+            settle(cx);
+        }
+        try view.update(.{ .configured = true, .host = "db", .port = 1080 });
+        view.show(.{ .x = 900, .y = 615, .w = 28, .h = 28 });
+        settle(cx);
+        try expectRuleActions(view);
+        const controls = [_]*ui.Node{ view.test_button, view.config_button, view.control_button };
+        const labels = [_]*ui.Node{ view.test_text, view.config_text, view.control_text };
+        for (controls, labels, [_]S.ButtonRole{ .disabled, .secondary, .primary }) |btn, label, role| {
+            const r = btn.globalRect();
+            const label_r = label.globalRect();
+            const geom = view.footer.globalRect();
+            const paint = S.buttonPaint(role);
+            errdefer std.debug.print("action theme {s} role {s}: actual {any} expected {any}\n", .{ @tagName(name), @tagName(role), btn.getBackground(), paint.normal });
+            try std.testing.expectApproxEqAbs(S.button_height, r.h, 0.1);
+            try std.testing.expectApproxEqAbs(center(geom)[1], center(r)[1], 0.1);
+            try std.testing.expectApproxEqAbs(center(r)[1], center(label_r)[1], 0.1);
+            try std.testing.expectApproxEqAbs(S.button_radius, btn.style.border.radius, 0.1);
+            try std.testing.expectEqual(@as(f32, 8), btn.style.padding.left);
+            try std.testing.expectEqual(@as(f32, 8), btn.style.padding.right);
+            try std.testing.expectEqual(@as(f32, 1), btn.getOpacity());
+            try std.testing.expectEqual(paint.normal, btn.getBackground());
+            try std.testing.expectEqual(paint.ink, label.getText().?.color);
+            try std.testing.expect(contrast(btn.getBackground(), paint.ink) >= 4.5);
+            try std.testing.expect(contrast(paint.hover, paint.ink) >= 4.5);
+            try std.testing.expect(contrast(paint.pressed, paint.ink) >= 4.5);
+        }
+        const test_at = center(view.test_button.globalRect());
+        cx.handleClick(test_at[0], test_at[1]);
+        try std.testing.expectEqual(@as(usize, 0), sink.actions);
+        try std.testing.expect(view.test_button.behavior.interaction.a11y.?.disabled and !view.test_button.behavior.interaction.focusable);
+        cx.focus_manager.setFocusWithReason(view.config_button, .tab);
+        settle(cx);
+        try std.testing.expect(view.config_button.style.outline() != null);
+        try std.testing.expectEqual(S.buttonPaint(.secondary).normal, view.config_button.getBackground());
+        const start = center(view.control_button.globalRect());
+        cx.handleMouseMove(start[0], start[1]);
+        settle(cx);
+        try std.testing.expectEqual(S.buttonPaint(.primary).hover, view.control_button.getBackground());
+        cx.handleMouseDown(start[0], start[1], .{});
+        settle(cx);
+        try std.testing.expectEqual(S.buttonPaint(.primary).pressed, view.control_button.getBackground());
+        cx.handleMouseUp(start[0], start[1]);
+        try std.testing.expectEqual(view_mod.Action.start, sink.last.?);
+        cx.handleMouseMove(1, 1);
+        try view.update(.{ .state = .running, .host = "db", .port = 1080 });
+        settle(cx);
+        try std.testing.expectEqual(S.buttonPaint(.secondary).normal, view.test_button.getBackground());
+        try std.testing.expectEqual(S.buttonPaint(.destructive).normal, view.control_button.getBackground());
+        try std.testing.expectEqual(S.buttonPaint(.destructive).ink, view.control_text.getText().?.color);
+        try std.testing.expect(view.test_button.behavior.interaction.focusable);
+        try view.update(.{ .state = .stopping, .host = "db", .port = 1080 });
+        settle(cx);
+        try std.testing.expectEqual(S.buttonPaint(.disabled).normal, view.control_button.getBackground());
+        try std.testing.expect(!view.control_button.behavior.interaction.focusable);
+        try view.update(.{});
+        settle(cx);
+        const add = view.config_button.globalRect();
+        try std.testing.expect(view.config_text.globalRect().w + 16 <= add.w + 0.1);
+        try std.testing.expectEqual(S.buttonPaint(.primary).normal, view.config_button.getBackground());
     }
+}
+
+const DockFixture = struct {
+    cx: *ui.Cx,
+    view: *view_mod.View = undefined,
+    mascot: *mascot_mod.View = undefined,
+    pane: *ui.Node = undefined,
+    buttons: [5]*ui.Node = undefined,
+    sink: Sink = .{},
+    peer_clicks: u32 = 0,
+    saved: u32 = 0,
+
+    fn mount(self: *DockFixture, scope: *ui.Scope, initial_x: f32, initial_y: f32) !void {
+        const cx = self.cx;
+        cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
+        self.pane = try ui.box(cx, .{ .position = .absolute, .inset = .{ .top = .{ .px = 54 }, .left = .{ .px = 52 } }, .width = .{ .px = 780 }, .height = .{ .px = 450 } }, .{});
+        try cx.root.?.appendChild(cx.allocator, self.pane);
+        // Match the app: the portaled popup is mounted before the mascot.
+        self.view = try view_mod.mountAnchored(cx, scope, .{ .context = &self.sink, .action = action }, true);
+        if (!self.view.portaled) try cx.root.?.appendChild(cx.allocator, self.view.wrapper);
+        self.mascot = try mascot_mod.View.mount(cx, scope, self.pane, .{
+            .context = self,
+            .save_anchor = save,
+            .open_preview = show,
+            .close_preview = close,
+            .panel = panel,
+            .pin_preview = pin,
+        }, initial_x, initial_y);
+        self.view.bindMascot(self.mascot);
+        self.mascot.setActivity(.{ .forward_available = true, .forward_active = true, .broadcast_available = true, .chain_available = true, .history_available = true });
+        for (&self.buttons, 0..) |*item, i| {
+            item.* = try ui.widgets.Button(.{
+                .a11y_label = if (i == 1) "端口转发" else "其他工具",
+                .base_style = .{ .width = .{ .px = 28 }, .height = .{ .px = 28 }, .padding = .{} },
+                .on_click = if (i == 1) cx.on(DockFixture, self, forwardClick) else cx.on(DockFixture, self, peerClick),
+            }).mount(scope, cx);
+            try self.mascot.slot(@fromBackingInt(@as(u8, @intCast(i)))).appendChild(cx.allocator, item.*);
+        }
+        try self.view.update(.{ .state = .running, .host = "db", .port = 1080, .connections = 2, .downloaded = 256, .logs = "Ready" });
+        settle(cx);
+    }
+    fn show(raw: *anyopaque, which: mascot_mod.Slot) void {
+        const self: *DockFixture = @ptrCast(@alignCast(raw));
+        if (which == .forward) self.forwardClick();
+    }
+    fn close(raw: *anyopaque, which: mascot_mod.Slot) void {
+        const self: *DockFixture = @ptrCast(@alignCast(raw));
+        if (which == .forward) self.view.hide();
+    }
+    fn panel(raw: *anyopaque, which: mascot_mod.Slot) ?*ui.Node {
+        const self: *DockFixture = @ptrCast(@alignCast(raw));
+        if (which != .forward) return null;
+        if (self.view.open.peek()) return self.view.root;
+        return if (self.view.logs_open.peek()) self.view.logs_root else null;
+    }
+    fn pin(_: *anyopaque, _: mascot_mod.Slot) void {}
+    fn save(raw: *anyopaque, _: f32, _: f32) void {
+        const self: *DockFixture = @ptrCast(@alignCast(raw));
+        self.saved += 1;
+    }
+    fn forwardClick(self: *DockFixture) void {
+        self.view.showNode(self.buttons[1]);
+    }
+    fn peerClick(self: *DockFixture) void {
+        self.peer_clicks += 1;
+    }
+    fn expectDisjoint(self: *DockFixture, pop: *ui.Node) !ui.ComputedRect {
+        try std.testing.expect(pop.isDisplayedInTree() and pop.getOpacity() >= 0.99);
+        const frame = pop.globalRect();
+        const pane = self.pane.globalRect();
+        try std.testing.expect(frame.x >= pane.x + 7.9 and frame.y >= pane.y + 7.9 and frame.x + frame.w <= pane.x + pane.w - 7.9 and frame.y + frame.h <= pane.y + pane.h - 7.9);
+        try std.testing.expect(noContact(frame, self.mascot.body.globalRect()));
+        try std.testing.expect(noContact(frame, self.mascot.grab.globalRect()));
+        if (self.mascot.rail.isDisplayedInTree()) try std.testing.expect(noContact(frame, self.mascot.rail.globalRect()));
+        for (self.buttons) |btn| if (btn.isDisplayedInTree()) {
+            const rect = btn.globalRect();
+            try std.testing.expect(noContact(frame, rect));
+            const at = center(rect);
+            try std.testing.expect(self.cx.hitTest(at[0], at[1]).?.isDescendantOf(btn));
+        };
+        return frame;
+    }
+    fn resize(self: *DockFixture, width: f32, height: f32) void {
+        self.pane.setStyleInline(self.cx.allocator, .{ .width = .{ .px = width }, .height = .{ .px = height } });
+    }
+};
+
+test "socks card docks beside the entire mascot rail, keyboard works, and dragging or reflow never covers tools" {
+    const cx = try ui.Cx.init(std.testing.allocator, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(900, 600);
+    try cx.setTestFrameStep(60);
+    const scope = try ui.Scope.init(std.testing.allocator, null, cx.owner);
+    defer scope.dispose();
+    var fix: DockFixture = .{ .cx = cx };
+    try fix.mount(scope, 1, 1);
+    defer {
+        fix.mascot.setVisible(false);
+        settle(cx);
+    }
+    try std.testing.expect(!fix.buttons[0].isDisplayedInTree() and fix.buttons[1].isDisplayedInTree());
+    try std.testing.expectEqual(ui.Color.TRANSPARENT, fix.mascot.body.getBackground());
+    try std.testing.expectEqual(ui.Color.TRANSPARENT, fix.mascot.grab.getBackground());
+    const body_style = @import("ui/mascot_island_styles.zig").body();
+    try std.testing.expect(body_style.shadow == null and body_style.border == null and body_style.glass == null);
+    try std.testing.expect(fix.mascot.logo.isDisplayedInTree());
+
+    // Tab-only entry expands the real tool strip and reaches the forward button.
+    cx.handleKeyDown(.tab, .{});
+    try std.testing.expectEqual(fix.mascot.grab, cx.focus_manager.getFocused().?);
+    cx.handleKeyDown(.@"return", .{});
+    settle(cx);
+    try std.testing.expect(fix.mascot.pinned and fix.buttons[4].isDisplayedInTree());
+    cx.handleKeyDown(.tab, .{});
+    try std.testing.expectEqual(fix.buttons[0], cx.focus_manager.getFocused().?);
+    cx.handleKeyDown(.tab, .{});
+    try std.testing.expectEqual(fix.buttons[1], cx.focus_manager.getFocused().?);
+    cx.handleKeyDown(.space, .{});
+    settle(cx);
+    const first = try fix.expectDisjoint(fix.view.root);
+    try std.testing.expect(first.x + first.w < fix.mascot.rail.globalRect().x);
+
+    // A real click on another rail tool is delivered with the panel shown.
+    const peer = center(fix.buttons[2].globalRect());
+    cx.handleClick(peer[0], peer[1]);
+    try std.testing.expectEqual(@as(u32, 1), fix.peer_clicks);
+
+    const old = center(fix.mascot.grab.globalRect());
+    const pane = fix.pane.globalRect();
+    cx.handleMouseMove(old[0], old[1]);
+    cx.handleMouseDown(old[0], old[1], .{});
+    // Drag the strip *into the former card's rectangle*, and inspect the
+    // first painted frame, not just its eventual settled coordinates.
+    const crossing_x = first.x + first.w / 2;
+    cx.handleMouseMove(crossing_x, old[1]);
+    paintFrame(cx);
+    _ = try fix.expectDisjoint(fix.view.root);
+    cx.handleMouseMove(pane.x + 38, old[1]);
+    settle(cx);
+    const dragged = try fix.expectDisjoint(fix.view.root);
+    try std.testing.expect(dragged.x > fix.mascot.rail.globalRect().x + fix.mascot.rail.globalRect().w);
+    cx.handleMouseUp(pane.x + 38, old[1]);
+    try std.testing.expectEqual(@as(u32, 1), fix.saved);
+
+    // The logs panel keeps the same rail protection, even at a larger width.
+    const logs = center(fix.view.logs_button.globalRect());
+    cx.handleClick(logs[0], logs[1]);
+    settle(cx);
+    _ = try fix.expectDisjoint(fix.view.logs_root);
+    cx.handleKeyDown(.escape, .{});
+    settle(cx);
+    try std.testing.expect(!fix.view.logs_open.peek());
+    _ = try fix.expectDisjoint(fix.view.root);
+
+    // Reflow to a narrow pane with the same live tool; choose a viewport-safe
+    // above/below direction and scroll the body. Neither side fits its width.
+    fix.mascot.anchor_x = 0.5;
+    fix.mascot.anchor_y = 0.46;
+    fix.resize(430, 325);
+    settle(cx);
+    const narrow = try fix.expectDisjoint(fix.view.root);
+    const tools = fix.mascot.toolFootprint().?.bounds;
+    try std.testing.expect(narrow.y + narrow.h < tools.y or narrow.y > tools.y + tools.h);
+    try std.testing.expect(fix.view.body.container.globalRect().h < fix.view.body.content.globalRect().h);
+    fix.resize(260, 250);
+    settle(cx);
+    try std.testing.expect(!fix.view.open.peek() and !fix.view.root.isDisplayedInTree());
+
+    fix.resize(780, 450);
+    fix.mascot.anchor_x = 1;
+    fix.mascot.anchor_y = 1;
+    cx.handleMouseMove(1, 1);
+    cx.clearFocus();
+    settle(cx);
+    try std.testing.expect(fix.buttons[1].isDisplayedInTree() and !fix.buttons[0].isDisplayedInTree());
+    // Even clicking a collapsed active shortcut reserves the *whole* landing
+    // rail before it opens in the same frame.
+    const fwd = center(fix.buttons[1].globalRect());
+    cx.handleClick(fwd[0], fwd[1]);
+    settle(cx);
+    _ = try fix.expectDisjoint(fix.view.root);
+    fix.mascot.setVisible(false);
+    settle(cx);
+    try std.testing.expect(!fix.view.open.peek() and !fix.mascot.root.isDisplayedInTree());
+}
+
+test "socks card hover crosses the visual gap without hiding, recapturing focus, or making a fake hit area" {
+    const cx = try ui.Cx.init(std.testing.allocator, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(900, 600);
+    try cx.setTestFrameStep(70);
+    const scope = try ui.Scope.init(std.testing.allocator, null, cx.owner);
+    defer scope.dispose();
+    var fix: DockFixture = .{ .cx = cx };
+    try fix.mount(scope, 1, 1);
+    defer {
+        fix.mascot.setVisible(false);
+        settle(cx);
+    }
+    cx.focus_manager.setFocusWithReason(fix.mascot.grab, .tab);
+    const badge = center(fix.mascot.grab.globalRect());
+    cx.handleMouseMove(badge[0], badge[1]);
+    settle(cx);
+    const tool = fix.buttons[1].globalRect();
+    const at = center(tool);
+    cx.handleMouseMove(at[0], at[1]);
+    settle(cx);
+    try std.testing.expectEqual(fix.mascot.grab, cx.focus_manager.getFocused().?);
+    const card = try fix.expectDisjoint(fix.view.root);
+    const in_gap = (tool.x + card.x + card.w) / 2;
+    cx.handleMouseMove(in_gap, at[1]);
+    settle(cx);
+    try std.testing.expect(fix.view.open.peek());
+    if (cx.hitTest(in_gap, at[1])) |hit| try std.testing.expect(!hit.isDescendantOf(fix.view.root) and !hit.isDescendantOf(fix.mascot.root));
+    cx.handleMouseMove(card.x + card.w - 25, card.y + card.h - 15);
+    settle(cx);
+    try std.testing.expect(fix.view.open.peek());
+    cx.handleMouseMove(1, 1);
+    settle(cx);
+    errdefer std.debug.print("leave preview={any} candidate={any} deadline={any} clock={d} mouse=({d},{d})\n", .{ fix.mascot.preview, fix.mascot.candidate, fix.mascot.preview_leave, cx.frame_time_ms, cx.mouse_x, cx.mouse_y });
+    try std.testing.expect(!fix.view.open.peek());
+    try std.testing.expect(!fix.buttons[0].isDisplayedInTree() and fix.buttons[1].isDisplayedInTree());
 }
 
 test "socks card follows the live trigger through resize without leaving the window" {

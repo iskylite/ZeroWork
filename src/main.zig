@@ -20215,6 +20215,7 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
         }.dismiss };
         const mascot = try @import("ui/mascot_island.zig").View.mount(cx, scope, terminal_area, .{ .context = nav_host, .save_anchor = AppNavHost.saveMascotAnchor, .open_preview = AppNavHost.showMascotPreview, .close_preview = AppNavHost.hideMascotPreview, .panel = AppNavHost.mascotPanel, .pin_preview = AppNavHost.pinMascotPreview }, app_config.value.ui.mascot_anchor_x, app_config.value.ui.mascot_anchor_y);
         nav_host.mascot = mascot;
+        socks_info.bindMascot(mascot);
         if (nav_host.transfer_anchor) |node| {
             try MistChrome.move(cx, mascot.slot(.transfer), node);
             fitMascotSlot(cx, node);

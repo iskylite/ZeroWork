@@ -78,7 +78,7 @@ text{font-family:-apple-system,BlinkMacSystemFont,'PingFang SC','Helvetica Neue'
 
 
 <g id="fw-mascot">
-    <circle cx="22" cy="22" r="22" fill="#f6f6f7" filter="url(#float)"/>
+    <circle cx="22" cy="22" r="22" fill="none"/>
     <svg x="5" y="5" width="34" height="34" viewBox="0 0 100 100" role="img" aria-label="ZeroWork 吉祥物">
   <defs>
     <linearGradient id="brand-glass" x1=".1" x2=".8" y1="0" y2="1" gradientUnits="objectBoundingBox"><stop stop-color="#e2edf6"/><stop offset="1" stop-color="#738599"/></linearGradient>
@@ -339,7 +339,7 @@ text{font-family:-apple-system,BlinkMacSystemFont,'PingFang SC','Helvetica Neue'
 </g>
 </g>
 <rect id="window.frame" x="0.5" y="0.5" width="1439" height="899" rx="17.5" fill="none" stroke="#D4D4D8" stroke-width="1"/>
-<g id="mascot-tools"><rect x="1372" y="689" width="36" height="132" rx="14" fill="#fff" filter="url(#float)"/><use href="#list-restart" x="1382" y="699" width="16" height="16" color="#5b5b65"/><use href="#network" x="1382" y="731" width="16" height="16" color="#5b5b65"/><circle cx="1390" cy="771" r="14" fill="#eaedfd"/><use href="#port" x="1382" y="763" width="16" height="16" color="#4f5ed9"/><use href="#flow" x="1382" y="795" width="16" height="16" color="#5b5b65"/><circle cx="1401" cy="760" r="2.7" fill="#198353"/><use href="#fw-mascot" x="1368" y="828"/></g><g id="forward-panel" transform="translate(984 253)">
+<g id="mascot-tools"><rect x="1372" y="689" width="36" height="132" rx="14" fill="#fff" filter="url(#float)"/><use href="#list-restart" x="1382" y="699" width="16" height="16" color="#5b5b65"/><use href="#network" x="1382" y="731" width="16" height="16" color="#5b5b65"/><circle cx="1390" cy="771" r="14" fill="#eaedfd"/><use href="#port" x="1382" y="763" width="16" height="16" color="#4f5ed9"/><use href="#flow" x="1382" y="795" width="16" height="16" color="#5b5b65"/><circle cx="1401" cy="760" r="2.7" fill="#198353"/><use href="#fw-mascot" x="1368" y="828"/></g><g id="forward-panel" transform="translate(976 253)">
 <rect width="380" height="518" rx="11" fill="#fff" filter="url(#panel)"/>
 <g id="forward-current-session">
   <g id="current-header">
@@ -362,12 +362,12 @@ text{font-family:-apple-system,BlinkMacSystemFont,'PingFang SC','Helvetica Neue'
     <text x="28" y="267" class="body">TCP · 不支持 UDP</text>
     <g id="current-logs"><title>查看日志</title><rect x="324" y="248" width="28" height="28" rx="8" fill="#efeff2"/><use href="#file" x="330" y="254" width="16" height="16" color="#5b5b65"/></g>
   <g id="current-actions">
-    <rect x="28" y="288" width="72" height="30" rx="8" fill="#efeff2"/>
-    <text x="64" y="308" text-anchor="middle" font-size="13" class="muted">测试</text>
-    <rect x="108" y="288" width="72" height="30" rx="8" fill="#efeff2"/>
-    <text x="144" y="308" text-anchor="middle" font-size="13" class="muted">配置</text>
-    <rect x="264" y="288" width="88" height="30" rx="8" fill="#efeff2"/>
-    <text x="308" y="308" text-anchor="middle" font-size="13" class="danger">停止转发</text>
+    <rect x="28" y="288" width="60" height="30" rx="8" fill="#efeff2"/>
+    <text x="58" y="308" text-anchor="middle" font-size="13" font-weight="500" class="muted">测试</text>
+    <rect x="96" y="288" width="60" height="30" rx="8" fill="#efeff2"/>
+    <text x="126" y="308" text-anchor="middle" font-size="13" font-weight="500" class="muted">配置</text>
+    <rect x="272" y="288" width="80" height="30" rx="8" fill="#efeff2"/>
+    <text x="312" y="308" text-anchor="middle" font-size="13" font-weight="500" class="danger">停止转发</text>
   </g>
  </g>
 </g>
