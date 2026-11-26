@@ -130,7 +130,8 @@ test "remaining UI completed turn lazily folds only process content and keeps it
     _ = cx.render();
     try std.testing.expectEqual(@as(usize, 0), renderer.renders);
     try std.testing.expect(view.process.style.display == .none);
-    try std.testing.expectEqualStrings("用时 12分钟 28秒", view.button.behavior.interaction.a11y.?.label.?);
+    try std.testing.expectEqualStrings("处理过程", view.button.behavior.interaction.a11y.?.label.?);
+    try std.testing.expectEqual(@as(f32, 11), @import("ui/ai_assistant_styles.zig").turnProcessButton().font_size.?);
     const toggle_rect = view.button.globalRect();
     try std.testing.expect(answer.globalRect().y - (toggle_rect.y + toggle_rect.h) >= 8);
     const final_id = answer.id;

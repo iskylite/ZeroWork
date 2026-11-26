@@ -8,6 +8,8 @@ pub const ButtonStyle = @FieldType(ui.widgets.ControlShellConfig, "style");
 pub const left_width = sidebar.expanded_width;
 pub const column_gap: f32 = 12;
 pub const inspector_width: f32 = 340;
+pub const inspector_min_width: f32 = 280;
+pub const inspector_max_width: f32 = 640;
 pub const center_min_width: f32 = 360;
 pub const compact_width: f32 = 780;
 pub const header_height: f32 = 44;
@@ -45,6 +47,20 @@ pub fn inspector(t: *const ui.ThemeTokens) ui.BoxStyle {
     panel.width = .{ .px = inspector_width };
     panel.min_width = 0;
     return panel;
+}
+
+pub fn inspectorResize() ui.BoxStyle {
+    // It occupies the existing gutter, not an additional column.
+    return .{
+        .width = .{ .px = column_gap },
+        .height = .fill(),
+        .flex_shrink = 0,
+        .margin = .{ .left = -column_gap, .right = -column_gap },
+        .align_items = .center,
+        .justify = .center,
+        .cursor = .ew_resize,
+        .hit_behavior = .@"opaque",
+    };
 }
 
 pub fn railHeader(_: *const ui.ThemeTokens) ui.BoxStyle {
@@ -159,7 +175,7 @@ pub fn workspacePill(_: *const ui.ThemeTokens) ui.BoxStyle {
 }
 
 pub fn workspaceText(_: *const ui.ThemeTokens) ui.TextStyle {
-    return .{ .font_size = 11, .font_weight = 500, .line_height = 16.0 / 11.0, .color = theme.current().fg_2, .text_overflow = .ellipsis };
+    return .{ .font_size = 11, .font_weight = 500, .line_height = 16.0 / 11.0, .color = theme.current().fg_2, .text_overflow = .ellipsis, .selectable = false };
 }
 
 pub fn inspectorToggle(open: bool) ButtonStyle {
@@ -280,10 +296,28 @@ pub fn fileRemove(_: *const ui.ThemeTokens) ui.TextStyle {
     return .{ .font_size = 10, .font_weight = 500, .line_height = 14.0 / 10.0, .color = theme.current().danger_ink };
 }
 
+pub const preview_default_height: f32 = 210;
+
+pub fn previewTools() ui.BoxStyle {
+    return .{ .width = .fill(), .height = .{ .px = 24 }, .flex_shrink = 0, .direction = .row, .align_items = .center, .gap = 4, .padding = .{ .left = 5, .right = 3 } };
+}
+
+pub fn previewGrip() ui.BoxStyle {
+    return .{ .width = .fill(), .height = .{ .px = 10 }, .flex_shrink = 0, .align_items = .center, .justify = .center, .margin = .{ .top = -5, .bottom = -5 }, .cursor = .ns_resize, .hit_behavior = .@"opaque" };
+}
+
+pub fn previewGripMark(_: *const ui.ThemeTokens) ui.BoxStyle {
+    return .{ .width = .{ .px = 24 }, .height = .{ .px = 2 }, .flex_shrink = 0, .background = theme.current().fg_3, .border = .{ .width = 0, .radius = 1 }, .hit_behavior = .pass_through };
+}
+
+pub fn previewStatus() ui.BoxStyle {
+    return .{ .width = .fill(), .min_width = 0, .flex_shrink = 0, .padding = .{ .left = 10, .right = 10, .top = 3, .bottom = 5 } };
+}
+
 pub fn preview(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{
         .width = .fill(),
-        .height = .{ .px = 210 },
+        .height = .{ .px = preview_default_height },
         .flex_shrink = 0,
         .direction = .column,
         .background = theme.popupInset(),

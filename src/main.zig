@@ -384,10 +384,19 @@ const ProcessWindows = struct {
             for (catalog.entries.items) |entry| {
                 if (entry.removed or entry.child) continue;
                 const origin = entry.origin orelse continue;
+                const new_pinned = entry.history_pinned and host.presentations.findConversation(entry.conversation) == null;
                 host.presentations.addArchive(entry.conversation, origin, entry.title) catch |err| {
                     self.ai_history_error = err;
                     break;
                 };
+                if (new_pinned) {
+                    const id = host.presentations.findConversation(entry.conversation).?.id;
+                    host.presentations.reserveHistoryPin(id, true) catch |err| {
+                        self.ai_history_error = err;
+                        break;
+                    };
+                    host.presentations.projectHistoryPin(id, true);
+                }
             }
         };
         for (self.runtime.windows.items) |managed| {
@@ -442,6 +451,10 @@ const ProcessWindows = struct {
     fn credentialConversionMessage(self: *const ProcessWindows) []const u8 {
         const to_local = self.credential_conversion_target == .local;
         if (self.credential_conversion_error) |err| {
+            if (err == error.CredentialAlreadyExists)
+                return "同一凭据在两处的内容不同，未切换或覆盖。请保留原有凭据。";
+            if (!to_local and !credential_store.usesLocal())
+                return if (err == error.CredentialAuthenticationCanceled) "已取消导入，仍使用钥匙串。本地凭据已保留。" else "未能导入，仍使用钥匙串。本地凭据已保留，可稍后重试。";
             if (err == error.CredentialAuthenticationCanceled)
                 return if (to_local) "已取消转换，继续使用钥匙串。" else "已取消转换，继续使用本地文件。";
             return if (to_local)
@@ -626,6 +639,7 @@ const AiHost = struct {
     request_conversation: ?u64 = null,
     select_requested: ?u64 = null,
     delete_requested: ?u64 = null,
+    history_pin_requested: ?struct { id: u64, value: bool, surface: @import("host/identity.zig").SessionHandle, current: u64 } = null,
     new_requested: bool = false,
     list_requested: bool = false,
 
@@ -1647,16 +1661,16 @@ const AiHost = struct {
         self.inspector_origin = @splat(null);
     }
 
-    /// V0.8 §3.2.2: target chips reflect the standalone AI scope. Grouped AI
-    /// panes derive their members from the group owner and show none.
+    /// The standalone composer's /session and @ menus read the same explicit
+    /// scope; the grouped assistant still derives its scope from its group.
     fn refreshTargetBar(self: *AiHost) void {
         const bar = self.target_bar orelse return;
         const surface = self.activeAiSurface() orelse {
-            bar.setVisible(false);
+            bar.setOwner(null, null);
             return;
         };
-        bar.setOwner(if (surface.binding == .session) surface.tab.content_owner.session else null);
-        bar.setVisible(surface.binding == .session);
+        const matching = self.display_owner != null and self.display_owner.?.eql(surface.binding);
+        bar.setOwner(if (surface.binding == .session and matching) surface.tab.content_owner.session else null, self.display_conversation);
         if (surface.binding == .group) return;
         var rows: [16]@import("ui/ai_target_bar.zig").Target = undefined;
         var len: usize = 0;
@@ -1851,16 +1865,43 @@ const AiHost = struct {
             .reference_workspace_file => |selection| self.referenceWorkspaceFile(owner, selection) catch |err| self.warnWorkspaceFile(err),
             .new_chat => self.newConversation(),
             .preview => |id| {
-                if (id == current) return;
-                const store = self.assistant_states orelse return;
-                const state = store.find(id) orelse return;
-                if (!state.owner.eql(surface.binding) or state.closed or !state.listed or state.child_agent != null) return;
-                // Opening a historical row is read-only. Existing trusted
-                // restore/fork controls perform any subsequent binding change.
+                if (id == current or self.standaloneHistoryState(surface, id) == null) return;
+                // Read-only; only a subsequent explicit lifecycle action may
+                // change binding. A pinned row is not a capability receipt.
                 if (self.conversation_action != null or self.lifecycle_command != null) return;
                 self.showConversationHistory(id) catch |err| self.setFeedback(@errorName(err));
             },
+            .pin => |pin| {
+                const state = self.standaloneHistoryState(surface, pin.id) orelse return;
+                if (!self.hasStoredHistory(state) or self.history_pin_requested != null) return;
+                self.history_pin_requested = .{ .id = pin.id, .value = pin.value, .surface = owner, .current = current };
+                self.cx.requestRedraw();
+            },
+            .delete => |id| {
+                const state = self.standaloneHistoryState(surface, id) orelse return;
+                if (!self.hasStoredHistory(state)) return;
+                requestConversationClose(self, id);
+            },
         }
+    }
+
+    fn standaloneHistoryState(self: *AiHost, surface: AiSurface, id: u64) ?*const @import("ai/assistant_store.zig").State {
+        const store = self.assistant_states orelse return null;
+        const state = store.find(id) orelse return null;
+        if (state.closed or state.child_agent != null or (!state.listed and self.display_conversation != id)) return null;
+        if (surface.binding == .session and self.historyPinned(state)) return state;
+        const shown = @import("ui/ai_standalone_bridge.zig").observeConversation(surface.tab.content_owner.session, 0);
+        if (!state.owner.eql(surface.binding) or std.mem.indexOfScalar(u64, shown, id) == null) return null;
+        return state;
+    }
+
+    fn hasStoredHistory(self: *AiHost, state: *const @import("ai/assistant_store.zig").State) bool {
+        const host = self.shared_service orelse return false;
+        return state.indexed_archive or host.service.store.find(state.conversation_id) != null;
+    }
+
+    fn historyPinned(self: *const AiHost, state: *const @import("ai/assistant_store.zig").State) bool {
+        return if (self.assistant_states) |store| store.isHistoryPinned(state.id) else false;
     }
 
     fn standaloneWorkspace(self: *AiHost, owner: @import("host/identity.zig").SessionHandle) struct { ticket: ?@import("ui/ai_standalone_bridge.zig").WorkspaceTicket = null, source: ?@import("host/workspace_preview.zig").Source = null } {
@@ -1985,22 +2026,56 @@ const AiHost = struct {
         const store = self.assistant_states orelse return;
         const current = self.display_conversation orelse return;
         const ids = bridge.observeConversation(owner, current);
+        // The personal page may read the global history index once. Group
+        // views never project pinned records from another owner.
+        if (surface.binding == .session) if (process_windows) |process| {
+            if (process.ai_history_error == null) process.requestAiHistory() catch |err| {
+                process.ai_history_error = err;
+                self.setFeedback(@errorName(err));
+            };
+        };
         var rows: [bridge.visible_conversation_limit]shell.Conversation = undefined;
         var id_buffers: [rows.len][20]u8 = undefined;
         var titles: [rows.len]@import("ai/conversation_title.zig").Title = @splat(.{});
         var count: usize = 0;
         var current_title: []const u8 = "新对话";
+        var ordered: [bridge.visible_conversation_limit]u64 = undefined;
+        var ordered_count: usize = 0;
+        // Reserve room for the current chat, even if there are more pinned
+        // chats than the bounded rail can display.
+        for (store.history_pins.items) |id| {
+            if (ordered_count == ordered.len) break;
+            if (self.standaloneHistoryState(surface, id) == null) continue;
+            if (id != current and ordered_count + 1 == ordered.len and
+                std.mem.indexOfScalar(u64, ordered[0..ordered_count], current) == null) continue;
+            ordered[ordered_count] = id;
+            ordered_count += 1;
+        }
+        if (ordered_count < ordered.len and std.mem.indexOfScalar(u64, ordered[0..ordered_count], current) == null) {
+            ordered[ordered_count] = current;
+            ordered_count += 1;
+        }
         for (ids) |id| {
-            const state = store.find(id) orelse continue;
+            if (ordered_count == ordered.len) break;
+            if (std.mem.indexOfScalar(u64, ordered[0..ordered_count], id) != null) continue;
+            if (self.standaloneHistoryState(surface, id) == null) continue;
+            ordered[ordered_count] = id;
+            ordered_count += 1;
+        }
+        for (ordered[0..ordered_count]) |id| {
+            const state = self.standaloneHistoryState(surface, id) orelse continue;
             const active = id == current;
-            if (!state.owner.eql(surface.binding) or state.closed or state.child_agent != null or (!active and !state.listed)) continue;
             const title = state.titleText(if (active) self.history.items else state.history.items, if (active) self.last_user_text else state.last_user_text, &titles[count]) orelse "新对话";
             if (active) current_title = title;
+            const stored = self.hasStoredHistory(state);
             rows[count] = .{
                 .id = std.fmt.bufPrint(&id_buffers[count], "{d}", .{id}) catch unreachable,
                 .title = title,
-                .subtitle = if (active) "当前对话" else if (state.ended) "历史对话" else "",
+                .subtitle = if (active) "当前对话" else if (!state.owner.eql(surface.binding) or state.indexed_archive) "已置顶 · 只读历史" else if (state.ended) "历史对话" else "",
                 .selected = active,
+                .pinned = self.historyPinned(state),
+                .can_pin = stored,
+                .can_delete = stored and !active and self.canDeleteHistory(state),
             };
             count += 1;
         }
@@ -2786,7 +2861,15 @@ const AiHost = struct {
         const self: *AiHost = @ptrCast(@alignCast(raw));
         const visible = self.displayedWorkspace() orelse return error.StaleWorkspace;
         if (!visible.editable or !visible.ticket.eql(ticket)) return error.StaleWorkspace;
-        if (self.attachment_picker != null) return error.AttachmentPickerBusy;
+        const open: WorkspaceUI.OpenPicker = if (self.attachment_picker) |picker| switch (picker.request) {
+            .workspace => |request| .{ .workspace = request.ticket },
+            .image, .text => .other,
+        } else .none;
+        switch (WorkspaceUI.pickerDecision(open, ticket, action)) {
+            .proceed => {},
+            .reuse => return,
+            .blocked => return error.AttachmentPickerBusy,
+        }
         const shared_host = try self.shared();
         const store = &shared_host.service.store;
         const starting_fence = store.fence(ticket.conversation) catch |err| switch (err) {
@@ -2794,12 +2877,52 @@ const AiHost = struct {
             else => return err,
         };
         if (action == .choose) {
+            if (comptime application_test_mode) {
+                if (try self.workspacePickerFixture()) |directory| {
+                    defer self.allocator.free(directory);
+                    return self.applyWorkspaceSelection(ticket, starting_fence, directory);
+                }
+            }
             const sheet = try FileSheet.begin(self.cx, .{ .kind = .folder, .title = "选择本地工作区", .prompt = "选择", .initial = visible.directory });
             self.attachment_picker = .{ .sheet = sheet, .request = .{ .workspace = .{ .ticket = ticket, .fence = starting_fence } } };
             self.cx.requestRedraw();
             return;
         }
         try self.applyWorkspaceSelection(ticket, starting_fence, null);
+    }
+
+    // Only the panel's returned folder is supplied by the native UI fixture.
+    // The usual workspace ticket, binding, identity and journal still gate
+    // the selection; no directory outside this live harness root is allowed.
+    fn workspacePickerFixture(self: *AiHost) !?[]u8 {
+        if (comptime !application_test_mode) return null;
+        const picked = std.c.getenv("ZW_TEST_WORKSPACE_PICK_DIRECTORY") orelse return null;
+        const data_root = std.c.getenv("ZEROWORK_DATA_DIR") orelse return error.InvalidWorkspacePickerFixture;
+        const rpc_root = std.c.getenv("ZENIT_E2E_FILE_RPC_DIR") orelse return error.InvalidWorkspacePickerFixture;
+        const io = self.cx.io;
+        const a = self.allocator;
+        const data_absolute = try std.Io.Dir.cwd().realPathFileAlloc(io, std.mem.span(data_root), a);
+        defer a.free(data_absolute);
+        const rpc_absolute = try std.Io.Dir.cwd().realPathFileAlloc(io, std.mem.span(rpc_root), a);
+        defer a.free(rpc_absolute);
+        const directory = try std.Io.Dir.cwd().realPathFileAlloc(io, std.mem.span(picked), a);
+        errdefer a.free(directory);
+        const fixture = std.fs.path.dirname(data_absolute) orelse return error.InvalidWorkspacePickerFixture;
+        if (!std.mem.startsWith(u8, std.fs.path.basename(fixture), "zw-inspector-") or
+            !std.mem.eql(u8, std.fs.path.basename(data_absolute), "data") or
+            !std.mem.eql(u8, std.fs.path.basename(rpc_absolute), "rpc") or
+            !std.mem.eql(u8, std.fs.path.dirname(rpc_absolute) orelse return error.InvalidWorkspacePickerFixture, fixture) or
+            !std.mem.eql(u8, std.fs.path.dirname(directory) orelse return error.InvalidWorkspacePickerFixture, fixture) or
+            !std.mem.eql(u8, std.fs.path.basename(directory), "Example")) return error.InvalidWorkspacePickerFixture;
+        const rpc = try std.Io.Dir.cwd().openDir(io, rpc_absolute, .{});
+        defer rpc.close(io);
+        const bytes = try rpc.readFileAlloc(io, "owner.json", a, .limited(256));
+        defer a.free(bytes);
+        const owner = try std.json.parseFromSlice(struct { pid: []const u8 }, a, bytes, .{ .ignore_unknown_fields = true });
+        defer owner.deinit();
+        const pid = try std.fmt.parseInt(@TypeOf(std.c.getpid()), owner.value.pid, 10);
+        if (pid != std.c.getpid()) return error.InvalidWorkspacePickerFixture;
+        return directory;
     }
 
     const WorkspaceFence = @import("ai/session_input.zig").Fence;
@@ -3505,7 +3628,7 @@ const AiHost = struct {
         if (self.display_conversation != conversation or !self.controller.model.visible) return false;
         if (item == .session) {
             const bar = self.target_bar orelse return false;
-            return bar.available and !bar.interaction and bar.owner != null;
+            return bar.canOpen();
         }
         const controls = self.composer_controls orelse return false;
         return controls.canOpen(shortcutKind(item) orelse return false);
@@ -5644,11 +5767,6 @@ const AiHost = struct {
         button.setDisplay(.flex);
     }
 
-    fn setDockWidth(self: *AiHost, width: f32) void {
-        const slot = self.dock_slot orelse return;
-        slot.setWidth(width);
-    }
-
     fn persistDockPreference(self: *AiHost) void {
         const settings = self.settings_host orelse return;
         var candidate = settings.runtime.value;
@@ -6006,6 +6124,26 @@ const AiHost = struct {
         self.composer_hash = null;
         self.cx.requestRedraw();
     }
+    fn canDeleteHistory(self: *AiHost, state: *const @import("ai/assistant_store.zig").State) bool {
+        const host = self.shared_service orelse return false;
+        const store = &host.service.store;
+        const record = store.find(state.conversation_id) orelse return state.indexed_archive;
+        if (record.binding != null or record.ending != null or record.task_pending or record.child != null or store.childCount(record.id) != 0) return false;
+        record.inbox.lock();
+        defer record.inbox.unlock();
+        for (record.inbox.entries.items) |item| if (item.receipt.delivery == .outcome_unknown) return false;
+        return true;
+    }
+
+    fn currentHistoryAgent(self: *AiHost) ?*const @import("ai/session_lifecycle.zig").Agent {
+        const owner = self.currentBinding() orelse return null;
+        const shared_host = self.shared_service orelse return null;
+        for (shared_host.service.runners.items) |runner| {
+            if (runner.agent.role == .attached and !runner.agent.closing and runner.agent.owner.eql(owner)) return runner.agent;
+        }
+        return null;
+    }
+
     fn conversationEntry(self: *AiHost, id: u64, title: []const u8, owner: []const u8) @import("ui/ai_sessions_view.zig").Entry {
         var entry: @import("ui/ai_sessions_view.zig").Entry = .{ .id = id, .title = title, .owner = owner, .can_remove = true };
         const state = (self.assistant_states orelse return entry).find(id) orelse return entry;
@@ -6015,7 +6153,8 @@ const AiHost = struct {
         const record = shared_host.service.store.find(state.conversation_id) orelse {
             if (state.indexed_archive) if (archiveCatalog()) |catalog| {
                 if (catalog.find(state.conversation_id)) |archived| {
-                    entry.can_restore = archived.can_restore and archived.recoverable;
+                    entry.can_restore = false;
+                    entry.text_only_copy = true;
                     entry.can_copy = archived.can_copy and archived.recoverable;
                     entry.first_use = archived.first_use;
                 }
@@ -6023,6 +6162,7 @@ const AiHost = struct {
                     entry.has_children = true;
                     break;
                 };
+                entry.can_remove = !entry.has_children;
             };
             return entry;
         };
@@ -6033,15 +6173,13 @@ const AiHost = struct {
         entry.bound = record.binding != null;
         entry.ending = record.ending != null;
         entry.first_use = record.parent != null and record.closed_revision == null;
-        entry.can_restore = record.binding == null and record.ending == null and record.recoverable and record.history.failure == null and (record.closed_revision != null or record.parent != null);
+        const commands = @import("ai/conversation_commands.zig").Command;
+        if (self.currentHistoryAgent()) |agent| {
+            entry.can_restore = commands.canRestore(record, agent);
+            entry.text_only_copy = !commands.sameLiveEnvironment(record, agent);
+        } else entry.text_only_copy = true;
         entry.can_copy = record.last_turn != 0 and record.recoverable and record.history.failure == null;
-        entry.can_remove = record.binding == null and record.ending == null;
-        record.inbox.lock();
-        defer record.inbox.unlock();
-        for (record.inbox.entries.items) |item| if (item.receipt.delivery == .outcome_unknown) {
-            entry.can_remove = false;
-            break;
-        };
+        entry.can_remove = self.canDeleteHistory(state);
         return entry;
     }
     fn conversationHistoryVersion(record: *@import("ai/session_lifecycle.zig").Record) u64 {
@@ -6134,7 +6272,8 @@ const AiHost = struct {
             return err;
         }
         const result = &job.result.?;
-        entry.can_restore = result.can_restore;
+        entry.can_restore = false;
+        entry.text_only_copy = true;
         entry.can_copy = result.can_copy;
         entry.first_use = result.first_use;
         var out = std.Io.Writer.Allocating.init(self.allocator);
@@ -6341,7 +6480,9 @@ const AiHost = struct {
                 const state = self.assistant_states.?.find(self.display_conversation orelse return error.BindingChanged).?;
                 self.close_confirmation = .{ .ticket = .{ .sequence = self.lifecycle_sequence, .conversation_id = state.conversation_id }, .runtime_id = state.id, .owner = state.owner, .task_id = self.current_turn.task_id };
                 try self.updateCloseConfirmation();
-            } else if (!self.lifecycle_confirmed) if (self.sessions_view) |view| try view.confirmOperation(self.lifecycle_sequence, switch (kind) {
+            } else if (!self.lifecycle_confirmed) if (self.sessions_view) |view| if (self.lifecycle_command.?.text_only) {
+                try view.confirmTextCopy(self.lifecycle_sequence, self.lifecycle_command.?.previous != null);
+            } else try view.confirmOperation(self.lifecycle_sequence, switch (kind) {
                 .end => "结束当前 AI 会话？",
                 .new => "结束当前会话并新建？",
                 .restore => "结束当前会话并恢复？",
@@ -6399,6 +6540,10 @@ const AiHost = struct {
                 state.controls.permission = null;
                 state.controls.execution_mode = null;
                 state.controls.ensureDefaults(self.effectiveAi());
+                if (command.text_only) {
+                    state.controls.permission = .confirm;
+                    state.controls.execution_mode = .isolated_exec;
+                }
                 state.controls.session_retention = null;
                 if (shared_host.presentations.attachmentDraftFor(state.id)) |draft| draft.owner = owner;
                 if (shared_host.presentations.imageDraftFor(state.id)) |draft| draft.owner = owner;
@@ -6440,11 +6585,19 @@ const AiHost = struct {
     }
     fn requestConversationClose(raw: *anyopaque, id: u64) void {
         const self: *AiHost = @ptrCast(@alignCast(raw));
+        if (self.conversation_action != null or self.lifecycle_command != null) {
+            self.setFeedback("请先完成或取消当前会话操作");
+            return;
+        }
         const state = (self.assistant_states orelse return).find(id) orelse return;
         if (self.shared_service) |shared_host| if (shared_host.service.store.find(state.conversation_id)) |record| if (record.binding != null) {
             self.setFeedback("请先结束并解绑此 AI 会话");
             return;
         };
+        if (!self.conversationEntry(id, "", "").can_remove) {
+            self.setFeedback("此会话还有任务、子会话或结果待确认，暂不能删除");
+            return;
+        }
         if (self.sessions_view) |view| view.confirm(id);
     }
     fn newConversation(self: *AiHost) void {
@@ -6570,6 +6723,17 @@ const AiHost = struct {
         thread.detach();
     }
 
+    fn applyHistoryPin(self: *AiHost, state: *const @import("ai/assistant_store.zig").State, value: bool) !void {
+        const id = state.conversation_id;
+        const runtime_id = state.id;
+        const host = try self.shared();
+        try hydrateArchive(state, host);
+        try host.presentations.reserveHistoryPin(runtime_id, value);
+        try host.service.store.setHistoryPinned(id, value);
+        host.presentations.projectHistoryPin(runtime_id, value);
+        self.cx.requestRedraw();
+    }
+
     fn processConversationActions(self: *AiHost) void {
         self.pollArchivePreview() catch |err| self.setFeedback(@errorName(err));
         self.processLifecycleAction() catch |err| {
@@ -6589,7 +6753,10 @@ const AiHost = struct {
                 self.lifecycle_command = null;
                 self.lifecycle_confirmed = false;
             }
-            self.setFeedback(@errorName(err));
+            self.setFeedback(if (err == error.RestoreEnvironmentChanged)
+                "原会话环境无法核实。可只读查看，或确认后仅复制对话文本；未改变当前会话。"
+            else
+                @errorName(err));
         };
 
         if (self.close_window_requested) |request| {
@@ -6638,6 +6805,15 @@ const AiHost = struct {
         if (self.select_requested) |id| {
             self.select_requested = null;
             self.showConversationHistory(id) catch |err| self.setFeedback(@errorName(err));
+        }
+        if (self.history_pin_requested) |pin| {
+            self.history_pin_requested = null;
+            if (self.activeAiSurface()) |surface| {
+                if (surface.tab.content_owner.session.eql(pin.surface) and self.display_conversation == pin.current) {
+                    if (self.standaloneHistoryState(surface, pin.id)) |item|
+                        self.applyHistoryPin(item, pin.value) catch |err| self.setFeedback(@errorName(err));
+                }
+            }
         }
         if (self.delete_requested) |id| {
             self.delete_requested = null;
@@ -6711,7 +6887,7 @@ const AiHost = struct {
                     return;
                 };
                 const facts = self.conversationEntry(state.id, owned_title, owned_owner);
-                entries.append(self.allocator, .{ .bound = facts.bound, .ending = facts.ending, .can_restore = facts.can_restore, .has_children = facts.has_children, .can_copy = facts.can_copy, .can_remove = facts.can_remove, .first_use = facts.first_use, .id = state.id, .title = owned_title, .owner = owned_owner, .detail = if (self.display_conversation == state.id) self.prompt.peek() else state.draft orelse "空对话", .active = self.display_conversation == state.id, .phase = state.phase }) catch {
+                entries.append(self.allocator, .{ .bound = facts.bound, .ending = facts.ending, .can_restore = facts.can_restore, .has_children = facts.has_children, .can_copy = facts.can_copy, .text_only_copy = facts.text_only_copy, .can_remove = facts.can_remove, .first_use = facts.first_use, .id = state.id, .title = owned_title, .owner = owned_owner, .detail = if (self.display_conversation == state.id) self.prompt.peek() else state.draft orelse "空对话", .active = self.display_conversation == state.id, .phase = state.phase }) catch {
                     self.allocator.free(owned_title);
                     self.allocator.free(owned_owner);
                     return;
@@ -7112,6 +7288,9 @@ const AiHost = struct {
         const textarea = self.textarea orelse return .ignored;
         const keys = @import("ui/ai_composer_keys.zig");
         if (event == .key_down) if (self.skill_picker) |picker| {
+            if (picker.handleKey(event.key_down)) return .stop;
+        };
+        if (event == .key_down) if (self.target_bar) |picker| {
             if (picker.handleKey(event.key_down)) return .stop;
         };
         switch (event) {
@@ -7670,7 +7849,12 @@ const AiHost = struct {
     fn invalidateAttachedEnvironment(self: *AiHost, tracked_group_loss: bool) !void {
         const shared_host = self.shared_service.?;
         const runner = self.attached_runner.?;
-        const id = runner.agent.current orelse return;
+        const id = runner.agent.current orelse {
+            // Even between chats, new associated targets or a reconnect
+            // invalidate the prior same-environment history proof.
+            runner.agent.environment = try @import("host/identity.zig").advance(runner.agent.environment);
+            return;
+        };
         const ticket = try shared_host.service.store.fence(id);
         const transport_change = tracked_group_loss or self.expectedReconnectEnvironment() or self.retainedSshTransportChanged();
         if (runner.agent.owner == .session and !transport_change) {
@@ -7932,6 +8116,14 @@ const AiHost = struct {
                 };
                 if (self.resource_stamp) |previous_stamp| if (current != previous_stamp or tracked_group_loss) try self.invalidateAttachedEnvironment(tracked_group_loss);
                 self.resource_stamp = current;
+            }
+        } else if (self.attached_runner.?.agent.role == .attached) {
+            if (self.resourceStamp()) |current| {
+                if (self.resource_stamp) |previous_stamp| if (current != previous_stamp) try self.invalidateAttachedEnvironment(false);
+                self.resource_stamp = current;
+            } else |_| {
+                if (self.resource_stamp != null) try self.invalidateAttachedEnvironment(false);
+                self.resource_stamp = null;
             }
         }
         self.tool_bridge.pump(app);
@@ -14724,7 +14916,7 @@ const SettingsHost = struct {
             .close => "未保存的设置",
             .reset => "恢复默认设置？",
             .credential_local => "切换到本地存储？",
-            .credential_keychain => "切换到 macOS 钥匙串？",
+            .credential_keychain => if (credential_store.hasPendingLocalImport()) "将本地凭据导入钥匙串？" else "切换到 macOS 钥匙串？",
         });
         var problem_buffer: [2048]u8 = undefined;
         const invalid = kind == .close and self.controller.validationProblem() != null;
@@ -14732,7 +14924,7 @@ const SettingsHost = struct {
             .close => "设置更改尚未保存。",
             .reset => "载入默认值草稿？默认主题 Sauber；保存前仍可放弃。",
             .credential_local => "已保存的凭据将存入本地文件。文件不加密，仅当前用户可读写。",
-            .credential_keychain => "已保存的凭据将移入钥匙串，验证写入成功后移除本地副本。",
+            .credential_keychain => "保留钥匙串中已有的凭据；如同一项内容不同则停止。验证写入成功后才移除对应的本地副本。",
         });
         self.decision_message_node.?.setTextColor(if (invalid) colors.danger_ink else colors.fg_2);
         self.decision_notice.?.setTextContent(self.allocator, if (invalid) "请返回设置修正后保存，草稿已保留。" else switch (kind) {
@@ -14744,7 +14936,7 @@ const SettingsHost = struct {
         self.decision_save.?.setDisplay(if (kind == .close) .flex else .none);
         self.decision_discard.?.setDisplay(if (kind == .close) .flex else .none);
         const conversion = kind == .credential_local or kind == .credential_keychain;
-        self.decision_reset_label.?.set(if (conversion) "切换" else "恢复");
+        self.decision_reset_label.?.set(if (kind == .credential_keychain and credential_store.hasPendingLocalImport()) "导入" else if (conversion) "切换" else "恢复");
         self.decision_reset.?.meta.ownership.meta.test_id = if (conversion) "settings.confirmation.credential_switch" else "settings.confirmation.reset";
         self.decision_reset.?.setDisplay(if (kind == .close) .none else .flex);
         const icon = if (conversion) ui.icons.lock else ui.icons.circle_help;
@@ -15121,6 +15313,7 @@ const SettingsHost = struct {
         }
         if (std.mem.eql(u8, key.section, "data")) {
             if (std.mem.eql(u8, key.key, "credential_storage")) return .{ .text = if (@import("config/credential_store.zig").usesLocal()) "本地文件" else "macOS 钥匙串" };
+            if (std.mem.eql(u8, key.key, "credential_import_pending")) return .{ .boolean = credential_store.hasPendingLocalImport() };
             if (std.mem.eql(u8, key.key, "config_path")) return .{ .text = self.runtime.path };
             if (std.mem.eql(u8, key.key, "hosts_path")) return .{ .text = (self.workspace orelse return null).hosts_path };
         }
@@ -16304,6 +16497,9 @@ const AppNavHost = struct {
         if (ai.conversation_viewport) |viewport| {
             viewport.setStyleInline(self.allocator, .{ .height = .fill(), .flex = 1, .min_height = 0 });
         }
+        // Scroll this space with the transcript, rather than making a permanent
+        // empty strip between the workspace header and scrolled messages.
+        if (ai.tail_follow) |tail| tail.scroll.content.setStyleInline(self.allocator, .{ .padding = .{ .top = 18 } });
     }
 
     fn detachStandaloneAi(self: *AppNavHost, ai: *AiHost) void {
@@ -16323,11 +16519,12 @@ const AppNavHost = struct {
                 card.setDisplay(.flex);
             }
         }
-        if (ai.target_bar) |bar| bar.setVisible(false);
+        if (ai.target_bar) |bar| bar.setOwner(null, null);
         ai.restoreInspectorHosts();
         if (ai.header_bar) |bar| bar.setDisplay(.flex);
         if (ai.header_grip) |grip| grip.setDisplay(if (ai.docked) .none else .flex);
         if (ai.conversation_viewport) |viewport| viewport.setStyleInline(self.allocator, .{ .height = if (ai.docked) .fill() else .{ .px = 276 }, .flex = if (ai.docked) 1 else 0, .min_height = 0 });
+        if (ai.tail_follow) |tail| tail.scroll.content.setStyleInline(self.allocator, .{ .padding = .{} });
         ai.panel.setDisplay(.none);
         ai.standalone = false;
         self.ai_tab_owner = null;
@@ -16422,11 +16619,6 @@ const AppNavHost = struct {
             };
             entry.update(session, background) catch {};
         }
-    }
-
-    fn resizeAiDock(raw: *anyopaque, width: f32) void {
-        const self: *AppNavHost = @ptrCast(@alignCast(raw));
-        if (self.ai) |ai| ai.setDockWidth(width);
     }
 
     fn persistAiDock(raw: *anyopaque, width: f32) void {
@@ -16634,7 +16826,9 @@ const AppNavHost = struct {
                 self.quick.sidebar.initial_width_pending = false;
             },
             .move, .end => {
-                self.quick.sidebar.expanded_width = std.math.clamp(self.sidebar_drag_width + event.delta.x, 220, @min(480, @max(220, self.cx.viewport.width - 480)));
+                const width = self.cx.viewport.width;
+                const maximum = @min(self.sidebarDockLimit(width), @max(220, width - 480));
+                self.quick.sidebar.expanded_width = std.math.clamp(self.sidebar_drag_width + event.delta.x, 220, maximum);
                 if (event.phase == .end) if (self.settings) |settings| {
                     var candidate = settings.runtime.value;
                     candidate.ui.sidebar_width = self.quick.sidebar.expanded_width;
@@ -16654,11 +16848,19 @@ const AppNavHost = struct {
         self.cx.requestRedraw();
     }
 
+    fn sidebarDockLimit(self: *const AppNavHost, viewport_width: f32) f32 {
+        const max_width = @import("ui/sidebar_model.zig").maximum_width;
+        const dock = self.ai_dock orelse return max_width;
+        if (dock.root.style.display == .none) return max_width;
+        const layout_width = viewport_width - 2 * shell_styles.outer - shell_styles.gap;
+        return @min(max_width, @max(@import("ui/sidebar_model.zig").minimum_width, layout_width - @import("ui/ai_dock_slot.zig").min_row_width));
+    }
+
     fn applySidebar(self: *AppNavHost) void {
         const allowed = self.host_sidebar_allowed;
         const hidden = self.quick.sidebar.collapsed or !allowed;
         self.sidebar_panel.setDisplay(if (hidden) .none else .flex);
-        self.sidebar_panel.setStyle(self.allocator, .width, .{ .px = self.quick.sidebar.expanded_width });
+        self.sidebar_panel.setStyle(self.allocator, .width, .{ .px = @min(self.quick.sidebar.expanded_width, self.sidebarDockLimit(self.cx.viewport.width)) });
         if (self.sidebar_grip) |grip| grip.setDisplay(if (hidden) .none else .flex);
         if (self.collapsed_sidebar) |collapsed| collapsed.setCollapsed(allowed and self.quick.sidebar.collapsed);
     }
@@ -16829,15 +17031,9 @@ const AppNavHost = struct {
         const title_chrome_changed = if (self.app_runtime) |app| blk: {
             const bar = self.title_bar orelse break :blk false;
             // A plugin can hide the host sidebar without changing the user's
-            // collapse preference. Line its tabs up with the actual conversation
-            // column; even before that page has a layout, never cover AppKit.
+            // preference. Its own rails never affect this window-owned bar.
             const hidden = self.quick.sidebar.collapsed or !self.host_sidebar_allowed;
-            const leading: f32 = if (self.activeStandaloneAiOwner()) |owner| leading: {
-                const center = @import("ui/ai_standalone_bridge.zig").find(owner) orelse break :leading 0;
-                if (center.globalRect().w <= 0 or (if (center.parent) |pane| pane.style.display == .none else true)) break :leading 0;
-                break :leading @max(0, center.globalRect().x - bar.globalRect().x);
-            } else 0;
-            break :blk shell_styles.syncWorkspaceChrome(self.allocator, bar, app.chromeState(), hidden, leading);
+            break :blk shell_styles.syncWorkspaceChrome(self.allocator, bar, app.chromeState(), hidden);
         } else false;
         var notes_layout_changed = false;
         if (self.application_host) |host| {
@@ -16943,7 +17139,8 @@ const AppNavHost = struct {
         // Content-fit tabs no longer determine the width of the independent sidebar.
         self.quick.sidebar.initial_width_pending = false;
         const compact_sidebar = if (self.settings) |settings| settings.runtime.value.ui.sidebar_width == null and width < 1000 and !self.sidebar_resizing else width < 1000 and !self.sidebar_resizing;
-        const effective_sidebar_width: f32 = if (compact_sidebar) 220 else self.quick.sidebar.expanded_width;
+        const preferred_sidebar_width: f32 = if (compact_sidebar) 220 else self.quick.sidebar.expanded_width;
+        const effective_sidebar_width = @min(preferred_sidebar_width, self.sidebarDockLimit(width));
         const sidebar_width: ui.Sizing = .{ .px = effective_sidebar_width };
         if (!std.meta.eql(self.sidebar_panel.style.width, sidebar_width)) {
             self.sidebar_panel.setStyle(self.allocator, .width, sidebar_width);
@@ -19232,6 +19429,7 @@ fn mountAssistantConversation(ai_host: *AiHost, scope: *ui.Scope, ai_card_box: *
     ai_host.pending_view = try @import("ui/ai_pending_view.zig").View.mount(cx, scope, .{ .context = ai_host, .act = AiHost.queueAction });
     try ai_card_box.appendChild(cx.allocator, ai_host.pending_view.?.root);
     const ai_input_row = try ui.boxStyled(cx, ai_styles.composer, .{});
+    ai_input_row.meta.ownership.meta.test_id = "ai.composer.surface";
     ai_styles.finishComposer(cx, ai_input_row);
     try ai_input_row.appendChild(cx.allocator, ai_host.attachments_view.?.root);
     const history_input_disabled = try scope.createSignal(bool, false);
@@ -19242,7 +19440,7 @@ fn mountAssistantConversation(ai_host: *AiHost, scope: *ui.Scope, ai_card_box: *
     ai_host.input_node = ai_input.input;
     ai_host.textarea = ai_input.state;
     ai_host.composer_input = ai_input;
-    ai_host.skill_picker = try @import("ui/ai_skill_picker.zig").View.mount(cx, scope, ai_input, cx.on(AiHost, ai_host, AiHost.promptChanged));
+    ai_host.skill_picker = try @import("ui/ai_skill_picker.zig").View.mount(cx, scope, ai_input_row, ai_input, cx.on(AiHost, ai_host, AiHost.promptChanged));
     ai_host.skill_picker.?.actions = .{ .context = ai_host, .available = AiHost.shortcutAvailable, .open = AiHost.openShortcut };
     ai_host.composer_node = ai_input_row;
     @import("ui/ai_composer_sizing.zig").configure(ai_input);
@@ -19260,7 +19458,7 @@ fn mountAssistantConversation(ai_host: *AiHost, scope: *ui.Scope, ai_card_box: *
     try ai_input_row.appendChild(cx.allocator, ai_host.skill_picker.?.popup.wrapper);
     const composer_controls = try @import("ui/ai_composer_controls_view.zig").View.mount(cx, scope, .{ .context = ai_host, .action = AiHost.composerAction, .open_settings = AiHost.composerSettings, .models_opened = AiHost.composerModelsOpened });
     ai_host.composer_controls = composer_controls;
-    ai_host.target_bar = try @import("ui/ai_target_bar.zig").View.mount(cx, scope, composer_controls.root, composer_controls.buttons[1], .{ .context = ai_host, .add = AiHost.targetAdded, .remove = AiHost.targetRemoved, .insert = AiHost.targetInserted, .create_local = AiHost.createAssociation });
+    ai_host.target_bar = try @import("ui/ai_target_bar.zig").View.mount(cx, scope, ai_input_row, ai_input, .{ .context = ai_host, .add = AiHost.targetAdded, .remove = AiHost.targetRemoved, .insert = AiHost.targetInserted, .create_local = AiHost.createAssociation });
     composer_controls.targets = ai_host.target_bar;
     const ai_controls = composer_controls.trailing;
     const ai_send_base = try scope.createSignal(ai_styles.ButtonStyle, ai_styles.primary());
@@ -19868,10 +20066,9 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
 
     ai_host.dock_titlebar = title_bar;
     ai_host.strip_layout_owner = content_row;
-    const ai_dock = try @import("ui/ai_dock_slot.zig").View.mount(cx, scope, content_row, .{ .context = nav_host, .resize = AppNavHost.resizeAiDock, .persist = AppNavHost.persistAiDock }, app_config.value.ui.ai_dock_width);
+    const ai_dock = try @import("ui/ai_dock_slot.zig").View.mount(cx, scope, content_row, .{ .context = nav_host, .persist = AppNavHost.persistAiDock }, app_config.value.ui.ai_dock_width);
     nav_host.ai_dock = ai_dock;
     ai_host.dock_slot = ai_dock;
-    ai_dock.setWidth(app_config.value.ui.ai_dock_width);
     try root.appendChild(cx.allocator, ai_host.strip.?.root);
     try panel_parent.appendChild(cx.allocator, ai_panel);
     try root.insertChildBefore(cx.allocator, quick_panel, main_row);
@@ -23126,6 +23323,11 @@ fn runApplication(startup: *@import("platform/startup_alert.zig").StartupAlert) 
             interactive_reported = true;
             applog.info(.app, "startup interactive ms total={d}", .{wallClockMsTransfer() - started_at});
             const unsupported_fields = process.runtime_config.?.value.unknown_fields;
+            if (credentials.hasPendingLocalImport()) {
+                if (nav.settings) |settings| if (settings.notification_window) |window| {
+                    notifications.publishWindowAdvisory(window, "有本地凭据待导入", "当前使用 macOS 钥匙串。在「设置 › 数据 › 位置与凭据」中可导入原有凭据。") catch |err| applog.warn(.ui, "credential notice: {s}", .{@errorName(err)});
+                };
+            }
             if (unsupported_fields.len != 0) {
                 const line = unsupported_fields[0].line;
                 applog.warn(.config, "config.toml ignored {d} unsupported settings, first line {d}", .{ unsupported_fields.len, line });

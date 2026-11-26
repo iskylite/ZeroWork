@@ -1,4 +1,5 @@
 test {
+    _ = @import("config/credential_store.zig");
     _ = @import("config/store.zig");
     _ = @import("config/runtime_config.zig");
     _ = @import("config/settings_controller.zig");

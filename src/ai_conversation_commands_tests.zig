@@ -37,7 +37,7 @@ test "conversation UI command restore race is rejected before stopping the targe
     var service = runtime.Service.init(a);
     defer service.deinit();
     const first = try service.attach(.{ .session = 1 }, fixture.backend());
-    const second = try service.attach(.{ .session = 2 }, fixture.backend());
+    const second = first;
     const third = try service.attach(.{ .session = 3 }, fixture.backend());
     const source = try completed(&service, first);
     try service.endConversation(source, identity.HostOperationId.generate());
@@ -76,11 +76,12 @@ test "conversation UI command keeps binary binding while End waits then restores
     var service = runtime.Service.init(a);
     defer service.deinit();
     const first = try service.attach(.{ .session = 1 }, fixture.backend());
-    const second = try service.attach(.{ .session = 2 }, fixture.backend());
+    const second = first;
     const source = try completed(&service, first);
     try service.endConversation(source, identity.HostOperationId.generate());
     const target = try completed(&service, second);
     second.context = .{ .fence = target, .task = identity.TaskId.generate(), .turn = 2, .owner = second.agent.owner };
+    second.worker_released = false;
     second.record = service.store.find(target.conversation);
     second.has_tools = true;
     fixture.released = false;
@@ -102,11 +103,12 @@ test "conversation UI command cancellation drops the restore step while the acce
     var service = runtime.Service.init(a);
     defer service.deinit();
     const first = try service.attach(.{ .session = 1 }, fixture.backend());
-    const second = try service.attach(.{ .session = 2 }, fixture.backend());
+    const second = first;
     const source = try completed(&service, first);
     try service.endConversation(source, identity.HostOperationId.generate());
     const target = try completed(&service, second);
     second.context = .{ .fence = target, .task = identity.TaskId.generate(), .turn = 2, .owner = second.agent.owner };
+    second.worker_released = false;
     second.record = service.store.find(target.conversation);
     second.has_tools = true;
     fixture.released = false;
@@ -177,4 +179,63 @@ test "conversation UI turn fork freezes its chosen checkpoint and waits for expl
     try std.testing.expectEqual(@as(u64, 1), copied.fork_turn.?);
     try std.testing.expectEqual(@as(usize, 2), copied.history.messages.len);
     try std.testing.expectEqualStrings("stable answer", copied.history.messages[1].content);
+}
+
+test "conversation UI command refuses original restore between live surfaces in both directions but permits an explicit safe text copy" {
+    const roles = [_]bool{ false, true };
+    for (roles) |reverse| {
+        var fixture: Fixture = .{};
+        var service = runtime.Service.init(a);
+        defer service.deinit();
+        // Both kinds of standalone and terminal tab are attached runtime
+        // sessions. Distinct live agents, not mutable display names, decide.
+        const first = try service.attach(.{ .session = if (reverse) 61 else 60 }, fixture.backend());
+        const second = try service.attach(.{ .session = if (reverse) 60 else 61 }, fixture.backend());
+        const source = try service.store.create(first.agent.id);
+        try service.store.checkpoint(source, 1, &.{
+            .{ .content = "ordinary request\n\n<terminal_selection_attachment>\nforeign material" },
+            .{ .content = "old environment", .origin = .host_context_notice },
+            .{ .role = .assistant, .content = "tool call", .tool_calls = &.{.{ .id = "a", .name = "old_tool", .arguments = "{}" }} },
+            .{ .role = .tool, .content = "private result", .tool_call_id = "a" },
+            .{ .role = .assistant, .content = "ordinary answer" },
+        }, true);
+        _ = try service.store.setDraft(source, 1, "old draft");
+        try service.endConversation(source, identity.HostOperationId.generate());
+        const target = try completed(&service, second);
+        try std.testing.expectError(error.RestoreEnvironmentChanged, commands.Command.prepare(&service, .restore, source.conversation, second.agent.id));
+        try std.testing.expect(second.agent.current.?.eql(target.conversation));
+        var command = try commands.Command.prepare(&service, .copy_use, source.conversation, second.agent.id);
+        defer command.deinit();
+        try std.testing.expect(command.needsConfirmation() and command.text_only);
+        try std.testing.expect(second.agent.current.?.eql(target.conversation));
+        const result = (try command.advance(&service)).?;
+        const copy = service.store.find(result.conversation.?).?;
+        try std.testing.expect(!copy.id.eql(source.conversation) and copy.parent.?.eql(source.conversation));
+        try std.testing.expect(copy.binding.?.owner.eql(second.agent.owner) and copy.initial_origin.?.eql(second.agent.owner));
+        try std.testing.expect(copy.workspace.directory == null and copy.workspace_source == null and copy.draft == null and copy.inbox.entries.items.len == 0 and copy.child == null);
+        try std.testing.expectEqual(@as(usize, 2), copy.history.messages.len);
+        try std.testing.expectEqualStrings("ordinary request", copy.history.messages[0].content);
+        try std.testing.expectEqualStrings("ordinary answer", copy.history.messages[1].content);
+        try std.testing.expectEqualStrings("old draft", service.store.find(source.conversation).?.draft.?);
+        try std.testing.expect(service.store.find(source.conversation).?.binding == null and second.thread == null and !second.has_tools);
+    }
+}
+
+test "conversation UI command no numeric owner guessing after reopen or environment change" {
+    var fixture: Fixture = .{};
+    var service = runtime.Service.init(a);
+    defer service.deinit();
+    const runner = try service.attach(.{ .session = 7 }, fixture.backend());
+    const source = try completed(&service, runner);
+    try service.endConversation(source, identity.HostOperationId.generate());
+    const record = service.store.find(source.conversation).?;
+    try std.testing.expect(commands.Command.canRestore(record, runner.agent));
+    var replacement = runner.agent.*;
+    replacement.id = identity.AgentId.generate();
+    try std.testing.expect(!commands.Command.canRestore(record, &replacement));
+    runner.agent.environment += 1;
+    try std.testing.expectError(error.RestoreEnvironmentChanged, commands.Command.prepare(&service, .restore, source.conversation, runner.agent.id));
+    var copy = try commands.Command.prepare(&service, .copy_use, source.conversation, runner.agent.id);
+    defer copy.deinit();
+    try std.testing.expect(copy.previous == null and copy.needsConfirmation() and copy.text_only);
 }

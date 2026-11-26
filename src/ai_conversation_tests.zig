@@ -658,7 +658,12 @@ test "AI conversation lifecycle row formats elapsed time and actual token usage 
     const row = try Status.mount(cx, scope, &turn, null);
     try cx.root.?.appendChild(a, row);
     cx.layout();
-    try std.testing.expectEqualStrings("～回合结束～", find(row, "ai.turn.label").?.getText().?.content);
+    try std.testing.expectEqualStrings("回合结束", find(row, "ai.turn.label").?.getText().?.content);
+    const styles = @import("ui/ai_assistant_styles.zig");
+    const elapsed = find(row, "ai.turn.elapsed").?.getText().?;
+    try std.testing.expectEqual(@as(f32, 11), elapsed.font_size);
+    try std.testing.expectEqual(elapsed.font_size, find(row, "ai.turn.label").?.getText().?.font_size);
+    try std.testing.expect(styles.markdownOptions().base_font_size >= elapsed.font_size + 2);
     try std.testing.expect(find(row, "ai.turn.logo") != null);
     try std.testing.expectEqual(@as(f32, 0), @import("ui/ai_tool_results_styles.zig").card(cx.tokens).border.?.width);
 }
@@ -713,7 +718,7 @@ test "AI conversation activity label follows tool phases and prioritizes pending
     try std.testing.expectEqualStrings("～大浪淘金中～", Status.turnLabel(&turn).text);
     try std.testing.expect(Status.turnLabel(&turn).animated);
     turn.ended_at_ms = 9;
-    try std.testing.expectEqualStrings("～回合结束～", Status.turnLabel(&turn).text);
+    try std.testing.expectEqualStrings("回合结束", Status.turnLabel(&turn).text);
     try std.testing.expect(!Status.turnLabel(&turn).animated);
 
     for ([_]struct { name: []const u8, label: []const u8 }{

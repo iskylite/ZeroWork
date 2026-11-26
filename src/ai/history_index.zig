@@ -40,6 +40,7 @@ const Row = struct {
     child: bool = false,
     status: ?struct { can_restore: bool, can_copy: bool, first_use: bool } = null,
     recoverable: ?bool = null,
+    history_pinned: ?bool = null,
     projection: Projection = .{},
     receipts: []const ReceiptIndex = &.{},
 };
@@ -53,6 +54,7 @@ const Header = struct {
         owner: ?Owner = null,
         initial_text: ?[]const u8 = null,
         recoverable: bool = true,
+        history_pinned: ?bool = null,
         turn: u64 = 0,
         draft: ?[]const u8 = null,
         workspace: ?struct {} = null,
@@ -85,6 +87,7 @@ pub const Entry = struct {
     can_copy: bool = false,
     first_use: bool = false,
     recoverable: bool = true,
+    history_pinned: bool = false,
 };
 
 pub const Catalog = struct {
@@ -130,6 +133,7 @@ pub const Catalog = struct {
                 entry.first_use = status.first_use;
             }
             if (item.recoverable) |recoverable| entry.recoverable = recoverable;
+            if (item.history_pinned) |pinned| entry.history_pinned = pinned;
             if (entry.title.len == 0) if (item.title) |title| {
                 _ = entry.title.set(title);
             };
@@ -282,6 +286,7 @@ fn summarize(scratch: A, allocator: A, line: []const u8) ![]const Row {
             .child = event.child_info != null or event.parent_binding != null,
             .removed = event.kind == .remove or event.kind == .remove_family,
             .recoverable = if (event.kind == .checkpoint) event.recoverable else null,
+            .history_pinned = if (event.kind == .history_pin) event.history_pinned else null,
             .projection = .{
                 .snapshot = switch (event.kind) {
                     .checkpoint, .fork, .fork_bound, .migrate_bound, .migrate_closed, .child_create => true,

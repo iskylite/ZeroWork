@@ -269,6 +269,14 @@ pub const View = struct {
         self.confirmation.set(true);
         self.cx.requestRedraw();
     }
+    pub fn confirmTextCopy(self: *View, operation: u64, replaces_current: bool) !void {
+        try self.confirmOperation(operation, "仅复制对话文本？", "复制为新会话");
+        try self.detail.setTextContent(self.cx.allocator, if (replaces_current)
+            "当前会话将先结束，历史保留。新会话只保留文字，不带原工作区、权限、连接、附件或待处理任务，也不会自动发送。"
+        else
+            "新会话只保留文字，不带原工作区、权限、连接、附件或待处理任务，也不会自动发送。");
+        self.reflow();
+    }
     pub fn showProgress(self: *View, operation: u64) !void {
         try self.confirmation_title.setTextContent(self.cx.allocator, "已绑定 · 正在停止当前任务");
         try self.detail.setTextContent(self.cx.allocator, "正在等待资源释放。取消只取消后续恢复或使用副本，已受理的结束仍会完成；历史和草稿会保留。");
@@ -284,7 +292,7 @@ pub const View = struct {
     pub fn showHistory(self: *View, entry: Entry, text: []const u8) !void {
         self.open.set(false);
         try self.history_title.setTextContent(self.cx.allocator, entry.title);
-        try self.history_status.setTextContent(self.cx.allocator, if (entry.ending) "已绑定 · 正在停止任务 · 只读查看" else if (entry.bound) "已绑定 · 只读查看" else "未绑定 · 历史环境 · 只读查看");
+        try self.history_status.setTextContent(self.cx.allocator, if (entry.ending) "已绑定 · 正在停止任务 · 只读查看" else if (entry.bound) "已绑定 · 只读查看" else if (entry.text_only_copy) "原环境无法核实 · 只读查看" else "未绑定 · 历史环境 · 只读查看");
         try self.history_body.setTextContent(self.cx.allocator, if (text.len == 0) "此会话尚无已保存消息，草稿与待处理记录仍保留。" else text);
         if (self.cx.pressed_node) |node| if (node.isDescendantOf(self.history_actions)) self.cx.cancelPointerInteractions(.explicit);
         while (self.history_actions.children.items.len != 0) {
@@ -298,12 +306,12 @@ pub const View = struct {
         self.history_entry = entry.id;
         if (entry.can_copy) {
             try self.historyButton(scope, entry.id, .copy, "复制，不使用", "ai.history.copy");
-            try self.historyButton(scope, entry.id, .copy_use, "复制到当前 Agent", "ai.history.copy_use");
+            try self.historyButton(scope, entry.id, .copy_use, if (entry.text_only_copy) "仅复制对话文本" else "使用会话副本", "ai.history.copy_use");
         }
         if (entry.bound) {
             try self.historyButton(scope, entry.id, .locate, "定位", "ai.history.locate");
             if (entry.active and !entry.ending) try self.historyButton(scope, entry.id, .end, "结束并解绑", "ai.history.end");
-        } else if (entry.can_restore) try self.historyButton(scope, entry.id, .restore, if (entry.first_use) "使用到当前 Agent" else "恢复到当前 Agent", "ai.history.restore");
+        } else if (entry.can_restore) try self.historyButton(scope, entry.id, .restore, "恢复到原环境", "ai.history.restore");
         if (entry.has_children) try self.historyButton(scope, entry.id, .children, "查看子智能体", "ai.history.children");
         self.reflow();
         self.history_open.set(true);

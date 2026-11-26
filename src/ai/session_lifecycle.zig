@@ -24,7 +24,7 @@ pub const WorkspaceSource = struct {
     snapshot: local_workspace.Snapshot,
 };
 pub const Event = struct {
-    kind: enum { create, bind, end_requested, unbind, fork, fork_bound, handoff, environment, checkpoint, presentation, draft, remove, migrate_bound, migrate_closed, child_create, child_bind, remove_family, task_fact, child_launch, child_config, workspace_update, workspace_ack, conversation_model, board_post },
+    kind: enum { create, bind, end_requested, unbind, fork, fork_bound, handoff, environment, checkpoint, presentation, draft, remove, migrate_bound, migrate_closed, child_create, child_bind, remove_family, task_fact, child_launch, child_config, workspace_update, workspace_ack, conversation_model, board_post, history_pin },
     conversation: identity.ConversationId,
     agent: ?identity.AgentId = null,
     owner: ?scope.Owner = null,
@@ -54,6 +54,7 @@ pub const Event = struct {
     workspace_ack_revision: ?u64 = null,
     conversation_model: ?ConversationModel = null,
     board_post: ?@import("swarm_board.zig").Post = null,
+    history_pinned: ?bool = null,
 };
 pub const Persistence = struct {
     context: *anyopaque,
@@ -111,6 +112,7 @@ pub const Record = struct {
     pending_presentation: ?*PresentationWrite = null,
     presentation_failure: ?anyerror = null,
     conversation_model: ?ConversationModel = null,
+    history_pinned: bool = false,
     recovery_history: wire.History = .{},
     recovery_turn: u64 = 0,
     draft: ?[]u8 = null,
@@ -635,6 +637,14 @@ pub const Store = struct {
         try self.savePresentationWithUsage(id, bytes, record.history.usage);
     }
 
+    pub fn setHistoryPinned(self: *Store, id: identity.ConversationId, pinned: bool) !void {
+        const record = self.find(id) orelse return error.ConversationNotFound;
+        if (record.child != null) return error.ChildRequiresParent;
+        if (record.history_pinned == pinned) return;
+        try self.save(.{ .kind = .history_pin, .conversation = id, .revision = record.revision, .history_pinned = pinned });
+        record.history_pinned = pinned;
+    }
+
     pub fn saveConversationModel(self: *Store, id: identity.ConversationId, model: ConversationModel) !void {
         const record = self.find(id) orelse return error.ConversationNotFound;
         if (record.conversation_model) |prior| if (prior.eql(model)) return;
@@ -735,6 +745,7 @@ pub const Store = struct {
         presentation: ?[]const u8 = null,
         workspace: local_workspace.Snapshot,
         workspace_allocator: std.mem.Allocator,
+        text_only: bool = false,
 
         pub fn deinit(self: *ForkSnapshot) void {
             self.workspace.deinit(self.workspace_allocator);
@@ -755,6 +766,27 @@ pub const Store = struct {
         const workspace = try record.workspace.clone(self.allocator);
         return .{ .source = source, .revision = record.content_revision, .turn = record.last_turn, .origin = record.initial_origin, .history = history, .presentation = presentation, .workspace = workspace, .workspace_allocator = self.allocator };
     }
+    /// A cross-environment copy is a distinct new chat, not a new owner for
+    /// the original chat. Carry readable text only; never copy an executable
+    /// tool transcript, injected notice, attachment, old workspace or draft.
+    pub fn pinTextFork(self: *Store, source: identity.ConversationId, owner: scope.Owner) !ForkSnapshot {
+        const record = self.find(source) orelse return error.ConversationNotFound;
+        if (record.child != null) return error.ChildRequiresParent;
+        if (record.last_turn == 0 or !record.recoverable or record.history.failure != null) return error.NoStableCheckpoint;
+        var messages: std.ArrayList(provider.Message) = .empty;
+        defer messages.deinit(self.allocator);
+        for (record.history.messages) |message| {
+            if (message.origin != .user_or_tool or message.role == .tool or message.tool_calls.len != 0 or message.tool_call_id != null) continue;
+            const content = if (message.role == .user)
+                @import("history_environment.zig").portableUserText(message.content)
+            else
+                @import("history_environment.zig").assistantText(message.content);
+            if (content.len != 0) try messages.append(self.allocator, .{ .role = message.role, .content = content });
+        }
+        if (messages.items.len == 0) return error.NoStableCheckpoint;
+        const history = try wire.History.copy(self.allocator, messages.items, "");
+        return .{ .source = source, .revision = record.content_revision, .turn = record.last_turn, .origin = owner, .history = history, .workspace = .{}, .workspace_allocator = self.allocator, .text_only = true };
+    }
     pub fn publishFork(self: *Store, pinned: *const ForkSnapshot, agent_id: ?identity.AgentId) !identity.ConversationId {
         const target = if (agent_id) |id| self.agent(id) orelse return error.AgentNotFound else null;
         if (target) |agent_value| if (agent_value.role != .attached) return error.ChildRequiresParent;
@@ -767,7 +799,7 @@ pub const Store = struct {
         errdefer record.deinit(self.allocator);
         if (target != null) {
             record.revision = try identity.advance(record.revision);
-            try self.inheritWorkspace(record, .{ .conversation = pinned.source, .snapshot = pinned.workspace });
+            if (!pinned.text_only) try self.inheritWorkspace(record, .{ .conversation = pinned.source, .snapshot = pinned.workspace });
         }
         if (pinned.presentation) |bytes| record.presentation = try self.allocator.dupe(u8, bytes);
         try self.save(.{ .kind = if (target != null) .fork_bound else .fork, .conversation = record.id, .revision = record.revision, .parent = pinned.source, .source_revision = pinned.revision, .turn = pinned.turn, .messages = snapshot.messages, .presentation = record.presentation, .agent = if (target) |agent_value| agent_value.id else null, .owner = if (target) |agent_value| agent_value.owner else null, .environment = if (target) |agent_value| agent_value.environment else 1, .initial_origin = pinned.origin, .workspace = if (record.workspace_source != null) record.workspace else null, .workspace_source = record.workspace_source });
@@ -1306,6 +1338,19 @@ pub const Store = struct {
     /// Replay under the journal's exclusive writer lock, before attaching any
     /// worker. A saved binding is metadata, never recovered execution power.
     pub fn replay(self: *Store, event: Event) !void {
+        if (event.kind == .history_pin) {
+            const record = self.find(event.conversation) orelse return error.InvalidSessionJournal;
+            const pinned = event.history_pinned orelse return error.InvalidSessionJournal;
+            // This event changes presentation metadata only. Never replay it
+            // as a binding, checkpoint or authorization.
+            const expected: Event = .{ .kind = .history_pin, .conversation = record.id, .revision = record.revision, .history_pinned = pinned };
+            var metadata = event;
+            metadata.messages = &.{};
+            if (record.child != null or event.messages.len != 0 or !std.meta.eql(metadata, expected)) return error.InvalidSessionJournal;
+            record.history_pinned = pinned;
+            return;
+        }
+        if (event.history_pinned != null) return error.InvalidSessionJournal;
         if (event.workspace_ack_revision != null and event.kind != .workspace_ack) return error.InvalidSessionJournal;
         if (event.board_post != null and event.kind != .board_post) return error.InvalidSessionJournal;
         if (event.workspace != null or event.workspace_source != null or event.workspace_change != null) switch (event.kind) {
@@ -1568,7 +1613,7 @@ pub const Store = struct {
                 self.eraseRecord(value.id);
                 return;
             },
-            .task_fact, .child_launch, .child_config, .workspace_update, .workspace_ack, .board_post => unreachable,
+            .task_fact, .child_launch, .child_config, .workspace_update, .workspace_ack, .board_post, .history_pin => unreachable,
             .remove => {
                 if (value.child != null or self.childCount(value.id) != 0) return error.InvalidSessionJournal;
                 if (value.binding != null) return error.InvalidSessionJournal;

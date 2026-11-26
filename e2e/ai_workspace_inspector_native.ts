@@ -10,7 +10,10 @@ import { createServer, type ServerResponse } from 'node:http';
 import { join, resolve } from 'node:path';
 
 const diffTrial = process.argv.includes('--workspace-turn-diff');
+const previewOnly = process.argv.includes('--file-preview-only');
+const layoutOnly = process.argv.includes('--layout-only');
 const referenceLight = process.argv.includes('--reference-light');
+const layoutPrompt = 'Check the first message in a new conversation.';
 const diffPrompt = 'Write an isolated verification marker';
 const nextPrompt = 'Explain the last status without doing any work';
 const diffBody = 'verified file change from this turn\n';
@@ -42,6 +45,12 @@ const server = createServer(async (req,res) => {
     const user = body.messages?.filter((m:any) => m.role === 'user') || [];
     const wire = JSON.stringify(user);
     const lastUser = user.at(-1)?.content;
+    if (layoutOnly && lastUser === layoutPrompt) {
+      assert.equal(req.headers.authorization, undefined);
+      res.writeHead(200, {'content-type': 'text/event-stream'});
+      res.end(frame('LAYOUT_FIXTURE_OK')+'data: [DONE]\n\n');
+      return;
+    }
     if (diffTrial && body.tools?.length) {
       const prompt = user.findLast((item:any) => [diffPrompt, nextPrompt].includes(item.content))?.content;
       res.writeHead(200, {'content-type': 'text/event-stream'});
@@ -104,7 +113,7 @@ try {
       workspace_change: { before_revision: 1, reason: 'set' } } },
     { schema: 1, event: { kind: 'checkpoint', conversation, agent, revision: 2, turn: 1 }, messages: [{ role: 'user', content: 'fixture' }] },
   ];
-  await writeFile(join(data, 'ai-sessions.jsonl'), baseline.map(v => JSON.stringify(v)).join('\n') + '\n', {mode: 0o600});
+  if (!previewOnly) await writeFile(join(data, 'ai-sessions.jsonl'), baseline.map(v => JSON.stringify(v)).join('\n') + '\n', {mode: 0o600});
   process.env.ZENIT_E2E_FILE_RPC_DIR = rpc;
   const h = await import(join(prefix, 'share/zenit/harness/client.ts'));
   const trialEndpoint = referenceTrial ? 'http://127.0.0.1:'+port+'/v1/chat/completions' : '';
@@ -112,6 +121,7 @@ try {
     ...process.env, ZEROWORK_DATA_DIR: data, ZEROWORK_AUTOCONNECT: '0',
     ZENIT_E2E_BACKGROUND: '1', ZENIT_E2E_ISOLATE_POINTER: '1', ZW_TEST_CREDENTIAL_RESPONSE: 'cancel',
     OPENAI_API_KEY: '', ANTHROPIC_API_KEY: '', ZDOTDIR: root,
+    ...(previewOnly ? { ZW_TEST_WORKSPACE_PICK_DIRECTORY: project } : {}),
     ...(referenceTrial ? { ZW_TEST_WORKSPACE_FILE_ENDPOINT: trialEndpoint } : {}),
   }, stdio: ['ignore', 'ignore', 'pipe'] });
   child.stderr?.on('data', (bytes: Buffer) => { log = (log + String(bytes)).slice(-4500); });
@@ -222,13 +232,50 @@ try {
     const trailing = (n: any) => n.rect.x + n.rect.w;
     const center = await visible('ai.workspace.center');
     const capsule = await visible('workspace.tabs.capsule');
-    assert(Math.abs(x(capsule) - x(center)) <= 2, 'tab capsule must start above conversation instead of covering native traffic lights');
+    assert(x(capsule) >= 96 && x(capsule) < x(center), 'tab capsule must respect only the native window chrome');
+    const sameCapsule = async () => {
+      const current = (await visible('workspace.tabs.capsule')).rect;
+      for (const axis of ['x', 'y', 'w', 'h']) assert(Math.abs(current[axis] - capsule.rect[axis]) < 0.75, 'AI rails moved the window tab capsule: ' + axis);
+    };
     assert(trailing(await visible('ai.workspace.left')) < x(center), 'conversation rail uses the workspace gutter');
     await click('ai.workspace.collapse');
-    await h.waitFor(async () => x(await visible('workspace.tabs.capsule')) >= 96 && x(await visible('workspace.tabs.capsule')) < x(capsule) - 10 || null);
+    await h.waitFor(async () => x(await visible('ai.workspace.center')) < x(center) - 100 || null);
+    await sameCapsule();
     await click('ai.workspace.expand');
+    await sameCapsule();
     await click('ai.workspace.inspector.toggle');
     const rail = await visible('ai.workspace.inspector'), tabs = await visible('ai.workspace.inspector.tabs');
+    step = 'inspector mouse, keyboard and layout bounds';
+    const resizeId = 'ai.workspace.inspector.resize';
+    const railWidth = (expected: number) => h.waitFor(async () => {
+      const current = await visible('ai.workspace.inspector');
+      return Math.abs(current.rect.w - expected) < 1 ? current : null;
+    }, 5000);
+    const dragInspector = async (delta: number) => {
+      const { rect } = await visible(resizeId);
+      const pt = { x: rect.x + rect.w / 2, y: rect.y + rect.h / 2 };
+      assert((await h.mouseDown(pt.x, pt.y)).ok);
+      assert((await h.mouseMove(pt.x + Math.sign(delta) * 4, pt.y)).ok);
+      assert((await h.mouseMove(pt.x + delta, pt.y)).ok);
+      assert((await h.mouseUp(pt.x + delta, pt.y)).ok);
+    };
+    const separator = await visible(resizeId);
+    assert(Math.abs(x(separator) - trailing(await visible('ai.workspace.center'))) < 1 && Math.abs(trailing(separator) - x(rail)) < 1, 'resizer must occupy the existing gutter');
+    await dragInspector(-72);
+    assert(Math.abs(trailing(await railWidth(rail.rect.w + 72)) - trailing(rail)) < 1, 'inspector right edge must stay anchored');
+    await click(resizeId);
+    assert.equal((await h.focused()).test_id, resizeId);
+    assert((await h.key('left')).ok);
+    await railWidth(rail.rect.w + 88);
+    assert((await h.key('home')).ok);
+    await railWidth(280);
+    const maximum = Math.min(640, (await visible('ai.workspace.shell')).rect.w - (await visible('ai.workspace.left')).rect.w - 24 - 360);
+    assert((await h.key('end')).ok);
+    await railWidth(maximum);
+    assert((await visible('ai.workspace.center')).rect.w >= 359, 'inspector resize must leave usable conversation width');
+    await sameCapsule();
+    await dragInspector(maximum - rail.rect.w);
+    await railWidth(rail.rect.w);
     assert(x(tabs) > x(rail) && trailing(tabs) < trailing(rail), 'tabs fit inside inspection pane');
     for (const tab of ['files', 'members', 'board', 'graph', 'rounds']) {
       const node = await visible('ai.workspace.inspector.tab.' + tab);
@@ -237,7 +284,39 @@ try {
     }
     await click('ai.workspace.inspector.tab.files');
     await click('ai.workspace.inspector.close');
+    if (layoutOnly) {
+      step = 'first user bubble in a fresh standalone conversation';
+      await click('ai.prompt');
+      assert((await h.type_(layoutPrompt)).ok);
+      assert((await h.key('return')).ok);
+      await h.waitFor(async () => content(await h.query('ai.workspace.shell')).includes('LAYOUT_FIXTURE_OK') || null, 10000);
+      const viewport = await visible('ai.conversation.viewport');
+      const firstBubble = await visible('ai.message.user.bubble');
+      assert(content(firstBubble).includes(layoutPrompt));
+      assert(firstBubble.rect.y - viewport.rect.y >= 17, 'first message must not touch the transcript top edge');
+      await click('ai.workspace.inspector.toggle');
+      await railWidth(rail.rect.w);
+      await sameCapsule();
+      if (process.env.ZW_AI_INSPECTOR_CAPTURE) {
+        await h.mouseMove(2, 2);
+        assert((await h.screenshot(resolve(process.env.ZW_AI_INSPECTOR_CAPTURE))).ok, 'could not capture layout');
+      }
+      await h.resizeWindow(860, 480);
+      await railWidth(rail.rect.w);
+      await h.waitFor(async () => !(await h.query('ai.workspace.left')).some(shown) ? true : null);
+      assert((await visible('ai.workspace.center')).rect.w >= 359, 'compact layout retains the conversation');
+      await visible('ai.prompt');
+      assert.deepEqual(fixtureErrors, []);
+      assert(!/keychain-access|keychain prompt/i.test(log));
+      console.log(`PASS: standalone tab stable through rails; inspector mouse and keyboard ${280}–${maximum}pt; new first message top inset ${firstBubble.rect.y - viewport.rect.y}pt.`);
+    } else {
     assert(!(await h.query('ai.workspace.file.0')).some(shown), 'historical root must not leak into new conversation');
+    if (previewOnly) {
+      await click('ai.workspace.workspace');
+      step = 'live workspace binding through the test-mode folder chooser';
+      await h.waitFor(async () => content(await h.query('ai.workspace.workspace')).includes('Example') || null, 12000);
+      await visible('ai.workspace.file.0');
+    } else {
     await click('ai.workspace.history');
     // The welcome view has a second Restore action for the same conversation.
     // Click the opened history menu's button, not the welcome action behind it.
@@ -246,6 +325,11 @@ try {
       .find((n:any) => n.test_id === 'ai.session.restore.2' && shown(n)) ?? null, 12000);
     assert((await h.clickAt(restore.rect.x + restore.rect.w / 2, restore.rect.y + restore.rect.h / 2)).ok);
     assert(content(await visible('ai.history.resumed')).includes('以上是旧会话记录'), 'history boundary must keep its visible meaning');
+    step = 'first message has scrollable top inset';
+    const viewport = await visible('ai.conversation.viewport');
+    const firstBubble = await visible('ai.message.user.bubble');
+    assert(firstBubble.rect.y - viewport.rect.y >= 17, 'first message must not touch the transcript top edge');
+    }
     await click('ai.workspace.file.0'); // src (directory)
     if (referenceTrial) {
       const previewText = async (label: string) => {
@@ -323,6 +407,36 @@ try {
     step = 'expanded source'; await h.waitFor(async () => content(await h.query('ai.workspace.files')).includes('example.zig') || null, 12000);
     await click('ai.workspace.file.1');
     step = 'disk text'; await h.waitFor(async () => content(await h.query('ai.workspace.preview')).includes('const answer = 42') || null, 12000);
+    step = 'refresh the list without blanking the preview';
+    await click('ai.workspace.files.refresh');
+    await h.waitFor(async () => !(await h.query('ai.workspace.files.status')).some(shown) || null, 12000);
+    assert(content(await h.query('ai.workspace.preview')).includes('const answer = 42'));
+    step = 'refresh the selected file from disk';
+    const sourcePath = join(project, 'src', 'example.zig');
+    const initialSource = await readFile(sourcePath);
+    await writeFile(sourcePath, 'const answer = 73;\n');
+    await click('ai.workspace.preview.refresh');
+    await h.waitFor(async () => content(await h.query('ai.workspace.preview')).includes('const answer = 73') || null, 12000);
+    step = 'keep the previous preview when a refresh fails';
+    await writeFile(sourcePath, Buffer.from([0x00, 0x01, 0x02]));
+    await click('ai.workspace.preview.refresh');
+    await h.waitFor(async () => content(await h.query('ai.workspace.preview.status')).includes('已保留上次预览') || null, 12000);
+    assert(content(await h.query('ai.workspace.preview')).includes('const answer = 73'));
+    await writeFile(sourcePath, initialSource);
+    step = 'resize and close the preview without closing the file list';
+    const beforePreview = await visible('ai.workspace.preview');
+    const grip = await visible('ai.workspace.preview.resize');
+    const gripX = grip.rect.x + grip.rect.w / 2, gripY = grip.rect.y + grip.rect.h / 2;
+    assert((await h.mouseMove(gripX, gripY)).ok);
+    assert((await h.mouseDown(gripX, gripY)).ok);
+    assert((await h.mouseMove(gripX, gripY - 70)).ok);
+    assert((await h.mouseUp(gripX, gripY - 70)).ok);
+    await h.waitFor(async () => (await visible('ai.workspace.preview')).rect.h > beforePreview.rect.h + 40 || null, 5000);
+    await click('ai.workspace.preview.close');
+    assert(!(await h.query('ai.workspace.preview')).some(shown));
+    await visible('ai.workspace.file.1');
+    await click('ai.workspace.file.1');
+    await h.waitFor(async () => content(await h.query('ai.workspace.preview')).includes('const answer = 42') || null, 12000);
     if (process.env.ZW_AI_INSPECTOR_CAPTURE) {
       await h.mouseMove(2, 2);
       assert((await h.screenshot(resolve(process.env.ZW_AI_INSPECTOR_CAPTURE))).ok, 'could not capture standalone inspector');
@@ -349,6 +463,11 @@ try {
     step = 'second tab isolation'; await h.waitFor(async () => !(await h.query('ai.workspace.file.0')).some(shown) || null, 12000);
     assert(!content(await h.query('ai.workspace.shell')).includes('const answer = 42'));
     assert(!(await h.query('ai.workspace.preview.image')).some(shown), 'a second tab must not inherit the raster');
+    if (previewOnly) {
+      assert.deepEqual(fixtureErrors, []);
+      assert(!/keychain-access|keychain prompt/i.test(log), 'unexpected credential use');
+      console.log('PASS: native file preview reads the actual selected workspace; tree refresh preserves content, file refresh re-reads disk, failed refresh preserves content, top grip resizes, close/reopen works; symlink and second-tab isolation enforced.');
+    } else {
     const tabs = flatten((await h.query('tabs.strip')).find(shown)).filter(n=>/^tabs\.tab\.\d+$/.test(n.test_id||'')).sort((x,y)=>x.rect.x-y.rect.x);
     assert.equal(tabs.length, 2);
     const send = async (key:string) => {
@@ -391,6 +510,8 @@ try {
 
     assert(!/keychain-access|keychain prompt/i.test(log), 'unexpected credential use');
     console.log('PASS: actual app menu → standalone AI → directory → disk text; symlink refused, second tab isolated; local-only credentials.');
+    }
+    }
     }
     }
   } catch (e) {

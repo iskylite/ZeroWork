@@ -304,6 +304,8 @@ pub const View = struct {
     last_error: ?anyerror = null,
     popup_layout_dirty: bool = true,
     execution_compact: bool = false,
+    permission_compact: bool = false,
+    usage_compact: bool = false,
     execution_focus_pending: bool = false,
     execution_open_seen: bool = false,
     keep_model_popup_on_update: bool = false,
@@ -515,8 +517,11 @@ pub const View = struct {
         const button = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = label_text, .disabled = disabled, .base_style = S.attachmentRow(), .hover_style = hover, .on_click = on_click }).mount(self.scope, self.cx);
         prepareCustomButton(button, .start, self.cx.allocator);
         button.meta.ownership.meta.test_id = id;
-        try button.appendChild(self.cx.allocator, try ui.iconTint(self.cx, ui.icons.get(icon).?, S.theme.current().fg_2, S.icon(16)));
-        _ = try self.label(button, label_text, S.text(11.5, 400, 18, false), S.flexibleLabel(18));
+        const glyph = try ui.iconTint(self.cx, ui.icons.get(icon).?, S.theme.current().fg_2, S.icon(16));
+        glyph.setHitTestVisible(false);
+        try button.appendChild(self.cx.allocator, glyph);
+        const label_node = try self.label(button, label_text, S.text(11.5, 400, 18, false), S.flexibleLabel(18));
+        label_node.setHitTestVisible(false);
         try parent.appendChild(self.cx.allocator, button);
         return button;
     }
@@ -1355,6 +1360,7 @@ pub const View = struct {
         const permission = if (source) |value| permissionLabel(value.permission) else "执行权限";
         try self.labels[1].?.setTextContent(self.cx.allocator, permission);
         if (self.buttons[1].behavior.interaction.a11y) |*attrs| attrs.label = self.labels[1].?.getText().?.content;
+        self.button_styles[1].set(if (self.permission_compact) S.iconButton(8) else S.chip(98, 8));
         setAsset(self.icons[1], if (source != null and source.?.permission == .auto) "shield-check" else "hand", 12, if (editable) colors.fg_2 else colors.fg_3);
         const current_key = if (source) |value| value.current else null;
         const unavailable = current_key != null and (current == null or !current.?.enabled);
@@ -1443,7 +1449,7 @@ pub const View = struct {
         try self.labels[4].?.setTextContent(self.cx.allocator, if (usage) |value| try percentText(&buffer, value) else "—");
         self.labels[4].?.setStyleInline(self.cx.allocator, .{ .position = .relative, .inset = .{}, .width = .{ .fit = .{} }, .height = .{ .px = 14 }, .flex_shrink = 0 });
         self.ring.setStyleInline(self.cx.allocator, .{ .position = .relative, .inset = .{}, .width = .{ .px = 8 }, .height = .{ .px = 8 }, .flex_shrink = 0 });
-        self.button_styles[4].set(S.naturalChip());
+        self.button_styles[4].set(if (self.usage_compact) S.iconButton(8) else S.naturalChip());
         self.ring.markRenderDirty();
     }
     fn refreshUsage(self: *View) !void {
@@ -1563,40 +1569,64 @@ pub const View = struct {
         if (slot_changed) return .needs_layout;
         if (self.interaction_active) return .done;
         const row_width = self.root.globalRect().w;
-        if (self.targets) |targets| if (targets.root.style.display != .none and targets.setCompact(row_width < 620)) return .needs_layout;
-        const target_width = if (self.targets) |targets| if (targets.root.style.display != .none) targets.root.globalRect().w + 8 else 0 else 0;
+        if (row_width <= 0) return .done;
         const mode_label = self.labels[5].?.getText().?.content;
-        const natural_execution_width = 48 + self.cx.text.measureTextWidth(mode_label, 10, 400, false);
+        const natural_execution_width = 48 + @ceil(self.cx.text.measureTextWidth(mode_label, 10, 400, false));
         const model_width = @ceil(self.cx.text.measureTextWidth(self.labels[2].?.getText().?.content, 10, 400, false));
         const effort_width = if (self.labels[3].?.style.display != .none) @ceil(self.cx.text.measureTextWidth(self.labels[3].?.getText().?.content, 10, 400, false)) else 0;
         const model_chrome = S.compactModelWidth(0, effort_width, self.model_brand.style.display != .none);
         const mode_visible = self.mode_wrapper.style.display != .none;
-        const fixed_width = self.buttons[0].globalRect().w + self.buttons[1].globalRect().w + self.buttons[4].globalRect().w + actions_width + 48 + target_width;
-        const mode_compact = row_width < fixed_width + natural_execution_width + model_chrome + 84 + 8 + 44;
+        const usage_text = self.labels[4].?.getText().?.content;
+        const usage_width = 28 + @ceil(self.cx.text.measureTextWidth(usage_text, 10, 400, false));
+        const gap = self.root.style.gap;
+        const base = 24 + actions_width + 6 * gap + (if (mode_visible) gap else 0) + model_chrome;
+        const mode_compact = row_width < base + 98 + usage_width + natural_execution_width + 84 + 44;
         if (mode_visible and mode_compact != self.mode_compact) {
             self.mode_compact = mode_compact;
             self.paintModeChip();
             return .needs_layout;
         }
-        const mode_width: f32 = if (mode_visible) (if (self.mode_compact) @as(f32, 28) else 84) + 8 else 0;
-        // Always show the effective execution mode; truncate the model first.
-        const compact = false;
-        if (compact != self.execution_compact) {
-            self.execution_compact = compact;
-            self.labels[5].?.setDisplay(if (compact) .none else .flex);
+        const mode_width: f32 = if (mode_visible) (if (self.mode_compact) 28 else 84) else 0;
+        var reserved = base + mode_width + natural_execution_width + 98 + usage_width;
+        // Truncate the model first. If even the controls' chrome does not fit,
+        // compact usage, then permission, then execution; no action disappears.
+        const compact_usage = reserved > row_width;
+        if (compact_usage) reserved -= usage_width - 24;
+        const compact_permission = reserved > row_width;
+        if (compact_permission) reserved -= 98 - 24;
+        const compact_execution = reserved > row_width;
+        if (compact_execution) reserved -= natural_execution_width - 24;
+        var layout_changed = false;
+        if (compact_usage != self.usage_compact) {
+            self.usage_compact = compact_usage;
+            self.labels[4].?.setDisplay(if (compact_usage) .none else .flex);
+            self.button_styles[4].set(if (compact_usage) S.iconButton(8) else S.naturalChip());
+            layout_changed = true;
+        }
+        if (compact_permission != self.permission_compact) {
+            self.permission_compact = compact_permission;
+            self.labels[1].?.setDisplay(if (compact_permission) .none else .flex);
+            self.chevrons[0].setDisplay(if (compact_permission) .none else .flex);
+            self.icons[1].setStyleInline(self.cx.allocator, if (compact_permission) .{ .position = .relative, .inset = .{}, .width = .{ .px = 12 }, .height = .{ .px = 12 }, .flex_shrink = 0 } else S.chipIcon(.permission));
+            self.button_styles[1].set(if (compact_permission) S.iconButton(8) else S.chip(98, 8));
+            layout_changed = true;
+        }
+        if (compact_execution != self.execution_compact) {
+            self.execution_compact = compact_execution;
+            self.labels[5].?.setDisplay(if (compact_execution) .none else .flex);
             const children = self.buttons[5].children.items;
-            children[children.len - 1].setDisplay(if (compact) .none else .flex);
-            self.button_styles[5].set(if (compact) S.iconButton(8) else S.executionChip());
-            return .needs_layout;
+            children[children.len - 1].setDisplay(if (compact_execution) .none else .flex);
+            self.button_styles[5].set(if (compact_execution) S.iconButton(8) else S.executionChip());
+            layout_changed = true;
         }
         // Preserve the complete ID until the host's actual row width is exhausted.
-        const execution_width = if (compact) @as(f32, 24) else natural_execution_width;
-        const available_model_width = @max(0, row_width - fixed_width - execution_width - model_chrome - mode_width);
+        const available_model_width = @max(0, row_width - reserved - 1);
         const label_width = @min(model_width, available_model_width);
         if (@abs(self.labels[2].?.style.width.px - label_width) > 0.1) {
             self.labels[2].?.setStyleInline(self.cx.allocator, S.compactModelLabel(label_width, self.model_brand.style.display != .none));
-            return .needs_layout;
+            layout_changed = true;
         }
+        if (layout_changed) return .needs_layout;
         for (self.trailing.children.items) |button| {
             const id = button.meta.ownership.meta.test_id orelse continue;
             if ((!std.mem.eql(u8, id, "ai.send") and !std.mem.eql(u8, id, "ai.stop")) or button.getOpacity() == 0) continue;

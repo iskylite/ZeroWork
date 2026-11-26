@@ -1046,3 +1046,45 @@ test "indexed AI persistence accepts new conversations independently of invalid 
     defer a.free(active_bytes);
     try std.testing.expect(std.mem.indexOf(u8, active_bytes, "new chat") != null);
 }
+
+test "standalone stored conversation pin survives journal replay and incremental history indexing" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const index = @import("ai/history_index.zig");
+    const Journal = @import("ai/session_journal.zig").Journal;
+    const LifecycleStore = @import("ai/session_lifecycle.zig").Store;
+    const path = index.Source.active.path();
+    const cancel = std.atomic.Value(bool).init(false);
+    var primary = LifecycleStore.init(a);
+    defer primary.deinit();
+    var journal = try Journal.openStreaming(a, std.testing.io, tmp.dir, path);
+    defer journal.deinit();
+    try journal.bindActive(&primary);
+    const agent = try primary.attach(.{ .session = 17 });
+    const ticket = try primary.create(agent.id);
+    try primary.checkpoint(ticket, 1, &.{.{ .content = "history stays intact" }}, true);
+    const revision = primary.find(ticket.conversation).?.revision;
+    try primary.setHistoryPinned(ticket.conversation, true);
+    try primary.setHistoryPinned(ticket.conversation, true);
+    try std.testing.expectEqual(revision, primary.find(ticket.conversation).?.revision);
+    try std.testing.expect((try primary.fence(ticket.conversation)).eql(ticket));
+    {
+        var catalog = index.Catalog.init(a);
+        defer catalog.deinit();
+        try catalog.scan(std.testing.io, tmp.dir, try index.sourceBounds(std.testing.io, tmp.dir), &cancel);
+        try std.testing.expect(catalog.find(ticket.conversation).?.history_pinned);
+        const spans = try catalog.family(ticket.conversation, a);
+        defer a.free(spans);
+        var replayed = LifecycleStore.init(a);
+        defer replayed.deinit();
+        _ = try Journal.replayIndexed(a, std.testing.io, tmp.dir, catalog.bounds, spans, &cancel, &replayed);
+        const stored = replayed.find(ticket.conversation).?;
+        try std.testing.expect(stored.history_pinned and stored.needs_recovery);
+        try std.testing.expectEqualStrings("history stays intact", stored.history.messages[0].content);
+    }
+    try primary.setHistoryPinned(ticket.conversation, false);
+    var refreshed = index.Catalog.init(a);
+    defer refreshed.deinit();
+    try refreshed.scan(std.testing.io, tmp.dir, try index.sourceBounds(std.testing.io, tmp.dir), &cancel);
+    try std.testing.expect(!refreshed.find(ticket.conversation).?.history_pinned);
+}

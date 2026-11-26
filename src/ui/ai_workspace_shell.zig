@@ -18,6 +18,9 @@ pub const Conversation = struct {
     title: []const u8,
     subtitle: []const u8 = "",
     selected: bool = false,
+    pinned: bool = false,
+    can_pin: bool = false,
+    can_delete: bool = false,
 };
 
 pub const FileRow = struct {
@@ -43,11 +46,15 @@ pub const Callbacks = struct {
     show_history: ?*const fn (?*anyopaque) void = null,
     new_chat: ?*const fn (?*anyopaque) void = null,
     select_conversation: ?*const fn (?*anyopaque, []const u8) void = null,
+    pin_conversation: ?*const fn (?*anyopaque, []const u8, bool) void = null,
+    delete_conversation: ?*const fn (?*anyopaque, []const u8) void = null,
     toggle_left_rail: ?*const fn (?*anyopaque, bool) void = null,
     toggle_inspector: ?*const fn (?*anyopaque, bool) void = null,
     select_inspector_tab: ?*const fn (?*anyopaque, InspectorTab) void = null,
     choose_workspace: ?*const fn (?*anyopaque) void = null,
     refresh_files: ?*const fn (?*anyopaque) void = null,
+    refresh_preview: ?*const fn (?*anyopaque) void = null,
+    close_preview: ?*const fn (?*anyopaque) void = null,
     select_file: ?*const fn (?*anyopaque, []const u8) void = null,
     insert_file_reference: ?*const fn (?*anyopaque, []const u8) void = null,
     choose_preview_mode: ?*const fn (?*anyopaque, PreviewMode) void = null,
@@ -86,6 +93,9 @@ const StoredConversation = struct {
     title: []u8,
     subtitle: []u8,
     selected: bool,
+    pinned: bool,
+    can_pin: bool,
+    can_delete: bool,
 };
 
 const StoredFile = struct {
@@ -104,6 +114,17 @@ const SessionRowState = struct {
     id: []const u8,
     index: usize,
     test_id: [72]u8 = undefined,
+    pin_id: [72]u8 = undefined,
+    delete_id: [72]u8 = undefined,
+    pinned: bool,
+
+    fn togglePin(self: *SessionRowState) void {
+        if (self.view.callbacks.pin_conversation) |callback| callback(self.view.callbacks.context, self.id, !self.pinned);
+    }
+
+    fn requestDelete(self: *SessionRowState) void {
+        if (self.view.callbacks.delete_conversation) |callback| callback(self.view.callbacks.context, self.id);
+    }
 
     fn select(self: *SessionRowState) void {
         selectConversation(self.view, self.id);
@@ -173,6 +194,10 @@ pub const View = struct {
     inspector_toggle: *ui.Node = undefined,
 
     inspector_root: *ui.Node = undefined,
+    inspector_resize: *ui.Node = undefined,
+    inspector_preferred_width: f32 = S.inspector_width,
+    inspector_drag_start: f32 = S.inspector_width,
+    inspector_drag_restore: f32 = S.inspector_width,
     inspector_body: *ui.Node = undefined,
     tab_buttons: [5]*ui.Node = undefined,
     tab_styles: [5]*ui.Signal(ui.BoxStyle) = undefined,
@@ -192,10 +217,20 @@ pub const View = struct {
     files_available: bool = true,
     files_notice: ?*ui.Node = null,
     workspace_picker: *ui.Node = undefined,
+    workspace_can_choose: bool = false,
     refresh_files_button: ?*ui.Node = null,
+    file_tree_tools: ?*ui.Node = null,
+    file_tree_status: *ui.Node = undefined,
     selected_file: *ui.Signal(?[]const u8) = undefined,
 
     preview_box: *ui.Node = undefined,
+    preview_grip: *ui.Node = undefined,
+    preview_close: *ui.Node = undefined,
+    preview_refresh: ?*ui.Node = null,
+    preview_status: *ui.Node = undefined,
+    preview_visible: bool = true,
+    preview_height: f32 = S.preview_default_height,
+    preview_drag_start: f32 = S.preview_default_height,
     preview_title: *ui.Node = undefined,
     preview_diff_status: *ui.Node = undefined,
     preview_diff_available: bool = false,
@@ -396,8 +431,7 @@ fn buildCenter(self: *View, config: Config) !void {
     const workspace = try ui.boxStyled(cx, S.workspacePill, .{});
     self.workspace_picker = workspace;
     if (self.callbacks.choose_workspace != null) {
-        workspace.behavior.interaction.a11y = .{ .role = .button, .label = "选择本地工作区" };
-        workspace.setFocusable(true);
+        workspace.behavior.interaction.a11y = .{ .role = .button, .label = "选择本地工作区", .disabled = true };
         _ = ui.clickable(workspace, cx.on(View, self, chooseWorkspace));
     }
     workspace.meta.ownership.meta.test_id = "ai.workspace.workspace";
@@ -408,6 +442,7 @@ fn buildCenter(self: *View, config: Config) !void {
     self.workspace_name_node.setStyleInline(cx.allocator, .{ .width = .{ .fit = .{} }, .min_width = 0, .max_width = 130 });
     try workspace.appendChild(cx.allocator, self.workspace_name_node);
     try workspace.appendChild(cx.allocator, try T.icon(cx, ui.icons.chevron_down, "fg_3", .{ .width = .{ .px = 12 }, .height = .{ .px = 12 }, .flex_shrink = 0 }));
+    for (workspace.children.items) |node| node.setHitTestVisible(false);
 
     self.inspector_toggle_style = try scope.createSignal(ui.BoxStyle, S.inspectorToggle(false));
     self.inspector_toggle = try ui.widgets.Button(.{
@@ -434,6 +469,7 @@ fn buildCenter(self: *View, config: Config) !void {
 fn buildInspector(self: *View, files_unavailable_reason: ?[]const u8) !void {
     const cx = self.cx;
     const scope = self.scope;
+    try buildInspectorResize(self);
     self.inspector_root = try ui.boxStyled(cx, S.inspector, .{});
     self.inspector_root.meta.ownership.meta.test_id = "ai.workspace.inspector";
     self.inspector_root.setDisplay(.none);
@@ -491,7 +527,8 @@ fn buildInspector(self: *View, files_unavailable_reason: ?[]const u8) !void {
     self.files_page = try buildFilesPage(self);
     if (files_unavailable_reason) |reason| {
         self.file_scroll.container.setDisplay(.none);
-        self.preview_box.setDisplay(.none);
+        if (self.file_tree_tools) |tools| tools.setDisplay(.none);
+        set_preview_visible(self, false);
         self.files_notice = try buildEmptyPage(self, "未选择工作区", reason, ui.icons.folder, "ai.workspace.files.unavailable");
         try self.files_page.appendChild(cx.allocator, self.files_notice.?);
     }
@@ -512,6 +549,33 @@ fn buildFilesPage(self: *View) !*ui.Node {
     const page = try ui.boxStyled(cx, S.filesPage, .{});
     page.meta.ownership.meta.test_id = "ai.workspace.files.page";
 
+    if (self.callbacks.refresh_files != null) {
+        const tools = try ui.box(cx, S.previewTools(), .{});
+        const title = try ui.textStyled(cx, S.previewTitle, "本地文件");
+        title.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0 });
+        try tools.appendChild(cx.allocator, title);
+        const refresh = try ui.widgets.Button(.{
+            .variant = .ghost,
+            .icon_only = true,
+            .icon_asset = ui.icons.refresh_cw,
+            .icon_size = 14,
+            .a11y_label = "刷新文件列表",
+            .base_style = S.iconButton(),
+            .on_click = cx.on(View, self, refreshFiles),
+        }).mount(self.scope, cx);
+        refresh.meta.ownership.meta.test_id = "ai.workspace.files.refresh";
+        try tools.appendChild(cx.allocator, refresh);
+        try page.appendChild(cx.allocator, tools);
+        self.refresh_files_button = refresh;
+        self.file_tree_tools = tools;
+    }
+    self.file_tree_status = try ui.textStyled(cx, S.railEmpty, "");
+    self.file_tree_status.setStyleInline(cx.allocator, S.previewStatus());
+    self.file_tree_status.behavior.interaction.a11y = .{ .role = .status, .live = "polite" };
+    self.file_tree_status.meta.ownership.meta.test_id = "ai.workspace.files.status";
+    self.file_tree_status.setDisplay(.none);
+    try page.appendChild(cx.allocator, self.file_tree_status);
+
     self.file_scroll = try ui.widgets.ScrollArea(.{ .direction = .vertical }).mount(self.scope, cx);
     self.file_scroll.container.setStyleInline(cx.allocator, S.fileTreeViewport(cx.tokens));
     self.file_scroll.container.meta.ownership.meta.test_id = "ai.workspace.files";
@@ -519,6 +583,12 @@ fn buildFilesPage(self: *View) !*ui.Node {
     @import("ai_card_scroll.zig").containVertical(self.file_scroll);
     try page.appendChild(cx.allocator, self.file_scroll.container);
     self.file_list = self.file_scroll.content;
+
+    self.preview_grip = try ui.box(cx, S.previewGrip(), .{});
+    self.preview_grip.meta.ownership.meta.test_id = "ai.workspace.preview.resize";
+    try self.preview_grip.appendChild(cx.allocator, try ui.boxStyled(cx, S.previewGripMark, .{}));
+    try page.appendChild(cx.allocator, self.preview_grip);
+    _ = try ui.interaction.drag.Binding.attach(self.scope, cx, self.preview_grip, .{ .axis = .vertical, .activation_distance = 1, .active_cursor = .ns_resize }, dragPreview, self);
 
     self.preview_box = try ui.boxStyled(cx, S.preview, .{});
     self.preview_box.meta.ownership.meta.test_id = "ai.workspace.preview";
@@ -544,15 +614,18 @@ fn buildFilesPage(self: *View) !*ui.Node {
     try preview_header.appendChild(cx.allocator, insert);
     self.preview_insert = insert;
     if (self.callbacks.insert_file_reference == null or self.preview_reference_requires_approval) insert.setDisplay(.none);
-    if (self.callbacks.refresh_files != null) {
+    if (self.callbacks.refresh_preview != null) {
         const refresh = try ui.widgets.Button(.{
-            .label = "刷新",
             .variant = .ghost,
-            .a11y_label = "刷新工作区文件",
-            .on_click = cx.on(View, self, refreshFiles),
+            .icon_only = true,
+            .icon_asset = ui.icons.refresh_cw,
+            .icon_size = 14,
+            .a11y_label = "刷新文件预览",
+            .base_style = S.iconButton(),
+            .on_click = cx.on(View, self, refreshPreview),
         }).mount(self.scope, cx);
-        refresh.meta.ownership.meta.test_id = "ai.workspace.files.refresh";
-        self.refresh_files_button = refresh;
+        refresh.meta.ownership.meta.test_id = "ai.workspace.preview.refresh";
+        self.preview_refresh = refresh;
         try preview_header.appendChild(cx.allocator, refresh);
     }
 
@@ -574,6 +647,25 @@ fn buildFilesPage(self: *View) !*ui.Node {
         self.preview_mode_buttons[index] = button;
         try segment.appendChild(cx.allocator, button);
     }
+
+    self.preview_close = try ui.widgets.Button(.{
+        .variant = .ghost,
+        .icon_only = true,
+        .icon_asset = ui.icons.x,
+        .icon_size = 14,
+        .a11y_label = "关闭文件预览",
+        .base_style = S.iconButton(),
+        .on_click = cx.on(View, self, closePreview),
+    }).mount(self.scope, cx);
+    self.preview_close.meta.ownership.meta.test_id = "ai.workspace.preview.close";
+    try preview_header.appendChild(cx.allocator, self.preview_close);
+
+    self.preview_status = try ui.textStyled(cx, S.railEmpty, "");
+    self.preview_status.setStyleInline(cx.allocator, S.previewStatus());
+    self.preview_status.behavior.interaction.a11y = .{ .role = .status, .live = "polite" };
+    self.preview_status.meta.ownership.meta.test_id = "ai.workspace.preview.status";
+    self.preview_status.setDisplay(.none);
+    try self.preview_box.appendChild(cx.allocator, self.preview_status);
 
     self.preview_diff_status = try ui.textStyled(cx, S.railEmpty, "");
     self.preview_diff_status.meta.ownership.meta.test_id = "ai.workspace.preview.diff.status";
@@ -651,7 +743,8 @@ pub fn set_sessions(self: *View, sessions: []const Conversation) !void {
     // on every frame when the authoritative conversation snapshot is unchanged.
     if (self.list_scope != null and self.sessions.items.len == sessions.len) unchanged: {
         for (self.sessions.items, sessions) |stored, incoming| {
-            if (stored.selected != incoming.selected or
+            if (stored.selected != incoming.selected or stored.pinned != incoming.pinned or
+                stored.can_pin != incoming.can_pin or stored.can_delete != incoming.can_delete or
                 !std.mem.eql(u8, stored.id, incoming.id) or
                 !std.mem.eql(u8, stored.title, incoming.title) or
                 !std.mem.eql(u8, stored.subtitle, incoming.subtitle)) break :unchanged;
@@ -690,23 +783,107 @@ fn showHistory(self: *View) void {
     if (self.callbacks.show_history) |f| f(self.callbacks.context);
 }
 fn chooseWorkspace(self: *View) void {
+    if (!self.workspace_can_choose) return;
     if (self.callbacks.choose_workspace) |f| f(self.callbacks.context);
 }
 fn refreshFiles(self: *View) void {
     if (self.callbacks.refresh_files) |f| f(self.callbacks.context);
 }
+fn refreshPreview(self: *View) void {
+    if (self.callbacks.refresh_preview) |f| f(self.callbacks.context);
+}
+fn closePreview(self: *View) void {
+    if (self.callbacks.close_preview) |f| {
+        f(self.callbacks.context);
+    } else {
+        dismiss_preview(self) catch {};
+    }
+}
+
+pub fn set_preview_visible(self: *View, visible: bool) void {
+    self.preview_visible = visible;
+    self.preview_box.setDisplay(if (visible) .flex else .none);
+    self.preview_grip.setDisplay(if (visible) .flex else .none);
+    self.cx.requestRedraw();
+}
+
+pub fn dismiss_preview(self: *View) !void {
+    try set_file_preview(self, "", "", "", "");
+    try show_preview_status(self, "");
+    if (self.preview_refresh) |button| button.setDisplay(.none);
+    set_preview_visible(self, false);
+}
+
+pub fn show_preview_status(self: *View, notice: []const u8) !void {
+    try setStatus(self, self.preview_status, notice);
+}
+
+pub fn show_file_tree_status(self: *View, notice: []const u8) !void {
+    try setStatus(self, self.file_tree_status, notice);
+}
+
+fn setStatus(self: *View, node: *ui.Node, notice: []const u8) !void {
+    if (node.getText()) |old| if (std.mem.eql(u8, old.content, notice)) return;
+    try node.setTextContent(self.cx.allocator, notice);
+    node.setDisplay(if (notice.len == 0) .none else .flex);
+    self.cx.requestRedraw();
+}
+
+pub fn start_preview(self: *View, path: []const u8) !void {
+    try set_file_preview(self, std.fs.path.basename(path), path, "", "");
+    set_preview_visible(self, true);
+}
+
+fn previewMaxHeight(self: *const View) f32 {
+    const rect = self.files_page.globalRect();
+    return if (rect.h > 0) @max(72, rect.h - 118) else S.preview_default_height;
+}
+
+fn applyPreviewHeight(self: *View) bool {
+    if (!self.preview_box.isDisplayedInTree()) return false;
+    const maximum = previewMaxHeight(self);
+    const height: ui.Sizing = .{ .px = std.math.clamp(self.preview_height, @min(126, maximum), maximum) };
+    if (std.meta.eql(self.preview_box.style.height, height)) return false;
+    self.preview_box.setStyleInline(self.cx.allocator, .{ .height = height });
+    return true;
+}
+
+fn dragPreview(event: ui.interaction.drag.Event, raw: *anyopaque) void {
+    const self: *View = @ptrCast(@alignCast(raw));
+    switch (event.phase) {
+        .start => {
+            self.preview_drag_start = self.preview_box.globalRect().h;
+            resizePreview(self, event.delta.y);
+        },
+        .move, .end => resizePreview(self, event.delta.y),
+        .cancel => {},
+    }
+}
+
+fn resizePreview(self: *View, delta_y: f32) void {
+    const maximum = previewMaxHeight(self);
+    self.preview_height = std.math.clamp(self.preview_drag_start - delta_y, @min(126, maximum), maximum);
+    if (applyPreviewHeight(self)) self.cx.requestRedraw();
+}
+
 /// No cached file name, body or selection may survive a scope handoff.
 pub fn bind_files(self: *View, name: ?[]const u8, can_choose: bool) !void {
     if (self.files_available) {
-        try set_file_preview(self, "", "", "", "");
+        try dismiss_preview(self);
         try set_files(self, &.{});
     }
     self.selected_file.set(null);
     self.files_available = name != null;
+    self.workspace_can_choose = can_choose and self.callbacks.choose_workspace != null;
+    self.workspace_picker.setCursor(if (self.workspace_can_choose) .pointer else .default);
+    self.workspace_picker.setFocusable(self.workspace_can_choose);
+    if (self.workspace_picker.behavior.interaction.a11y) |*attrs| attrs.disabled = !self.workspace_can_choose;
     self.workspace_picker.setDisplay(if (can_choose or name != null) .flex else .none);
     try set_workspace_name(self, name orelse "选择工作区");
     self.file_scroll.container.setDisplay(if (name != null) .flex else .none);
-    self.preview_box.setDisplay(if (name != null) .flex else .none);
+    if (self.file_tree_tools) |tools| tools.setDisplay(if (name != null) .flex else .none);
+    try show_file_tree_status(self, "");
+    set_preview_visible(self, false);
     if (self.files_notice) |n| n.setDisplay(if (name == null) .flex else .none);
     set_preview_mode(self, .source);
     if (self.preview_mode_buttons[0].parent) |segment| segment.setDisplay(.none);
@@ -715,7 +892,9 @@ pub fn bind_files(self: *View, name: ?[]const u8, can_choose: bool) !void {
 }
 pub fn preview_notice(self: *View, text: []const u8) !void {
     try set_file_preview(self, "", "", "", "");
+    try show_preview_status(self, "");
     try self.preview_placeholder.setTextContent(self.cx.allocator, text);
+    set_preview_visible(self, true);
 }
 
 pub fn set_files(self: *View, files: []const FileRow) !void {
@@ -755,7 +934,7 @@ pub fn set_files(self: *View, files: []const FileRow) !void {
 }
 
 fn fitsBothRails(width: f32) bool {
-    return width >= S.left_width + S.inspector_width + S.center_min_width + 2 * S.column_gap;
+    return width >= S.left_width + S.inspector_min_width + S.center_min_width + 2 * S.column_gap;
 }
 
 pub fn set_left_collapsed(self: *View, collapsed: bool) void {
@@ -772,6 +951,7 @@ pub fn set_inspector_open(self: *View, open: bool) void {
     if (open and !self.left_collapsed and w > 0 and !fitsBothRails(w)) set_left_collapsed(self, true);
     self.inspector_open = open;
     self.inspector_root.setDisplay(if (open) .flex else .none);
+    if (!open) setInspectorResizeVisible(self, false);
     applyInspectorToggleStyle(self);
     self.cx.requestRedraw();
 }
@@ -863,6 +1043,7 @@ pub fn set_file_preview(self: *View, file_name: []const u8, path: []const u8, di
     const shown_name = if (self.preview_name.len != 0) self.preview_name else if (self.preview_path.len != 0) std.fs.path.basename(self.preview_path) else "";
     try self.preview_title.setTextContent(self.cx.allocator, if (shown_name.len != 0) shown_name else "未选择文件");
     const has_file = shown_name.len != 0;
+    if (self.preview_refresh) |button| button.setDisplay(if (self.preview_path.len != 0) .flex else .none);
     self.preview_placeholder.setDisplay(if (has_file) .none else .flex);
     self.preview_scroll.container.setDisplay(if (has_file) .flex else .none);
     self.selected_file.set(if (has_file) findFile(self, self.preview_path) else null);
@@ -998,11 +1179,13 @@ fn buildSessionRows(self: *View) !void {
     var visible: usize = 0;
     for (self.sessions.items, 0..) |*conversation, index| {
         if (!sessionMatches(conversation, self.search_text)) continue;
-        const state = try scope.createState(SessionRowState, .{ .view = self, .id = conversation.id, .index = index });
+        const state = try scope.createState(SessionRowState, .{ .view = self, .id = conversation.id, .index = index, .pinned = conversation.pinned });
         const row = try ui.boxStyled(cx, S.sessionRow, .{});
-        row.meta.ownership.meta.test_id = std.fmt.bufPrint(&state.test_id, "ai.workspace.session.{d}", .{index}) catch "ai.workspace.session";
-        row.behavior.interaction.a11y = .{ .role = .button, .label = conversation.title };
-        row.setFocusable(true);
+        const select = try ui.box(cx, .{ .width = .fill(), .min_width = 0, .flex = 1, .direction = .row, .align_items = .center, .gap = 7 }, .{});
+        select.meta.ownership.meta.test_id = std.fmt.bufPrint(&state.test_id, "ai.workspace.session.{d}", .{index}) catch "ai.workspace.session";
+        select.behavior.interaction.a11y = .{ .role = .button, .label = conversation.title };
+        select.setFocusable(true);
+        try row.appendChild(cx.allocator, select);
         const hovered = try ui.hooks.useHover(scope, row);
         try scope.createEffect(.{ .cx = cx, .row = row, .hovered = hovered, .selected = self.selected_id, .id = conversation.id, .publication = try cx.themeSignal(scope) }, struct {
             fn run(ctx: anytype) void {
@@ -1012,10 +1195,10 @@ fn buildSessionRows(self: *View) !void {
                 ctx.cx.requestRedraw();
             }
         }.run);
-        _ = ui.clickable(row, cx.on(SessionRowState, state, SessionRowState.select));
-        try row.appendChild(cx.allocator, try T.icon(cx, ui.icons.message_square, "fg_2", .{ .width = .{ .px = 14 }, .height = .{ .px = 14 }, .flex_shrink = 0 }));
+        _ = ui.clickable(select, cx.on(SessionRowState, state, SessionRowState.select));
+        try select.appendChild(cx.allocator, try T.icon(cx, ui.icons.message_square, "fg_2", .{ .width = .{ .px = 14 }, .height = .{ .px = 14 }, .flex_shrink = 0 }));
         const labels = try ui.box(cx, .{ .width = .fill(), .min_width = 0, .flex = 1, .direction = .column, .gap = 1 }, .{});
-        try row.appendChild(cx.allocator, labels);
+        try select.appendChild(cx.allocator, labels);
         const title = try ui.textStyled(cx, S.sessionTitle, conversation.title);
         title.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0 });
         try labels.appendChild(cx.allocator, title);
@@ -1023,6 +1206,16 @@ fn buildSessionRows(self: *View) !void {
             const subtitle = try ui.textStyled(cx, S.sessionSubtitle, conversation.subtitle);
             subtitle.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0 });
             try labels.appendChild(cx.allocator, subtitle);
+        }
+        if (conversation.can_pin and self.callbacks.pin_conversation != null) {
+            const label = if (conversation.pinned) "取消置顶" else "置顶会话";
+            const id = try std.fmt.bufPrint(&state.pin_id, "ai.workspace.session.pin.{d}", .{index});
+            try mountSessionAction(cx, scope, row, id, label, ui.icons.get(if (conversation.pinned) "pin-off" else "pin").?, true, cx.on(SessionRowState, state, SessionRowState.togglePin));
+        }
+        if (conversation.can_pin and self.callbacks.delete_conversation != null) {
+            const label = if (conversation.can_delete) "删除会话" else "此会话暂不可删除，请先结束并解绑或处理未确认事项";
+            const id = try std.fmt.bufPrint(&state.delete_id, "ai.workspace.session.delete.{d}", .{index});
+            try mountSessionAction(cx, scope, row, id, label, ui.icons.get("trash-2").?, conversation.can_delete, cx.on(SessionRowState, state, SessionRowState.requestDelete));
         }
         try self.session_list.appendChild(cx.allocator, row);
         visible += 1;
@@ -1036,6 +1229,23 @@ fn buildSessionRows(self: *View) !void {
         try self.session_list.appendChild(cx.allocator, empty);
     } else {}
     ui.widgets.setScrollY(self.session_scroll.state, self.session_scroll.content, 0);
+}
+
+fn mountSessionAction(cx: *ui.Cx, scope: *ui.Scope, row: *ui.Node, id: []const u8, label: []const u8, asset: ui.SvgAsset, enabled: bool, on_click: ui.HandlerRef) !void {
+    const layout = ui.BoxStyle{ .width = .{ .px = 24 }, .height = .{ .px = 24 }, .flex_shrink = 0 };
+    const action = try ui.widgets.Button(.{
+        .variant = .ghost,
+        .icon_only = true,
+        .icon_asset = asset,
+        .icon_size = 13,
+        .disabled = !enabled,
+        .a11y_label = label,
+        .base_style = layout,
+        .on_click = on_click,
+    }).mount(scope, cx);
+    action.meta.ownership.meta.test_id = id;
+    const hint = try @import("control_hint.zig").mount(cx, scope, action, label, .{ .id = "ai.workspace.session.action.hint", .layout = layout });
+    try row.appendChild(cx.allocator, hint.wrapper);
 }
 
 fn buildFileRows(self: *View) !void {
@@ -1185,16 +1395,96 @@ fn activateTab(self: *View, tab: InspectorTab, notify: bool) void {
     if (notify) if (self.callbacks.select_inspector_tab) |callback| callback(self.callbacks.context, tab);
 }
 
+fn buildInspectorResize(self: *View) !void {
+    const cx = self.cx;
+    const scope = self.scope;
+    const grip = try ui.box(cx, S.inspectorResize(), .{});
+    self.inspector_resize = grip;
+    grip.meta.ownership.meta.test_id = "ai.workspace.inspector.resize";
+    grip.behavior.interaction.a11y = .{ .role = .separator, .label = "调整检查器宽度（左右方向键）" };
+    grip.behavior.events.on_key_down = inspectorResizeKey;
+    grip.behavior.events.key_context = self;
+    grip.setDisplay(.none);
+    try self.root.appendChild(cx.allocator, grip);
+    _ = try ui.interaction.drag.Binding.attach(scope, cx, grip, .{ .axis = .horizontal, .activation_distance = 1, .active_cursor = .ew_resize }, inspectorResizeDrag, self);
+    const hint = try ui.box(cx, .{ .width = .{ .px = 4 }, .height = .{ .px = 28 }, .border = .{ .radius = 2 } }, .{});
+    hint.setHitTestVisible(false);
+    try grip.appendChild(cx.allocator, hint);
+    const hover = try ui.hooks.useHover(scope, grip);
+    const focus = try ui.hooks.useFocusState(scope, cx, grip);
+    try scope.createEffect(.{ .hint = hint, .hover = hover, .focus = focus.visible, .palette = try cx.themeSignal(scope) }, struct {
+        fn run(ctx: anytype) void {
+            _ = ctx.palette.get();
+            const focused = ctx.focus.get();
+            const hovered = ctx.hover.get();
+            ctx.hint.setBackground(if (focused) T.current().accent_ink else if (hovered) T.current().fg_3 else ui.Color.TRANSPARENT);
+        }
+    }.run);
+}
+
+fn setInspectorResizeVisible(self: *View, shown: bool) void {
+    if (!shown and self.cx.focus_manager.getFocused() == self.inspector_resize) {
+        if (self.center.style.display != .none) self.cx.setFocus(self.inspector_toggle) else self.cx.clearFocus();
+    }
+    self.inspector_resize.setFocusable(shown);
+    self.inspector_resize.setDisplay(if (shown) .flex else .none);
+}
+
+fn inspectorMaximum(self: *const View, width: f32) f32 {
+    const left_room = if (self.left_collapsed) @as(f32, 0) else S.left_width + S.column_gap;
+    return @min(S.inspector_max_width, @max(0, width - S.center_min_width - S.column_gap - left_room));
+}
+
+fn setInspectorWidth(self: *View, requested: f32) void {
+    if (self.inspector_resize.style.display == .none or !std.math.isFinite(requested)) return;
+    const maximum = inspectorMaximum(self, self.root.globalRect().w - self.root.style.padding.horizontal());
+    if (maximum < S.inspector_min_width) return;
+    self.inspector_preferred_width = std.math.clamp(requested, S.inspector_min_width, maximum);
+    self.cx.requestRedraw();
+}
+
+fn inspectorResizeKey(key: ui.events.KeyCode, modifiers: ui.events.Modifiers, raw: ?*anyopaque) ui.events.EventResult {
+    const self: *View = @ptrCast(@alignCast(raw orelse return .ignored));
+    if (modifiers.ctrl or modifiers.alt or modifiers.super) return .ignored;
+    const step: f32 = if (modifiers.shift) 48 else 16;
+    const width = self.inspector_root.globalRect().w;
+    setInspectorWidth(self, switch (key) {
+        .left => width + step,
+        .right => width - step,
+        .home => S.inspector_min_width,
+        .end => S.inspector_max_width,
+        else => return .ignored,
+    });
+    return .handled;
+}
+
+fn inspectorResizeDrag(event: ui.interaction.drag.Event, raw: *anyopaque) void {
+    const self: *View = @ptrCast(@alignCast(raw));
+    switch (event.phase) {
+        .start => {
+            self.inspector_drag_start = self.inspector_root.globalRect().w;
+            self.inspector_drag_restore = self.inspector_preferred_width;
+        },
+        .move => setInspectorWidth(self, self.inspector_drag_start - event.delta.x),
+        .end => {},
+        .cancel => {
+            self.inspector_preferred_width = self.inspector_drag_restore;
+            self.cx.requestRedraw();
+        },
+    }
+}
+
 fn afterLayout(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
     const self: *View = @ptrCast(@alignCast(raw));
     var relayout = layoutPreviewImage(self);
+    if (applyPreviewHeight(self)) relayout = true;
     if (self.sessions_rebuild_pending) {
         self.sessions_rebuild_pending = false;
         clearSessionRows(self);
         buildSessionRows(self) catch {};
         relayout = true;
     }
-    const width = self.root.globalRect().w;
+    const width = self.root.globalRect().w - self.root.style.padding.horizontal();
     if (width <= 0) return if (relayout) .needs_layout else .done;
     const compact = width < S.compact_width;
     if (compact != self.compact) {
@@ -1215,14 +1505,20 @@ fn afterLayout(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
     // the conversation. Its rail temporarily takes the full slot, with its
     // own visible close/collapse button; the draft and transcript stay mounted.
     const left_alone = !self.left_collapsed and width < S.left_width + S.column_gap + S.center_min_width;
-    const right_alone = self.inspector_open and width < S.inspector_width + S.column_gap + S.center_min_width;
+    const inspector_max = inspectorMaximum(self, width);
+    const right_alone = self.inspector_open and inspector_max < S.inspector_min_width;
     const show_center = !left_alone and !right_alone;
     if ((self.center.style.display != .none) != show_center) {
         self.center.setDisplay(if (show_center) .flex else .none);
         relayout = true;
     }
+    const resize_visible = show_center and self.inspector_open and inspector_max > S.inspector_min_width + 0.5;
+    if ((self.inspector_resize.style.display != .none) != resize_visible) {
+        setInspectorResizeVisible(self, resize_visible);
+        relayout = true;
+    }
     const left_w: ui.Sizing = .{ .px = if (left_alone) width else S.left_width };
-    const right_w: ui.Sizing = .{ .px = if (right_alone) width else S.inspector_width };
+    const right_w: ui.Sizing = .{ .px = if (right_alone) width else std.math.clamp(self.inspector_preferred_width, S.inspector_min_width, @max(S.inspector_min_width, inspector_max)) };
     if (!std.meta.eql(self.left_rail.style.width, left_w)) {
         self.left_rail.setStyle(self.cx.allocator, .width, left_w);
         relayout = true;
@@ -1253,7 +1549,7 @@ fn storeConversation(allocator: std.mem.Allocator, source: Conversation) !Stored
     errdefer freeBytes(allocator, &title);
     var subtitle = try dupeOrEmpty(allocator, source.subtitle);
     errdefer freeBytes(allocator, &subtitle);
-    return .{ .id = id, .title = title, .subtitle = subtitle, .selected = source.selected };
+    return .{ .id = id, .title = title, .subtitle = subtitle, .selected = source.selected, .pinned = source.pinned, .can_pin = source.can_pin, .can_delete = source.can_delete };
 }
 
 fn storeFile(allocator: std.mem.Allocator, source: FileRow) !StoredFile {

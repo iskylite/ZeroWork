@@ -3,6 +3,7 @@ const std = @import("std");
 const ui = @import("ui");
 const theme = @import("app_theme.zig");
 const Turn = @import("../ai/conversation_turn.zig").Turn;
+const metadata_font_size = @import("ai_assistant_styles.zig").turn_metadata_font_size;
 pub fn rowStyle() ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .fit = .{} }, .min_height = 24, .direction = .row, .justify = .start, .align_items = .center, .flex_wrap = .wrap, .gap = 8, .flex_shrink = 0 };
 }
@@ -84,7 +85,6 @@ fn mountUsageDetails(cx: *ui.Cx, parent: *ui.Node, turn: *const Turn) !void {
         try usageRow(cx, metrics, "模型请求", value, "ai.turn.usage.requests", false);
     }
     if (reported) {
-        try card.appendChild(cx.allocator, try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 1 }, .background = theme.current().fg_2.withAlpha(56), .flex_shrink = 0 }, .{}));
         try card.appendChild(cx.allocator, try usageText(cx, "共享的上下文会在每次请求中重复计入。", .{ .font_size = 10.5, .line_height = 14.0 / 10.5, .wrap = .word }, "fg_2"));
     }
 }
@@ -98,7 +98,7 @@ pub const Label = struct {
 };
 pub fn turnLabel(turn: *const Turn) Label {
     if (turn.restored_interrupted) return .{ .text = "已中断", .animated = false };
-    if (turn.ended_at_ms != null) return .{ .text = "～回合结束～", .animated = false };
+    if (turn.ended_at_ms != null) return .{ .text = "回合结束", .animated = false };
     // A decision that needs the user takes precedence over other active tools.
     for (turn.steps.items) |step| if (step.phase == .approval) return .{ .text = "等待确认 · 流程暂停", .animated = false };
     var index = turn.steps.items.len;
@@ -131,7 +131,7 @@ fn runningLabel(cx: *ui.Cx, scope: *ui.Scope, label: Label) !*ui.Node {
     root.behavior.interaction.a11y = .{ .role = .group, .label = label.text };
     var characters = (try std.unicode.Utf8View.init(label.text)).iterator();
     while (characters.nextCodepointSlice()) |character| {
-        const glyph = try ui.text(cx, character, .{ .font_size = 11.5, .line_height = 16.0 / 11.5, .color = theme.current().fg_2 });
+        const glyph = try usageText(cx, character, .{ .font_size = metadata_font_size, .line_height = 16.0 / metadata_font_size }, "fg_2");
         glyph.meta.ownership.meta.test_id = "ai.turn.wave.glyph";
         glyph.behavior.interaction.a11y = .{ .hidden = true };
         try root.appendChild(cx.allocator, glyph);
@@ -169,18 +169,18 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, turn: *const Turn, texture: ?u32) !*u
     const row = try ui.box(cx, rowStyle(), .{});
     const completed = turn.displayFinished();
     row.meta.ownership.meta.test_id = if (turn.restored_interrupted) "ai.turn.interrupted" else if (completed) "ai.turn.complete" else "ai.turn.running";
-    const logo = try ui.image(cx, texture orelse 0, .{ .width = .{ .px = 16 }, .height = .{ .px = 16 }, .flex_shrink = 0 });
+    const logo = try ui.image(cx, texture orelse 0, .{ .width = .{ .px = 14 }, .height = .{ .px = 14 }, .flex_shrink = 0 });
     logo.meta.ownership.meta.test_id = "ai.turn.logo";
     try row.appendChild(cx.allocator, logo);
     const activity = turnLabel(turn);
-    const label = if (!completed) try runningLabel(cx, scope, activity) else try ui.text(cx, activity.text, .{ .font_size = 11.5, .line_height = 16.0 / 11.5, .color = theme.current().fg_2 });
+    const label = if (!completed) try runningLabel(cx, scope, activity) else try usageText(cx, activity.text, .{ .font_size = metadata_font_size, .line_height = 16.0 / metadata_font_size }, "fg_2");
     label.meta.ownership.meta.test_id = "ai.turn.label";
     try row.appendChild(cx.allocator, label);
     try row.appendChild(cx.allocator, try dot(cx));
     var buffer: [96]u8 = undefined;
     const wall: u64 = @intCast(@max(0, @import("../platform/realtime.zig").milliseconds(row)));
     const mono: u64 = @intCast(@divTrunc(@import("../platform/realtime.zig").monotonicNs(), std.time.ns_per_ms));
-    const elapsed = try ui.text(cx, try elapsedLabel(&buffer, elapsedMs(turn, wall, mono)), .{ .font_size = 10.5, .line_height = 16.0 / 10.5, .color = theme.current().fg_2 });
+    const elapsed = try usageText(cx, try elapsedLabel(&buffer, elapsedMs(turn, wall, mono)), .{ .font_size = metadata_font_size, .line_height = 16.0 / metadata_font_size }, "fg_2");
     elapsed.meta.ownership.meta.test_id = "ai.turn.elapsed";
     try row.appendChild(cx.allocator, elapsed);
     if (!completed) {
@@ -196,7 +196,7 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, turn: *const Turn, texture: ?u32) !*u
             .label = "用量明细",
             .a11y_label = "查看本回合用量明细",
             .variant = .ghost,
-            .base_style = ui.BoxStyle{ .height = .{ .px = 22 }, .padding = .{ .left = 0, .right = 0 }, .font_size = 10.5, .text_color = theme.current().fg_2 },
+            .base_style = ui.BoxStyle{ .height = .{ .px = 22 }, .padding = .{ .left = 0, .right = 0 }, .font_size = metadata_font_size, .text_color = theme.current().fg_2 },
             .on_click = popup.toggle,
         }).mount(scope, cx);
         usage.meta.ownership.meta.test_id = "ai.turn.tokens";

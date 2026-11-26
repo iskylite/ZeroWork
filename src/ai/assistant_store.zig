@@ -270,6 +270,8 @@ pub const Store = struct {
     allocator: std.mem.Allocator,
     authority: ?*@import("session_runtime.zig").Service = null,
     states: std.ArrayList(State) = .empty,
+    /// A compact presentation index of persisted pins.
+    history_pins: std.ArrayList(u64) = .empty,
     next_id: u64 = 1,
     attachment_ids: std.ArrayList(u64) = .empty,
     image_ids: std.ArrayList(u64) = .empty,
@@ -283,6 +285,7 @@ pub const Store = struct {
     pub fn deinit(self: *Store) void {
         for (self.states.items) |*state| state.deinit(self.allocator);
         self.states.deinit(self.allocator);
+        self.history_pins.deinit(self.allocator);
         self.attachment_ids.deinit(self.allocator);
         self.image_ids.deinit(self.allocator);
         for (self.attachment_drafts.items) |draft| {
@@ -477,7 +480,23 @@ pub const Store = struct {
         }
         return null;
     }
+    pub fn reserveHistoryPin(self: *Store, id: u64, value: bool) !void {
+        if (value and !self.isHistoryPinned(id)) try self.history_pins.ensureUnusedCapacity(self.allocator, 1);
+    }
+
+    pub fn isHistoryPinned(self: *const Store, id: u64) bool {
+        return std.mem.indexOfScalar(u64, self.history_pins.items, id) != null;
+    }
+
+    /// Call only after reserving and durably publishing the journal entry.
+    pub fn projectHistoryPin(self: *Store, id: u64, value: bool) void {
+        if (std.mem.indexOfScalar(u64, self.history_pins.items, id)) |i| {
+            if (!value) _ = self.history_pins.orderedRemove(i);
+        } else if (value) self.history_pins.insertAssumeCapacity(0, id);
+    }
+
     pub fn remove(self: *Store, id: u64) void {
+        self.projectHistoryPin(id, false);
         if (self.authority) |service| if (self.find(id)) |state| if (service.store.find(state.conversation_id)) |record| {
             if (record.binding != null or record.ending != null) return;
             service.store.remove(record.id) catch return;

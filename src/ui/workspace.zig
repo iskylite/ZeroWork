@@ -7912,7 +7912,7 @@ test "terminal middle menu survives failed reconnect generation advance and loca
     try std.testing.expectEqual(@as(usize, 3), sink.calls);
 }
 
-test "notification output keeps marker colors and keeps bouncing across rebuilds until read" {
+test "notification output keeps custom title colors and keeps bouncing across rebuilds until read" {
     const allocator = std.testing.allocator;
     const cx = try ui.Cx.init(allocator, std.testing.io);
     defer cx.deinit();
@@ -7963,8 +7963,8 @@ test "notification output keeps marker colors and keeps bouncing across rebuilds
     workspace.sessionTab(first).?.tab_color = 0x67b88b;
     try workspace.renderTabBar();
     cx.layout();
-    try std.testing.expectEqual(app_theme.current().fg_2, workspace.tab_nodes.items[0].label.getText().?.color);
-    try std.testing.expectEqual(ui.Color.hex(0x67b88b), workspace.tab_nodes.items[0].node.children.items[0].getBackground());
+    const title_ink = tab_styles.titleInk(0x67b88b, false);
+    try std.testing.expectEqual(title_ink, workspace.tab_nodes.items[0].label.getText().?.color);
     try std.testing.expectEqual(session_icon.tabTint(.normal, workspace.tab_nodes.items[0].icon_asset), workspace.tab_nodes.items[0].type_icon.getIcon().?.tint);
     try std.testing.expectEqual(session_icon.tabTint(.normal, workspace.tab_nodes.items[1].icon_asset), workspace.tab_nodes.items[1].type_icon.getIcon().?.tint);
     try std.testing.expectEqual(app_theme.current().ok, workspace.tab_nodes.items[0].connection_dot.?.getBackground());
@@ -8015,10 +8015,11 @@ test "notification output keeps marker colors and keeps bouncing across rebuilds
             const id = child.meta.ownership.meta.test_id orelse continue;
             try std.testing.expect(!std.mem.eql(u8, id, "tabs.unread_attention"));
             try std.testing.expect(!std.mem.eql(u8, id, "tabs.connection_status"));
+            try std.testing.expect(!std.mem.eql(u8, id, "tabs.color_marker"));
+            try std.testing.expect(!std.mem.eql(u8, id, "tabs.active_underline"));
         }
     }
-    try std.testing.expectEqual(app_theme.current().fg_2, workspace.tab_nodes.items[0].label.getText().?.color);
-    try std.testing.expectEqual(ui.Color.hex(0x67b88b), workspace.tab_nodes.items[0].node.children.items[0].getBackground());
+    try std.testing.expectEqual(title_ink, workspace.tab_nodes.items[0].label.getText().?.color);
     try std.testing.expectEqual(session_icon.tabTint(.normal, workspace.tab_nodes.items[0].icon_asset), workspace.tab_nodes.items[0].type_icon.getIcon().?.tint);
     try std.testing.expectEqual(session_icon.tabTint(.normal, workspace.tab_nodes.items[1].icon_asset), workspace.tab_nodes.items[1].type_icon.getIcon().?.tint);
     try std.testing.expectEqual(app_theme.current().ok, workspace.tab_nodes.items[0].connection_dot.?.getBackground());
@@ -8052,6 +8053,7 @@ test "notification output keeps marker colors and keeps bouncing across rebuilds
     try workspace.renderTabBar();
     workspace.refreshNotificationAttention();
     try std.testing.expect(workspace.tab_nodes.items[0].type_icon.style.translate_y != 0);
+    try std.testing.expectEqual(title_ink, workspace.tab_nodes.items[0].label.getText().?.color);
     try std.testing.expectEqual(workspace.tab_nodes.items[0].type_icon.style.translate_y, workspace.tab_nodes.items[0].connection_dot.?.style.translate_y);
     try std.testing.expect(workspace.tabPresentation(.{ .session = first_owner }).?.icon_bouncing);
     try std.testing.expectEqual(started, workspace.model.tabs.items[workspace.model.indexOf(first_tab_id).?].attention_started_ms.?);
@@ -8605,8 +8607,16 @@ test "mixed tab group identity unifies drag cursor rollback ordinals picker and 
     try workspace.renderTabBar();
     cx.layout();
     const group_node = workspace.tab_nodes.items[1].node;
-    try std.testing.expectEqual(ui.Color.hex(0x67b88b), group_node.children.items[0].getBackground());
-    try std.testing.expectEqual(ui.Color.hex(0x67b88b), group_node.children.items[group_node.children.items.len - 1].getBackground());
+    var color_dot: ?*ui.Node = null;
+    for (group_node.children.items) |child| {
+        const test_id = child.meta.ownership.meta.test_id orelse continue;
+        try std.testing.expect(!std.mem.eql(u8, test_id, "tabs.active_underline"));
+        if (std.mem.eql(u8, test_id, "tabs.group_marker")) color_dot = child;
+    }
+    const marker = color_dot orelse return error.MissingGroupColorDot;
+    try std.testing.expectEqual(ui.Color.hex(0x67b88b), marker.getBackground());
+    try std.testing.expectApproxEqAbs(@as(f32, 5), marker.globalRect().w, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 5), marker.globalRect().h, 0.01);
     // Actual pointer events must reach the holder's drag binding through the tab.
     const source_rect = workspace.tab_nodes.items[2].node.globalRect();
     const group_rect = group_node.globalRect();

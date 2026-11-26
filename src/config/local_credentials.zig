@@ -2,8 +2,7 @@ const std = @import("std");
 const Io = std.Io;
 
 pub const dirname = "credentials";
-/// Local private storage is the product default. The keychain marker is only
-/// written after an explicit switch, so a fresh install never prompts.
+/// Local private storage requires explicit selection.
 const selected_marker = ".local-storage";
 const keychain_marker = ".keychain-storage";
 const private_dir: Io.File.Permissions = @fromBackingInt(0o700);
@@ -67,16 +66,28 @@ fn marker(self: Store, name: []const u8) !?bool {
     return true;
 }
 
-/// Local private files are the default; only an explicit Keychain switch
-/// flips the backend.
+/// With neither marker, use Keychain. The Keychain marker wins if a conversion
+/// completed before the older local marker could be removed.
 pub fn isSelected(self: Store) !bool {
     if (try self.marker(keychain_marker) != null) return false;
-    if (try self.marker(selected_marker) != null) return true;
-    return true;
+    return (try self.marker(selected_marker)) != null;
+}
+/// Discovery never reads a secret, selects a backend or removes a file. Only
+/// a profile with no recorded choice can be an unmarked, previous local store.
+pub fn hasUnmarkedReferences(self: Store, comptime valid: fn ([]const u8) bool) !bool {
+    if (try self.marker(keychain_marker) != null or try self.marker(selected_marker) != null) return false;
+    var dir = self.open(false) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => return err,
+    };
+    defer dir.close(self.io);
+    var entries = dir.iterate();
+    while (try entries.next(self.io)) |entry| if (valid(entry.name)) return true;
+    return false;
 }
 
 pub fn select(self: Store) !void {
-    try self.add(selected_marker, "1");
+    try self.importValue(selected_marker, "1");
     try self.clearMarker(keychain_marker);
 }
 
@@ -84,12 +95,13 @@ pub fn select(self: Store) !void {
 /// back to the local default. Local data may only be deleted after the
 /// directory entry has been synced.
 pub fn deselect(self: Store) !bool {
-    try self.add(keychain_marker, "1");
+    try self.importValue(keychain_marker, "1");
     var dir = try self.open(false);
     defer dir.close(self.io);
+    if (std.c.fsync(dir.handle) != 0) return false;
     dir.deleteFile(self.io, selected_marker) catch |err| switch (err) {
         error.FileNotFound => {},
-        else => return err,
+        else => return false,
     };
     return std.c.fsync(dir.handle) == 0;
 }
@@ -133,6 +145,22 @@ pub fn importValue(self: Store, reference: []const u8, value: []const u8) !void 
         },
         else => return err,
     };
+}
+
+/// Only remove entries included in the verified snapshot. Unrelated or
+/// subsequently changed files are not collateral cleanup targets.
+pub fn removeIfEqual(self: Store, reference: []const u8, expected: []const u8) !bool {
+    const current = self.get(std.heap.page_allocator, reference) catch |err| switch (err) {
+        error.CredentialMissing => return true,
+        else => return err,
+    };
+    defer {
+        std.crypto.secureZero(u8, current);
+        std.heap.page_allocator.free(current);
+    }
+    if (!std.mem.eql(u8, current, expected)) return false;
+    try self.remove(reference);
+    return true;
 }
 
 pub fn add(self: Store, reference: []const u8, value: []const u8) !void {
@@ -188,14 +216,15 @@ test "local credentials persist across opens and reject non-private storage" {
     const path = try tmp.dir.realPathFileAlloc(io, ".", allocator);
     defer allocator.free(path);
     const store: Store = .{ .io = io, .directory = path };
-    // V0.8: local private storage is the default; Keychain only after an
-    // explicit switch.
-    try std.testing.expect(try store.isSelected());
+    try std.testing.expect(!try store.isSelected());
     try std.testing.expectError(error.CredentialMissing, store.get(allocator, "first"));
     try store.add("first", "fixture value");
     try std.testing.expectError(error.CredentialAlreadyExists, store.add("first", "replacement"));
     try store.importValue("first", "fixture value");
     try std.testing.expectError(error.CredentialStorageFailure, store.importValue("first", "different"));
+    // Files alone do not silently select the local backend.
+    try std.testing.expect(!try store.isSelected());
+    try store.select();
     try std.testing.expect(try store.isSelected());
     try std.testing.expect(try store.deselect());
     try std.testing.expect(!try store.isSelected());

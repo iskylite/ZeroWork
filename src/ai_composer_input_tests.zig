@@ -366,7 +366,7 @@ test "AI composer skill picker ignores stale rows after a draft edit or caret mo
     try f.init(true);
     defer f.deinit();
     var probe: Probe = .{};
-    const picker = try Picker.View.mount(f.cx, f.scope, f.input, f.cx.on(Probe, &probe, Probe.changed));
+    const picker = try Picker.View.mount(f.cx, f.scope, f.cx.root.?, f.input, f.cx.on(Probe, &probe, Probe.changed));
     try f.cx.root.?.appendChild(a, picker.popup.wrapper);
     const skills = [_]Skills{.{ .id = "sample", .revision = "1", .name = "sample", .description = "" }};
     f.cx.setFocus(f.input.input);
@@ -412,7 +412,7 @@ test "AI composer slash shortcuts select a local control without sending or clea
     try f.init(true);
     defer f.deinit();
     var probe: Probe = .{};
-    const picker = try Picker.View.mount(f.cx, f.scope, f.input, f.cx.on(Probe, &probe, Probe.changed));
+    const picker = try Picker.View.mount(f.cx, f.scope, f.cx.root.?, f.input, f.cx.on(Probe, &probe, Probe.changed));
     picker.actions = .{ .context = &probe, .available = Probe.available, .open = Probe.open };
     try f.cx.root.?.appendChild(a, picker.popup.wrapper);
     f.cx.setFocus(f.input.input);
@@ -434,4 +434,53 @@ test "AI composer slash shortcuts select a local control without sending or clea
     try std.testing.expect(!Picker.isIncomplete("/usr/bin/env"));
     try std.testing.expect(Picker.isIncomplete("/model"));
     try std.testing.expect(!Picker.isIncomplete("/skill my-skill\n我的问题"));
+}
+
+test "AI composer target completion checks exact conversation, caret and editor revision before adding" {
+    const TargetPicker = @import("ui/ai_target_bar.zig");
+    const Probe = struct {
+        added: ?u64 = null,
+        inserted: bool = false,
+        fn add(raw: *anyopaque, _: TargetPicker.Kind, target: u64, _: []const u8) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.added = target;
+        }
+        fn remove(_: *anyopaque, _: TargetPicker.Kind, _: u64) void {}
+        fn insert(raw: *anyopaque, text: []const u8) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.inserted = std.mem.eql(u8, text, "@fixture ");
+        }
+        fn create(_: *anyopaque) void {}
+    };
+    var f: Fixture = undefined;
+    try f.init(true);
+    defer f.deinit();
+    var probe: Probe = .{};
+    const composer = f.input.wrapper.parent.?;
+    composer.setStyleInline(a, .{ .position = .absolute, .inset = .{ .left = .{ .px = 26 }, .top = .{ .px = 250 } } });
+    const picker = try TargetPicker.View.mount(f.cx, f.scope, composer, f.input, .{ .context = &probe, .add = Probe.add, .remove = Probe.remove, .insert = Probe.insert, .create_local = Probe.create });
+    try picker.setCandidates(&.{.{ .id = 7, .kind = .session, .label = "fixture", .generation = 2 }});
+    const owner: @import("host/identity.zig").SessionHandle = .{ .session_id = @enumFromInt(8) };
+    const enter: ui.events.KeyEvent = .{ .key = .@"return" };
+    f.cx.setFocus(f.input.input);
+    f.cx.handleTextInput("@fix");
+    picker.setOwner(owner, 1);
+    picker.openCompletion("fix");
+    f.settle();
+    try std.testing.expect(picker.popup.open.?.peek());
+    picker.setOwner(owner, 2);
+    try std.testing.expect(!picker.handleKey(enter));
+    picker.openCompletion("fix");
+    f.settle();
+    f.cx.handleKeyDown(.left, .{});
+    try std.testing.expect(!picker.handleKey(enter));
+    f.cx.handleKeyDown(.right, .{});
+    f.cx.handleTextInput("t");
+    try std.testing.expect(!picker.handleKey(enter));
+    try std.testing.expectEqual(null, probe.added);
+    picker.openCompletion("fixt");
+    f.settle();
+    try std.testing.expect(picker.handleKey(enter));
+    try std.testing.expectEqual(@as(?u64, 7), probe.added);
+    try std.testing.expect(probe.inserted);
 }

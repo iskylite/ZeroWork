@@ -42,10 +42,12 @@ pub fn mount(cx: *ui.Cx, panel: *ui.Node, owner: []const u8) !View {
     try grip.appendChild(cx.allocator, try ui.boxStyled(cx, S.grip, .{}));
     try panel.appendChild(cx.allocator, grip);
     const bar = try ui.boxStyled(cx, S.header, .{});
+    bar.meta.ownership.meta.test_id = "ai.header";
     try bar.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.sparkles, theme.current().accent, S.regionIcon()));
     try bar.appendChild(cx.allocator, try ui.textStyled(cx, S.title, "AI 助手"));
     const label = try ui.textStyled(cx, S.ownerText, owner);
-    label.setStyleInline(cx.allocator, .{ .max_width = 144, .min_width = 0 });
+    label.meta.ownership.meta.test_id = "ai.owner.label";
+    label.setStyleInline(cx.allocator, .{ .max_width = 144, .min_width = 0, .flex_shrink = 1 });
     const pill = try ui.boxStyled(cx, S.ownerPill, .{});
     pill.meta.ownership.meta.test_id = "ai.owner";
     try pill.appendChild(cx.allocator, label);

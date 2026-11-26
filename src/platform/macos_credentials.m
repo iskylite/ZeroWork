@@ -10,7 +10,7 @@
 // reply without reading the user's Keychain or authorizing a real request.
 static int fixture_credential(unsigned char **out, size_t *length) {
     const char *mode = getenv("ZW_TEST_CREDENTIAL_RESPONSE");
-    if (!mode) return 1;
+    if (!mode || !*mode) return errSecNotAvailable;
     if (strcmp(mode, "silent-success") != 0) {
         fputs("ZW_TEST_CREDENTIAL_REQUEST\n", stderr);
         fflush(stderr);
@@ -27,10 +27,10 @@ static int fixture_credential(unsigned char **out, size_t *length) {
     return 0;
 }
 #endif
-#if !defined(ZW_CREDENTIALS_LOCAL) && !defined(ZW_CREDENTIALS_TESTING)
+#if !defined(ZW_CREDENTIALS_LOCAL) && !defined(ZW_CREDENTIALS_TESTING) && !defined(ZW_CREDENTIALS_UI_FIXTURE)
 #include "credential_agent_client.h"
 #endif
-#if !defined(ZW_CREDENTIALS_LOCAL) && !defined(ZW_CREDENTIALS_TESTING) && !defined(ZW_CREDENTIALS_CONFIRM_EXTERNAL)
+#if !defined(ZW_CREDENTIALS_LOCAL) && !defined(ZW_CREDENTIALS_TESTING) && !defined(ZW_CREDENTIALS_CONFIRM_EXTERNAL) && !defined(ZW_CREDENTIALS_UI_FIXTURE)
 #import <LocalAuthentication/LocalAuthentication.h>
 #include <stdatomic.h>
 // This is an application-level gate. Legacy Keychain ACLs remain enforced by
@@ -99,6 +99,7 @@ int zw_credentials_cached(void) {
 #define ZW_VAULT_READ_GUARD
 #endif
 
+#if !defined(ZW_CREDENTIALS_UI_FIXTURE)
 static const CFStringRef vault_account = CFSTR("vault-v1");
 
 // AuthenticationUIFail alone does not suppress legacy-keychain dialogs.
@@ -170,6 +171,7 @@ static OSStatus delete_vault(CFDictionaryRef query) {
     CFRelease(item); return status;
 }
 #pragma clang diagnostic pop
+#endif
 
 static int owned_reference(const char *reference) {
     if (strlen(reference) != 68 || strncmp(reference, "zw1_", 4)) return 0;
@@ -181,6 +183,43 @@ static int owned_reference(const char *reference) {
 }
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#if defined(ZW_CREDENTIALS_UI_FIXTURE)
+// The automation object has no linked Security I/O, helper IPC or LA prompt
+// at all. Absence of a fixture is not permission to use the login Keychain.
+static OSStatus load_vault(const char *service) {
+    const char *mode = getenv("ZW_TEST_CREDENTIAL_RESPONSE");
+    if (!mode || !*mode) return errSecNotAvailable;
+    if (!service || !*service) return errSecParam;
+    if (!cached_service) return errSecInteractionNotAllowed;
+    CFStringRef name = CFStringCreateWithCString(NULL, service, kCFStringEncodingUTF8);
+    if (!name) return errSecAllocate;
+    int same = CFEqual(cached_service, name); CFRelease(name);
+    return same ? errSecSuccess : errSecParam;
+}
+static OSStatus fixture_authorize(const char *service, int reconfirm) {
+    OSStatus status = load_vault(service);
+    if (status != errSecInteractionNotAllowed && !(status == errSecSuccess && reconfirm)) return status;
+    unsigned char *value = NULL; size_t length = 0;
+    status = fixture_credential(&value, &length);
+    if (status) return status;
+    if (!cached_service) {
+        CFStringRef name = CFStringCreateWithCString(NULL, service, kCFStringEncodingUTF8);
+        CFMutableDictionaryRef vault = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+        CFDataRef data = CFDataCreate(NULL, value, (CFIndex)length);
+        if (data && name && vault) {
+            CFDictionarySetValue(vault, CFSTR("zw1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), data);
+            cached_service = name; cached_vault = vault;
+        } else {
+            if (name) CFRelease(name);
+            if (vault) CFRelease(vault);
+            status = errSecAllocate;
+        }
+        if (data) CFRelease(data);
+    }
+    memset(value, 0, length); free(value);
+    return status;
+}
+#else
 static OSStatus load_vault_with_ui(const char *service, int allow_ui) {
     CFStringRef name = CFStringCreateWithCString(NULL, service, kCFStringEncodingUTF8);
     if (!name) return errSecAllocate;
@@ -249,44 +288,31 @@ static OSStatus load_vault_with_ui(const char *service, int allow_ui) {
     cached_service = name; cached_vault = next; vault_exists = exists; return errSecSuccess;
 }
 static OSStatus load_vault(const char *service) { return load_vault_with_ui(service, 0); }
+#endif
 #if defined(ZW_CREDENTIALS_LOCAL)
 int zw_credentials_authorize(const char *service) { ZW_VAULT_GUARD; return (int)load_vault_with_ui(service, 1); }
 #else
+#if !defined(ZW_CREDENTIALS_UI_FIXTURE)
 static OSStatus authorize_vault(const char *service) {
     OSStatus status = load_vault(service);
     if (status == errSecInteractionNotAllowed || status == errSecAuthFailed) status = load_vault_with_ui(service, 1);
     return status;
 }
+#endif
 
 int zw_credentials_authorize(const char *service) {
     ZW_VAULT_GUARD;
 #if defined(ZW_CREDENTIALS_UI_FIXTURE)
-    if (!cached_service) {
-        unsigned char *value = NULL; size_t length = 0;
-        int result = fixture_credential(&value, &length);
-        if (result != 1) {
-            if (result) return result;
-            CFDataRef data = CFDataCreate(NULL, value, (CFIndex)length);
-            memset(value, 0, length); free(value);
-            CFStringRef name = CFStringCreateWithCString(NULL, service, kCFStringEncodingUTF8);
-            CFMutableDictionaryRef vault = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-            if (data && name && vault) {
-                CFDictionarySetValue(vault, CFSTR("zw1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), data);
-                cached_service = name; cached_vault = vault;
-            } else {
-                if (name) CFRelease(name);
-                if (vault) CFRelease(vault);
-                result = errSecAllocate;
-            }
-            if (data) CFRelease(data);
-            return result;
-        }
-    }
-#endif
+    return fixture_authorize(service, 0);
+#else
     return authorize_vault(service);
+#endif
 }
 
 static OSStatus authorize_conversion(const char *service) {
+#if defined(ZW_CREDENTIALS_UI_FIXTURE)
+    return fixture_authorize(service, 0);
+#else
     if (!cached_service) {
         CFMutableDictionaryRef query = vault_query(service);
         if (!query) return errSecAllocate;
@@ -300,6 +326,7 @@ static OSStatus authorize_conversion(const char *service) {
         }
     }
     return authorize_vault(service);
+#endif
 }
 
 typedef int (*export_value)(void *, const char *, const unsigned char *, size_t);
@@ -316,18 +343,6 @@ static void write_exported_value(const void *key, const void *value, void *raw) 
 }
 int zw_credentials_export(const char *service, void *context, export_value write) {
     ZW_VAULT_GUARD;
-#if defined(ZW_CREDENTIALS_UI_FIXTURE)
-    unsigned char *fixture_value = NULL;
-    size_t fixture_length = 0;
-    int fixture = cached_service ? 1 : fixture_credential(&fixture_value, &fixture_length);
-    if (fixture != 1) {
-        if (fixture) return fixture;
-        int failed = write(context, "zw1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", fixture_value, fixture_length);
-        memset(fixture_value, 0, fixture_length);
-        free(fixture_value);
-        return failed ? errSecIO : errSecSuccess;
-    }
-#endif
     OSStatus status = authorize_conversion(service);
     if (status) return status;
     struct export_context state = { write, context, 0 };
@@ -337,6 +352,12 @@ int zw_credentials_export(const char *service, void *context, export_value write
 #endif
 #pragma clang diagnostic pop
 static OSStatus save_vault(const char *service, CFMutableDictionaryRef candidate) {
+#if defined(ZW_CREDENTIALS_UI_FIXTURE)
+    OSStatus ready = load_vault(service);
+    if (ready) return ready;
+    CFRelease(cached_vault); cached_vault = candidate;
+    return errSecSuccess;
+#else
     CFMutableDictionaryRef q = vault_query(service);
     if (!q) return errSecAllocate;
     OSStatus status;
@@ -365,11 +386,17 @@ static OSStatus save_vault(const char *service, CFMutableDictionaryRef candidate
     CFRelease(q);
     if (!status) { CFRelease(cached_vault); cached_vault = candidate; }
     return status;
+#endif
 }
 #if !defined(ZW_CREDENTIALS_LOCAL)
 struct import_entry { const char *reference; const unsigned char *value; size_t length; };
 
 static OSStatus verify_vault_storage(const char *service, CFDictionaryRef expected) {
+#if defined(ZW_CREDENTIALS_UI_FIXTURE)
+    OSStatus ready = load_vault(service);
+    if (ready) return ready;
+    return CFEqual(cached_vault, expected) ? errSecSuccess : errSecDecode;
+#else
     CFMutableDictionaryRef query = vault_query(service);
     if (!query) return errSecAllocate;
     CFDictionarySetValue(query, kSecReturnData, kCFBooleanTrue);
@@ -387,48 +414,68 @@ static OSStatus verify_vault_storage(const char *service, CFDictionaryRef expect
     }
     if (data) CFRelease(data);
     return status;
+#endif
 }
 
 int zw_credentials_import(const char *service, const struct import_entry *entries, size_t count) {
     ZW_VAULT_GUARD;
-    CFMutableDictionaryRef next = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-    if (!next) return errSecAllocate;
+    if (!service || !*service || (count && !entries)) return errSecParam;
+    CFMutableDictionaryRef incoming = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    if (!incoming) return errSecAllocate;
     OSStatus status = errSecSuccess;
     for (size_t i = 0; i < count; i++) {
         const struct import_entry *entry = &entries[i];
-        if (!owned_reference(entry->reference) || entry->length > 8 * 1024 * 1024) { status = errSecParam; break; }
+        if (!entry->reference || !owned_reference(entry->reference) || (!entry->value && entry->length) || entry->length > 8 * 1024 * 1024) { status = errSecParam; break; }
         CFStringRef key = CFStringCreateWithCString(NULL, entry->reference, kCFStringEncodingASCII);
         CFDataRef value = CFDataCreate(NULL, entry->value, (CFIndex)entry->length);
         if (!key || !value) status = errSecAllocate;
-        else if (CFDictionaryContainsKey(next, key)) status = errSecDuplicateItem;
-        else CFDictionarySetValue(next, key, value);
+        else if (CFDictionaryContainsKey(incoming, key)) status = errSecDuplicateItem;
+        else CFDictionarySetValue(incoming, key, value);
         if (value) CFRelease(value);
         if (key) CFRelease(key);
         if (status) break;
     }
+    if (status) { CFRelease(incoming); return status; }
+    int had_cache = cached_service != NULL;
 #if defined(ZW_CREDENTIALS_UI_FIXTURE)
     const char *fixture_mode = getenv("ZW_TEST_CREDENTIAL_RESPONSE");
-    if (!status && fixture_mode) {
-        if (!strcmp(fixture_mode, "write-fail") || !strcmp(fixture_mode, "verify-fail")) status = errSecIO;
-        else {
-            unsigned char *value = NULL; size_t length = 0;
-            status = fixture_credential(&value, &length);
-            if (value) { memset(value, 0, length); free(value); }
-        }
-        if (!status) {
-            CFStringRef name = CFStringCreateWithCString(NULL, service, kCFStringEncodingUTF8);
-            if (!name) status = errSecAllocate;
-            else { discard_vault_cache(); cached_service = name; cached_vault = next; return errSecSuccess; }
-        }
-    }
-    if (fixture_mode) { CFRelease(next); return status; }
+    if (fixture_mode && (!strcmp(fixture_mode, "write-fail") || !strcmp(fixture_mode, "verify-fail"))) status = errSecIO;
+    else status = fixture_authorize(service, 1);
+#else
+    status = authorize_conversion(service);
 #endif
-    if (!status) status = authorize_conversion(service);
-    if (!status) status = save_vault(service, next);
-    if (status) { CFRelease(next); return status; }
-    // Verify through Security (or the signed agent), not the process cache.
-    status = verify_vault_storage(service, next);
-    if (status) discard_vault_cache();
+    if (status) { CFRelease(incoming); return status; }
+    // The user may have kept the local backend selected since the last
+    // Keychain access. Never overwrite a changed vault using an old cache.
+    if (had_cache) {
+        status = verify_vault_storage(service, cached_vault);
+        if (status) { discard_vault_cache(); CFRelease(incoming); return status; }
+    }
+    CFMutableDictionaryRef next = CFDictionaryCreateMutableCopy(NULL, 0, cached_vault);
+    if (!next) { CFRelease(incoming); return errSecAllocate; }
+    int changed = 0;
+    for (size_t i = 0; i < count; i++) {
+        CFStringRef key = CFStringCreateWithCString(NULL, entries[i].reference, kCFStringEncodingASCII);
+        if (!key) { status = errSecAllocate; break; }
+        CFDataRef value = CFDictionaryGetValue(incoming, key);
+        CFDataRef existing = CFDictionaryGetValue(next, key);
+        if (existing && !CFEqual(existing, value)) status = errSecDuplicateItem;
+        else if (!existing) { CFDictionarySetValue(next, key, value); changed = 1; }
+        CFRelease(key);
+        if (status) break;
+    }
+    CFRelease(incoming);
+    // Check the entire immutable-reference union before the only write. An
+    // empty/idempotent import must never erase the destination's other keys.
+    if (!status && changed) {
+        status = save_vault(service, next);
+        if (!status) next = NULL; // cached_vault now owns the candidate.
+    }
+    if (next) CFRelease(next);
+    if (!status && (changed || !had_cache)) {
+        status = verify_vault_storage(service, cached_vault);
+        if (status) discard_vault_cache();
+    }
     return status;
 }
 #endif
@@ -495,6 +542,13 @@ int zw_credentials_collect(const char *service, const char *const *keep, size_t 
 // Delete only its exact metadata identity; never call load_vault here.
 int zw_credentials_erase(const char *service) {
     ZW_VAULT_GUARD;
+#if defined(ZW_CREDENTIALS_UI_FIXTURE)
+    OSStatus ready = load_vault(service);
+    if (ready == errSecInteractionNotAllowed) return errSecSuccess; // No fixture vault was opened.
+    if (ready) return ready;
+    CFDictionaryRemoveAllValues(cached_vault);
+    return errSecSuccess;
+#else
     CFMutableDictionaryRef q = vault_query(service);
     if (!q) return errSecAllocate;
     int same_scope = cached_service && CFEqual(cached_service, CFDictionaryGetValue(q, kSecAttrService));
@@ -505,4 +559,5 @@ int zw_credentials_erase(const char *service) {
         vault_exists = 0;
     }
     return status;
+#endif
 }

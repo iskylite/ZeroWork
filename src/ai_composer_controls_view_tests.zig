@@ -176,6 +176,36 @@ test "AI composer send and stop share one trailing slot" {
     try std.testing.expectApproxEqAbs(stop.globalRect().y, f.send.globalRect().y, 0.1);
 }
 
+test "AI composer compact 320 point dock retains every action inside the actual row" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    f.cx.setViewport(860, 480);
+    f.view.root.setStyleInline(a, .{ .width = .{ .px = 320 } });
+    f.models[0].id = "gpt-very-long-model-name-with-capabilities-and-effort";
+    var source = f.snapshot();
+    source.revision = 2;
+    source.swarm_mode = .auto;
+    source.current = .{ .provider_id = "lab", .model_id = f.models[0].id };
+    try f.view.update(source);
+    f.settle();
+    const row = f.view.root.globalRect();
+    var prior = row.x;
+    for ([_]*ui.Node{ f.view.buttons[0], f.view.buttons[1], f.view.buttons[5], f.view.buttons[6], f.view.buttons[4], f.view.buttons[2], f.send }) |button| {
+        const r = button.globalRect();
+        try std.testing.expect(r.w >= 24 and r.x >= prior - 0.1 and r.x + r.w <= row.x + row.w + 0.1);
+        prior = r.x + r.w;
+    }
+    f.click(f.view.buttons[1]);
+    f.enter(find(f.cx.root.?, "ai.permission.auto").?);
+    try std.testing.expectEqual(.auto, f.last.?.action.permission);
+    f.view.root.setStyleInline(a, .{ .width = .{ .px = 580 } });
+    f.settle();
+    try std.testing.expect(f.view.labels[1].?.isDisplayedInTree());
+    try std.testing.expect(f.view.labels[4].?.isDisplayedInTree());
+    try std.testing.expect(f.view.labels[5].?.isDisplayedInTree());
+}
+
 test "AI composer grouped model list uses configured capabilities and a captured typed selection awaiting acknowledgement" {
     var f: Fixture = undefined;
     try f.init();

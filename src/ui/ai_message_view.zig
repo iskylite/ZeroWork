@@ -330,7 +330,7 @@ fn appendTable(cx: *ui.Cx, scope: *ui.Scope, parent: *ui.Node, lines: []const []
             const cell_source = try unescapeTablePipes(cx.allocator, value);
             defer cx.allocator.free(cell_source);
             const owned_cell = try scope.createText(cell_source, .{});
-            const text = try ui.widgets.Markdown(.{ .text = owned_cell, .options = S.markdownOptions() }).mount(scope, cx);
+            const text = try ui.widgets.Markdown(.{ .text = owned_cell, .options = S.tableMarkdownOptions() }).mount(scope, cx);
             try compact(cx, scope, text);
             try @import("ai_markdown_links.zig").bind(cx, scope, text, owned_cell.peek());
             try cell.appendChild(cx.allocator, text);

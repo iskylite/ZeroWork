@@ -464,12 +464,25 @@ pub fn build(b: *std.Build) void {
     // user's Keychain or display authentication UI.
     const native_credentials = b.addSystemCommand(&.{ "xcrun", "clang", "-Wall", "-Wextra", "-Werror" });
     native_credentials.addFileArg(b.path("src/platform/macos_credentials_tests.m"));
+    native_credentials.addFileInput(b.path("src/platform/macos_credentials.m"));
     native_credentials.addArgs(&.{ "-framework", "Security", "-framework", "CoreFoundation", "-o" });
     const native_credentials_binary = native_credentials.addOutputFileArg("credentials-native-mock");
     const native_credentials_run = std.Build.Step.Run.create(b, "credentials-native-mock");
     native_credentials_run.addFileArg(native_credentials_binary);
     root_test_step.dependOn(&native_credentials_run.step);
-    b.step("test-credentials-native", "Run credential cache and no-UI regressions with mocked Security APIs").dependOn(&native_credentials_run.step);
+    const credential_tests = b.step("test-credentials-native", "Run credential cache and no-UI regressions with mocked Security APIs");
+    credential_tests.dependOn(&native_credentials_run.step);
+    // Link the automation variant without Security/LA: even an unexercised
+    // path to a real credential API now fails the build, not a user's test.
+    const fixture_credentials = b.addSystemCommand(&.{ "xcrun", "clang", "-Wall", "-Wextra", "-Werror", "-fno-modules", "-DZW_CREDENTIALS_UI_FIXTURE=1" });
+    fixture_credentials.addFileArg(b.path("src/platform/macos_credentials_tests.m"));
+    fixture_credentials.addFileInput(b.path("src/platform/macos_credentials.m"));
+    fixture_credentials.addArgs(&.{ "-framework", "CoreFoundation", "-o" });
+    const fixture_credentials_binary = fixture_credentials.addOutputFileArg("credentials-ui-fixture");
+    const fixture_credentials_run = std.Build.Step.Run.create(b, "credentials-ui-fixture");
+    fixture_credentials_run.addFileArg(fixture_credentials_binary);
+    root_test_step.dependOn(&fixture_credentials_run.step);
+    credential_tests.dependOn(&fixture_credentials_run.step);
     const reveal_native = b.addSystemCommand(&.{ "xcrun", "clang", "-fobjc-arc", "-Wall", "-Wextra", "-Werror", "-Wno-unused-parameter" });
     reveal_native.addFileArg(b.path("src/platform/macos_password_reveal_tests.m"));
     reveal_native.addFileInput(b.path("src/platform/macos_password_reveal.m"));

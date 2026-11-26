@@ -4,7 +4,7 @@ const S = @import("ai_sessions_styles.zig");
 const T = @import("app_theme.zig");
 const Phase = @import("../ai/assistant_store.zig").Phase;
 pub const Action = enum { view, locate, restore, copy, copy_use, end, new, more, children };
-pub const Entry = struct { id: u64, title: []const u8, owner: []const u8, detail: []const u8 = "", active: bool = false, phase: @import("../ai/assistant_store.zig").Phase = .idle, bound: bool = false, ending: bool = false, can_restore: bool = false, has_children: bool = false, can_copy: bool = false, can_remove: bool = true, first_use: bool = false };
+pub const Entry = struct { id: u64, title: []const u8, owner: []const u8, detail: []const u8 = "", active: bool = false, phase: @import("../ai/assistant_store.zig").Phase = .idle, bound: bool = false, ending: bool = false, can_restore: bool = false, has_children: bool = false, can_copy: bool = false, text_only_copy: bool = false, can_remove: bool = true, first_use: bool = false };
 pub const Hooks = struct { context: *anyopaque, select: *const fn (*anyopaque, u64) void, request_close: *const fn (*anyopaque, u64) void, remove: *const fn (*anyopaque, u64) void, act: ?*const fn (*anyopaque, u64, Action) void = null, confirmed: ?*const fn (*anyopaque, u64, bool) void = null };
 const TitleHint = struct {
     cx: *ui.Cx,
@@ -137,7 +137,7 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, entry: Entry, hooks: Hooks, highlight
             };
             if (enabled) {
                 const action_state = try scope.createState(Row, .{ .hooks = hooks, .menu_open = menu_open, .phase = entry.phase, .id = entry.id, .action = spec[0] });
-                const label = if (spec[0] == .locate) "定位原持有者" else if (spec[0] == .copy_use) "复制并使用到当前 Agent" else if (entry.first_use) "使用到当前 Agent" else "恢复到当前 Agent";
+                const label = if (spec[0] == .locate) "定位原持有者" else if (spec[0] == .copy_use) if (entry.text_only_copy) "仅复制对话文本" else "使用会话副本" else "恢复到原环境";
                 const action_button = try ui.widgets.Button(.{ .icon_only = true, .icon_asset = ui.icons.get(if (spec[0] == .restore and entry.first_use) "play" else spec[1]).?, .icon_size = 14, .variant = .ghost, .a11y_label = label, .base_style = S.rowAction(), .hover_style = S.actionHover(false), .on_click = cx.on(Row, action_state, Row.act) }).mount(scope, cx);
                 action_button.meta.ownership.meta.test_id = try @import("std").fmt.bufPrint(&action_state.action_id, "ai.session.{s}.{d}", .{ spec[2], entry.id });
                 try actions.appendChild(cx.allocator, try actionTooltip(cx, scope, action_button, label));

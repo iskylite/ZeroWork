@@ -23,6 +23,33 @@ pub const Ticket = struct {
 };
 
 pub const Action = enum { choose, remove };
+pub const OpenPicker = union(enum) { none, other, workspace: Ticket };
+pub const PickerDecision = enum { proceed, reuse, blocked };
+
+/// Keep the existing sheet only for a repeat of the same workspace choice.
+/// In particular, do not apply the selection to a new conversation or grant.
+pub fn pickerDecision(open: OpenPicker, ticket: Ticket, action: Action) PickerDecision {
+    return switch (open) {
+        .none => .proceed,
+        .other => .blocked,
+        .workspace => |current| if (action == .choose and current.eql(ticket)) .reuse else .blocked,
+    };
+}
+
+test "workspace picker reuses only the same active folder selection" {
+    const ticket: Ticket = .{ .conversation = .generate(), .revision = 3, .scope_revision = 7 };
+    try std.testing.expectEqual(PickerDecision.proceed, pickerDecision(.none, ticket, .choose));
+    try std.testing.expectEqual(PickerDecision.reuse, pickerDecision(.{ .workspace = ticket }, ticket, .choose));
+    try std.testing.expectEqual(PickerDecision.blocked, pickerDecision(.{ .workspace = ticket }, ticket, .remove));
+    try std.testing.expectEqual(PickerDecision.blocked, pickerDecision(.other, ticket, .choose));
+    var moved = ticket;
+    moved.scope_revision += 1;
+    try std.testing.expectEqual(PickerDecision.blocked, pickerDecision(.{ .workspace = ticket }, moved, .choose));
+    moved = ticket;
+    moved.conversation = .generate();
+    try std.testing.expectEqual(PickerDecision.blocked, pickerDecision(.{ .workspace = ticket }, moved, .choose));
+}
+
 pub const Callbacks = struct {
     context: *anyopaque,
     action: *const fn (*anyopaque, Ticket, Action) anyerror!void,
@@ -155,26 +182,71 @@ pub const View = struct {
 
     fn afterLayout(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
         const self: *View = @ptrCast(@alignCast(raw));
-        if (!self.slot.isDisplayedInTree()) return .done;
+        const header = self.header;
+        const header_width = header.bar.globalRect().w;
+        if (!header.bar.isDisplayedInTree() or header_width <= 0) return .done;
         if (self.focus_pending and self.open.peek() and self.choose.isDisplayedInTree() and self.choose.globalRect().h > 0) {
             self.focus_pending = false;
             self.cx.setFocus(self.choose);
         }
-        // Reserve measured widths for the existing header children, including
-        // all controls and every gap. Only the new workspace pill shrinks.
-        var reserved = 2 * S.header_padding_x;
-        for (self.header.bar.children.items) |child| {
-            if (child.style.position == .absolute or child.style.display == .none or child == self.slot) continue;
-            reserved += S.header_gap;
-            if (child != self.header.spacer) reserved += child.globalRect().w;
+        // Measure one budget for the two elastic labels. All action targets
+        // remain their native size; fit-content labels alone cannot protect
+        // those targets when the retained card is put in a narrow dock.
+        const compact = header_width < 400;
+        const gap: f32 = if (compact) 4 else S.header_gap;
+        const inset: f32 = if (compact) 12 else S.header_padding_x;
+        var changed = false;
+        if (header.bar.style.gap != gap or header.bar.style.padding.left != inset) {
+            var padding = header.bar.style.padding;
+            padding.left = inset;
+            padding.right = inset;
+            header.bar.setStyleInline(self.cx.allocator, .{ .gap = gap, .padding = padding });
+            changed = true;
         }
-        const text = self.name.getText().?.content;
-        const preferred = S.workspace_chrome_width + self.cx.text.measureTextWidth(text, 11, 400, false);
-        const width = std.math.clamp(@min(preferred, self.header.bar.globalRect().w - reserved), S.workspace_min_width, S.workspace_max_width);
-        if (@abs(width - self.slot_width) <= 0.25) return .done;
-        self.slot_width = width;
-        self.slot.setStyleInline(self.cx.allocator, S.workspaceSlot(width));
-        return .needs_layout;
+        var children: usize = 0;
+        var reserved = 2 * inset;
+        for (header.bar.children.items) |child| {
+            if (child.style.position == .absolute or child.style.display == .none) continue;
+            children += 1;
+            if (child != header.spacer and child != header.owner_pill and child != self.slot)
+                reserved += child.globalRect().w;
+        }
+        reserved += gap * @as(f32, @floatFromInt(children -| 1));
+        const available = @max(0, header_width - reserved);
+        const workspace_visible = self.slot.style.display != .none;
+        const workspace_min: f32 = if (workspace_visible) S.workspace_min_width else 0;
+        var owner_width: f32 = 0;
+        if (header.owner_pill.style.display != .none) {
+            const text = header.owner.getText().?.content;
+            const preferred = @min(160, 16 + @ceil(self.cx.text.measureTextWidth(text, 11, 400, false)));
+            owner_width = @min(preferred, @max(0, available - workspace_min));
+            const width: ui.Sizing = .{ .px = owner_width };
+            const owner_inset = @min(8, owner_width / 2);
+            if (!std.meta.eql(header.owner_pill.style.width, width)) {
+                header.owner_pill.setStyleInline(self.cx.allocator, .{ .width = width, .min_width = @min(16, owner_width), .padding = .{ .left = owner_inset, .right = owner_inset } });
+                changed = true;
+            }
+            // Bounding the chip is not enough: the text node needs a definite
+            // width to generate the ellipsis instead of painting its old run
+            // over the neighboring action icons.
+            const text_width = @max(0, owner_width - 2 * owner_inset);
+            const text_size: ui.Sizing = .{ .px = text_width };
+            if (!std.meta.eql(header.owner.style.width, text_size)) {
+                header.owner.setStyleInline(self.cx.allocator, .{ .width = text_size, .min_width = 0, .max_width = text_width });
+                changed = true;
+            }
+        }
+        if (workspace_visible) {
+            const text = self.name.getText().?.content;
+            const preferred = std.math.clamp(S.workspace_chrome_width + self.cx.text.measureTextWidth(text, 11, 400, false), workspace_min, S.workspace_max_width);
+            const width = @min(preferred, @max(0, available - owner_width));
+            if (@abs(width - self.slot_width) > 0.25) {
+                self.slot_width = width;
+                self.slot.setStyleInline(self.cx.allocator, S.workspaceSlot(width));
+                changed = true;
+            }
+        }
+        return if (changed) .needs_layout else .done;
     }
 
     fn detail(cx: *ui.Cx, parent: *ui.Node, id: []const u8) !*ui.Node {

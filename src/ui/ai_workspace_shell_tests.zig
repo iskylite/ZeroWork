@@ -6,6 +6,9 @@ const shell = @import("ai_workspace_shell.zig");
 const Host = struct {
     new_chat: usize = 0,
     selected_conversation: []const u8 = "",
+    queued_pin: ?bool = null,
+    pin_target: []const u8 = "",
+    delete_target: []const u8 = "",
     selected_tab: shell.InspectorTab = .files,
     selected_file: []const u8 = "",
     inserted_file: []const u8 = "",
@@ -21,6 +24,15 @@ const Host = struct {
     fn onSelectConversation(context: ?*anyopaque, id: []const u8) void {
         const self: *Host = @ptrCast(@alignCast(context.?));
         self.selected_conversation = id;
+    }
+    fn onPin(context: ?*anyopaque, id: []const u8, value: bool) void {
+        const self: *Host = @ptrCast(@alignCast(context.?));
+        self.pin_target = id;
+        self.queued_pin = value;
+    }
+    fn onDelete(context: ?*anyopaque, id: []const u8) void {
+        const self: *Host = @ptrCast(@alignCast(context.?));
+        self.delete_target = id;
     }
     fn onToggleLeft(context: ?*anyopaque, collapsed: bool) void {
         const self: *Host = @ptrCast(@alignCast(context.?));
@@ -79,6 +91,8 @@ fn mountShell(host: *Host, config: shell.Config) !*shell.View {
         .context = host,
         .new_chat = Host.onNewChat,
         .select_conversation = Host.onSelectConversation,
+        .pin_conversation = Host.onPin,
+        .delete_conversation = Host.onDelete,
         .toggle_left_rail = Host.onToggleLeft,
         .toggle_inspector = Host.onToggleInspector,
         .select_inspector_tab = Host.onSelectTab,
@@ -92,6 +106,7 @@ fn mountShell(host: *Host, config: shell.Config) !*shell.View {
 
 test {
     _ = @import("ai_standalone_bridge.zig");
+    _ = @import("ai_workspace_view.zig");
     _ = @import("../plugins/ai/view.zig");
 }
 
@@ -445,14 +460,87 @@ test "an unavailable file browser does not render actionable preview controls" {
     cx.layout();
     try std.testing.expect(view.file_scroll.container.style.display == .none);
     try std.testing.expect(view.preview_box.style.display == .none);
+    try std.testing.expect(view.preview_grip.style.display == .none);
     try shell.set_files(view, &sample_files);
     try shell.set_file_preview(view, "ignored", "outside", "", "not displayed");
     try std.testing.expectEqual(@as(usize, 0), view.files.items.len);
     try std.testing.expectEqualStrings("", view.preview_source);
-    const unavailable = view.files_page.children.items[2];
+    const unavailable = view.files_notice.?;
     try std.testing.expectEqualStrings("ai.workspace.files.unavailable", unavailable.meta.ownership.meta.test_id.?);
     try std.testing.expect(unavailable.globalRect().h > 0);
     shell.set_inspector_tab(view, .members);
     try std.testing.expect(shell.inspector_page(view, .members).style.display == .flex);
     try std.testing.expectEqual(shell.InspectorTab.files, host.selected_tab); // programmatic tab updates are not user actions
+}
+
+fn testNode(node: *ui.Node, id: []const u8) ?*ui.Node {
+    if (node.meta.ownership.meta.test_id) |value| if (std.mem.eql(u8, id, value)) return node;
+    for (node.children.items) |child| if (testNode(child, id)) |match| return match;
+    return null;
+}
+
+test "standalone stored conversation buttons pin or request deletion without selecting a row" {
+    const cx = try ui.Cx.init(std.testing.allocator, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(1200, 800);
+    cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill(), .direction = .column }, .{});
+    const scope = try ui.Scope.init(std.testing.allocator, null, cx.owner);
+    defer scope.dispose();
+    var host = newHost();
+    const view = try mountShell(&host, .{ .cx = cx, .scope = scope, .sessions = &.{
+        .{ .id = "published", .title = "已保存", .can_pin = true, .can_delete = true },
+        .{ .id = "running", .title = "运行中", .can_pin = true, .selected = true },
+    } });
+    cx.layout();
+    click(cx, testNode(view.session_list, "ai.workspace.session.pin.0").?);
+    try std.testing.expectEqualStrings("published", host.pin_target);
+    try std.testing.expectEqual(true, host.queued_pin.?);
+    click(cx, testNode(view.session_list, "ai.workspace.session.delete.1").?);
+    try std.testing.expectEqualStrings("", host.delete_target);
+    click(cx, testNode(view.session_list, "ai.workspace.session.delete.0").?);
+    try std.testing.expectEqualStrings("published", host.delete_target);
+    try std.testing.expectEqualStrings("", host.selected_conversation);
+    try std.testing.expectEqualStrings("running", view.selected_id.peek().?);
+    try shell.set_sessions(view, &.{
+        .{ .id = "published", .title = "已保存", .can_pin = true, .can_delete = true, .pinned = true },
+        .{ .id = "running", .title = "运行中", .can_pin = true, .selected = true },
+    });
+    cx.layout();
+    click(cx, testNode(view.session_list, "ai.workspace.session.pin.0").?);
+    try std.testing.expectEqual(false, host.queued_pin.?);
+}
+
+test "workspace chooser uses a pointer over its icon, label and arrow only while actionable" {
+    const Probe = struct {
+        calls: usize = 0,
+        fn choose(raw: ?*anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            self.calls += 1;
+        }
+    };
+    const cx = try ui.Cx.init(std.testing.allocator, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(1200, 800);
+    cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill(), .direction = .column }, .{});
+    const scope = try ui.Scope.init(std.testing.allocator, null, cx.owner);
+    defer scope.dispose();
+    var probe: Probe = .{};
+    const view = try shell.mount(.{ .cx = cx, .scope = scope, .parent = cx.root.?, .callbacks = .{ .context = &probe, .choose_workspace = Probe.choose } });
+    try shell.bind_files(view, null, true);
+    cx.layout();
+    for (view.workspace_picker.children.items) |node| {
+        const r = node.globalRect();
+        cx.handleMouseMove(r.x + r.w / 2, r.y + r.h / 2);
+        try std.testing.expectEqual(ui.CursorShape.pointer, cx.current_cursor);
+    }
+    click(cx, view.workspace_picker);
+    try std.testing.expectEqual(@as(usize, 1), probe.calls);
+    try shell.bind_files(view, "只读示例", false);
+    cx.layout();
+    const r = view.workspace_picker.globalRect();
+    cx.handleMouseMove(r.x + r.w / 2, r.y + r.h / 2);
+    try std.testing.expectEqual(ui.CursorShape.default, cx.current_cursor);
+    try std.testing.expect(view.workspace_picker.behavior.interaction.a11y.?.disabled);
+    click(cx, view.workspace_picker);
+    try std.testing.expectEqual(@as(usize, 1), probe.calls);
 }

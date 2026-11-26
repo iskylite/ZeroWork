@@ -76,9 +76,10 @@ pub fn authorize(service: [:0]const u8) !void {
     try check(zw_credentials_authorize(service));
 }
 
-pub fn copyToLocal(service: [:0]const u8, store: @import("../config/local_credentials.zig")) !void {
+pub fn copyToLocal(service: [:0]const u8, store: anytype) !void {
+    const Target = @TypeOf(store);
     const Copy = struct {
-        target: @import("../config/local_credentials.zig"),
+        target: Target,
         failure: ?anyerror = null,
         fn write(raw: *anyopaque, reference: *const [68]u8, value: [*]const u8, length: usize) callconv(.c) c_int {
             const self: *@This() = @ptrCast(@alignCast(raw));

@@ -66,10 +66,11 @@ const StoredEvent = struct {
     workspace_ack_revision: @FieldType(lifecycle.Event, "workspace_ack_revision") = null,
     conversation_model: @FieldType(lifecycle.Event, "conversation_model") = null,
     board_post: @FieldType(lifecycle.Event, "board_post") = null,
+    history_pinned: ?bool = null,
     pub fn jsonStringify(self: StoredEvent, writer: *std.json.Stringify) !void {
         try writer.beginObject();
         inline for (@typeInfo(StoredEvent).@"struct".field_names) |name| {
-            const emit = if (comptime std.mem.eql(u8, name, "child_settings") or std.mem.eql(u8, name, "child_info") or std.mem.eql(u8, name, "parent_binding") or std.mem.eql(u8, name, "targets") or std.mem.eql(u8, name, "children") or std.mem.eql(u8, name, "task_fact") or std.mem.eql(u8, name, "initial_text") or std.mem.eql(u8, name, "conversation_model") or std.mem.eql(u8, name, "presentation_patch") or std.mem.eql(u8, name, "board_post") or std.mem.startsWith(u8, name, "workspace")) @field(self, name) != null else true;
+            const emit = if (comptime std.mem.eql(u8, name, "child_settings") or std.mem.eql(u8, name, "child_info") or std.mem.eql(u8, name, "parent_binding") or std.mem.eql(u8, name, "targets") or std.mem.eql(u8, name, "children") or std.mem.eql(u8, name, "task_fact") or std.mem.eql(u8, name, "initial_text") or std.mem.eql(u8, name, "conversation_model") or std.mem.eql(u8, name, "presentation_patch") or std.mem.eql(u8, name, "board_post") or std.mem.eql(u8, name, "history_pinned") or std.mem.startsWith(u8, name, "workspace")) @field(self, name) != null else true;
             if (emit) {
                 try writer.objectField(name);
                 try writer.write(@field(self, name));

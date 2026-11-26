@@ -2,7 +2,7 @@
  * fixture profile, a background native window and an isolated loopback provider. */
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { createServer } from 'node:http';
 import { join, resolve } from 'node:path';
@@ -11,6 +11,8 @@ const prefix = resolve(process.env.ZW_AI_TEST_PREFIX ?? 'zig-out');
 const folder = await realpath(await mkdtemp(join(tmpdir(), 'zw-standalone-composer-')));
 const data = join(folder, 'data'), rpc = join(folder, 'rpc');
 const checks: string[] = [];
+const geometry: { menu: string; width: number; x: number; gap: number; composerWidth: number }[] = [];
+let lastGeometry: { menu: string; popup: unknown; composer: unknown } | undefined;
 let child: ReturnType<typeof spawn> | undefined;
 let ended: Promise<unknown> | undefined;
 let log = '', step = 'start', turns = 0, expected: 'batch' | 'terminal' | 'none' | undefined;
@@ -83,13 +85,23 @@ const fixture = createServer(async (req, res) => {
   }
 });
 try {
+  // Take an immutable copy before launch. Other builds can replace zig-out
+  // with a release executable, which deliberately ignores fixture scoping.
+  const binary = join(folder, 'zerowork');
+  await copyFile(resolve(process.env.ZW_AI_TEST_BINARY ?? join(prefix, 'bin/zerowork')), binary);
+  assert((await readFile(binary)).includes('MENU_BAR_BADGE'), 'Use a -Dtest-mode=true executable; never open production data');
+  for (const name of ['zw_ipc.so', 'zw_execution.so', 'zw_secret_consume.so', 'zw_execution_guard']) {
+    await symlink(join(prefix, 'bin', name), join(folder, name));
+  }
+  await symlink(resolve(import.meta.dirname, '../assets'), join(folder, 'assets'), 'dir');
   for (const path of [data, rpc, join(data, 'credentials')]) await mkdir(path, { mode: 0o700 });
   await writeFile(join(data, 'credentials', '.local-storage'), '1', { mode: 0o600 });
   const port = await new Promise<number>((ok, fail) => {
     fixture.once('error', fail); fixture.listen(0, '127.0.0.1', () => ok((fixture.address() as { port: number }).port));
   });
   await writeFile(join(data, 'config.toml'), [
-    '[meta]', 'config_revision=1', '[ai]', 'default_provider="fixture"', 'permission_mode="confirm"', 'execution_mode="auto"',
+    '[meta]', 'config_revision=1', '[ui]', 'theme=' + JSON.stringify(process.env.ZW_COMPOSER_TEST_THEME ?? 'dark'),
+    '[ai]', 'default_provider="fixture"', 'permission_mode="confirm"', 'execution_mode="auto"',
     '[[ai.providers]]', 'id="fixture"', 'kind="openai_compat"', 'enabled=true', 'endpoint="http://127.0.0.1:' + port + '/v1/chat/completions"',
     '[[ai.providers.models]]', 'name="fixture-first"', 'context_window=32768', 'default=true',
     '[[ai.providers.models]]', 'name="fixture-second"', 'context_window=65536', ''
@@ -99,7 +111,7 @@ try {
   const env = { ...process.env, ZEROWORK_DATA_DIR: data, ZEROWORK_AUTOCONNECT: '0', ZENIT_E2E_BACKGROUND: '1',
     ZENIT_E2E_ISOLATE_POINTER: '1', ZW_TEST_CREDENTIAL_RESPONSE: 'cancel', OPENAI_API_KEY: '', ANTHROPIC_API_KEY: '', ZDOTDIR: folder };
   for (const key of ['ZEROWORK_AI_MOCK', 'ZEROWORK_AI_ENDPOINT', 'ZEROWORK_AI_MODEL', 'ZEROWORK_AI_PROVIDER']) delete env[key];
-  child = spawn(join(prefix, 'bin/zerowork'), [], { env, stdio: ['ignore', 'ignore', 'pipe'] });
+  child = spawn(binary, [], { env, stdio: ['ignore', 'ignore', 'pipe'] });
   child.stderr?.on('data', bytes => { log = (log + String(bytes)).slice(-3500); });
   ended = new Promise(resolve => child!.once('close', resolve));
   const show = (n: any) => !!n && !n.hidden && n.visible !== false && (n.effective_opacity ?? 1) > .5 && n.rect?.w > 0 && n.rect?.h > 0;
@@ -115,6 +127,28 @@ try {
     const n = await see(id, label); assert((await h.clickAt(n.rect.x + n.rect.w / 2, n.rect.y + n.rect.h / 2)).ok);
   };
   const key = async (k: string, mods = {}) => { assert((await h.key(k, mods)).ok); };
+  const menuAligned = async (id: string) => {
+    step = 'aligned composer popup ' + id;
+    return h.waitFor(async () => {
+      const popup = await shown(id), composer = await shown('ai.composer.surface');
+      lastGeometry = { menu: id, popup: popup?.rect, composer: composer?.rect };
+      if (!popup || !composer) return null;
+      const p = popup.rect, c = composer.rect;
+      const gap = c.y - p.y - p.h;
+      if (Math.abs(p.x - c.x) > 0.6 || Math.abs(p.w - c.w) > 0.6 || Math.abs(gap - 6) > 0.6) return null;
+      geometry.push({ menu: id, width: p.w, x: p.x, gap, composerWidth: c.w });
+      return popup;
+    }, 8000);
+  };
+  const sessionMenu = async () => {
+    await click('ai.prompt'); await key('a', { cmd: true }); await key('backspace');
+    assert((await h.type_('/session')).ok); await see('ai.command.session');
+    await key('return'); await menuAligned('ai.targets.popup');
+  };
+  const replaceDraft = async (value: string) => {
+    await click('ai.prompt'); await key('a', { cmd: true }); await key('backspace');
+    assert((await h.type_(value)).ok);
+  };
   await h.waitForServerReady(18000);
   assert.equal(Number(JSON.parse(await readFile(join(rpc, 'owner.json'), 'utf8')).pid), child.pid);
   await h.resizeWindow(1280, 800);
@@ -131,16 +165,24 @@ try {
   await click('ai.composer.execution'); await click('ai.execution.interactive');
   await see('ai.composer.execution', '交互式');
   checks.push('Permission and interactive execution mode choices are independent');
-  await click('ai.targets.add'); await see('ai.targets.popup');
+  assert.equal((await h.query('ai.targets.add')).length, 0, 'association is not a permanent composer control');
+  await sessionMenu();
   assert.equal(await shown('ai.targets.chip'), null, 'no implicit access on a new AI tab');
   await click('ai.targets.create_local');
-  await see('ai.workspace.shell'); await see('ai.targets.add', '已关联 1');
-  await click('ai.targets.add'); await click('ai.targets.chip');
-  await see('ai.targets.add', '关联会话');
+  await see('ai.workspace.shell'); await see('ai.workspace.scope', '1 个关联目标');
+  await sessionMenu(); await click('ai.targets.chip');
+  await see('ai.workspace.scope', '未关联会话');
   await click('ai.prompt'); assert((await h.type_('@')).ok);
-  await click('ai.targets.candidate');
-  await see('ai.targets.add', '已关联 1');
-  checks.push('Explicitly creates a real local terminal, returns to the same AI page, removes and restores it via @');
+  await menuAligned('ai.targets.popup'); await see('ai.targets.candidate');
+  await key('escape'); await see('ai.workspace.scope', '未关联会话');
+  await h.resizeWindow(860, 480);
+  await sessionMenu(); await key('escape');
+  await replaceDraft('@Loc');
+  await menuAligned('ai.targets.popup'); await see('ai.targets.candidate');
+  await key('return');
+  await see('ai.workspace.scope', '1 个关联目标');
+  await h.resizeWindow(1280, 800);
+  checks.push('/session manages the actual terminal grant without a chip; @ aligns, Escape cancels, Return grants one target');
   await click('ai.composer.execution'); await click('ai.execution.auto');
   await see('ai.composer.execution', '自行判断'); await see('ai.composer.permission', '确认后执行');
   await see('ai.composer.model', 'fixture-second');
@@ -148,7 +190,18 @@ try {
   await click('ai.prompt'); await key('a', { cmd: true }); await key('backspace');
   await click('ai.prompt'); assert((await h.type_('/')).ok);
   for (const id of ['ai.skill_picker.command', 'ai.command.model', 'ai.command.permission', 'ai.command.execution', 'ai.command.session']) await see(id);
-  assert((await h.type_('mod')).ok); await see('ai.command.model'); await key('return');
+  await menuAligned('ai.skill_picker');
+  await h.resizeWindow(860, 480);
+  // Native resize can take focus away and dismiss a completion; it must not
+  // lose the draft. Reopen through the same keyboard path in the new size.
+  assert.equal((await h.inputState('ai.prompt')).buffer, '/');
+  await replaceDraft('/');
+  await menuAligned('ai.skill_picker');
+  const compactComposer = (await see('ai.composer.surface')).rect;
+  const compactSend = (await h.query('ai.send'))[0]?.rect;
+  assert(compactSend && compactSend.x >= compactComposer.x && compactSend.x + compactSend.w <= compactComposer.x + compactComposer.w + 0.5, 'narrow composer keeps Send inside');
+  await h.resizeWindow(1280, 800);
+  await replaceDraft('/mod'); await see('ai.command.model'); await key('return');
   await see('ai.model.menu'); await key('escape');
   checks.push('/ and /mod offer real commands and Return opens the model picker without a turn');
   for (const [input, label] of [['/swarm', 'Swarm'], ['/auto', 'Auto']]) {
@@ -185,7 +238,7 @@ try {
   await click('ai.composer.execution'); await click('ai.execution.interactive');
   await execute('terminal');
   checks.push('Interactive mode runs on the one associated real local PTY with a recorded interval and exit 0');
-  await click('ai.targets.add'); await click('ai.targets.chip');
+  await sessionMenu(); await click('ai.targets.chip');
   await click('ai.composer.execution'); await click('ai.execution.auto');
   await execute('none');
   checks.push('No attached targets in auto mode means no execution authority or implicit use of another tab');
@@ -198,9 +251,9 @@ try {
     await Promise.race([ended, h.sleep(120)]);
   }
   assert.equal(child.exitCode, 0, 'application quits normally');
-  console.log(JSON.stringify({ status: 'passed', checks }));
+  console.log(JSON.stringify({ status: 'passed', checks, geometry }));
 } catch (error) {
-  console.error(JSON.stringify({ status: 'failed', step, checks, error: String(error), providerProblem, lastTool, app: log }));
+  console.error(JSON.stringify({ status: 'failed', step, checks, geometry, lastGeometry, error: String(error), providerProblem, lastTool, app: log }));
   process.exitCode = 1;
 } finally {
   if (child && child.exitCode === null && child.signalCode === null) { child.kill(); await ended; }

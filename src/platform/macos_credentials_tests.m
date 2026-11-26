@@ -7,6 +7,53 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if defined(ZW_CREDENTIALS_UI_FIXTURE)
+// This executable is deliberately linked without Security or LocalAuthentication.
+// Missing responses and warm-cache mutations must both remain off the host.
+#include "macos_credentials.m"
+static int count_export(void *context, const char *reference, const unsigned char *value, size_t length) {
+    assert(owned_reference(reference) && value && length);
+    ++*(int *)context;
+    return 0;
+}
+int main(void) {
+    const char *service = "com.zerowork.tests.fixture";
+    const char *a = "zw1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const char *b = "zw1_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const char *c = "zw1_cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+    const struct import_entry entry = { c, (const unsigned char *)"local", 5 };
+    unsigned char *out = NULL; size_t length = 0;
+    int count = 0;
+    assert(unsetenv("ZW_TEST_CREDENTIAL_RESPONSE") == 0);
+    assert(!zw_credentials_cached());
+    assert(zw_credentials_authorize(service) == errSecNotAvailable);
+    assert(zw_credentials_get(service, a, &out, &length) == errSecNotAvailable);
+    assert(zw_credentials_add(service, b, (const unsigned char *)"mock", 4) == errSecNotAvailable);
+    assert(zw_credentials_delete(service, b) == errSecNotAvailable);
+    assert(zw_credentials_collect(service, NULL, 0) == errSecNotAvailable);
+    assert(zw_credentials_erase(service) == errSecNotAvailable);
+    assert(zw_credentials_export(service, &count, count_export) == errSecNotAvailable && !count);
+    assert(zw_credentials_import(service, &entry, 1) == errSecNotAvailable && !zw_credentials_cached());
+    assert(setenv("ZW_TEST_CREDENTIAL_RESPONSE", "cancel", 1) == 0);
+    assert(zw_credentials_authorize(service) == -43001 && !zw_credentials_cached());
+    assert(setenv("ZW_TEST_CREDENTIAL_RESPONSE", "silent-success", 1) == 0);
+    assert(zw_credentials_authorize(service) == errSecSuccess && zw_credentials_cached());
+    assert(zw_credentials_get("com.zerowork.tests.other", a, &out, &length) == errSecParam);
+    assert(zw_credentials_add(service, b, (const unsigned char *)"mock", 4) == errSecSuccess);
+    assert(zw_credentials_import(service, &entry, 1) == errSecSuccess);
+    assert(zw_credentials_export(service, &count, count_export) == errSecSuccess && count == 3);
+    assert(zw_credentials_get(service, b, &out, &length) == errSecSuccess && length == 4 && !memcmp(out, "mock", 4));
+    zw_credentials_free(out, length);
+    assert(zw_credentials_delete(service, b) == errSecSuccess);
+    assert(zw_credentials_collect(service, &c, 1) == errSecSuccess);
+    assert(zw_credentials_get(service, a, &out, &length) == errSecItemNotFound);
+    assert(zw_credentials_erase(service) == errSecSuccess);
+    assert(zw_credentials_get(service, c, &out, &length) == errSecItemNotFound);
+    discard_vault_cache();
+    puts("UI fixture bridge: cold/denial and warm read/write/convert/erase passed without system Keychain linkage");
+    return 0;
+}
+#else
 static CFDataRef fake_item;
 static Boolean fake_interaction = true;
 static int reads, ref_reads, additions, updates, deletions, legacy_deletions;
@@ -219,8 +266,8 @@ int main(void) {
     fail_authorize = errSecSuccess;
     assert(zw_credentials_export(scope, &copied, verify_export) == errSecSuccess && copied == 1);
     const struct import_entry imported[] = {
-        {a, (const unsigned char *)"local-one", 9},
-        {b, (const unsigned char *)"local-two", 9},
+        {b, (const unsigned char *)"local-one", 9},
+        {c, (const unsigned char *)"local-two", 9},
     };
     reset_cache();
     fail_read = errSecSuccess;
@@ -229,6 +276,13 @@ int main(void) {
     assert(zw_credentials_import(scope, imported, 2) == -43001);
     assert(updates + additions + deletions == writes_before_import);
     fail_confirmation = errSecSuccess;
+    expect_secret(a, "preserved-secret");
+    const struct import_entry conflicting[] = {
+        imported[0], {a, (const unsigned char *)"changed-source", 14}
+    };
+    assert(zw_credentials_import(scope, conflicting, 2) == errSecDuplicateItem);
+    assert(updates + additions + deletions == writes_before_import);
+    assert(zw_credentials_get(scope, b, &missing, &length) == errSecItemNotFound);
     expect_secret(a, "preserved-secret");
     fail_write = errSecIO;
     assert(zw_credentials_import(scope, imported, 2) == errSecIO);
@@ -247,10 +301,16 @@ int main(void) {
     assert(zw_credentials_import(scope, imported, 2) == errSecSuccess);
     assert(reads == reads_before_import + 2); // Fresh load and read-back after the write.
     reset_cache();
-    expect_secret(a, "local-one");
-    expect_secret(b, "local-two");
-    assert(zw_credentials_import(scope, NULL, 0) == errSecSuccess && !fake_item);
+    expect_secret(a, "preserved-secret");
+    expect_secret(b, "local-one");
+    expect_secret(c, "local-two");
+    int writes_after_import = updates + additions + deletions;
+    assert(zw_credentials_import(scope, imported, 2) == errSecSuccess);
+    assert(zw_credentials_import(scope, NULL, 0) == errSecSuccess);
+    assert(fake_item && updates + additions + deletions == writes_after_import);
+    reset_cache(); expect_secret(a, "preserved-secret"); expect_secret(b, "local-one"); expect_secret(c, "local-two");
     reset_cache();
     puts("native vault mock regression passed: verified batch import, cancellation, write and read-back failures, restart, cached reads, rollback, scope isolation, legacy deletion, no UI");
     return 0;
 }
+#endif

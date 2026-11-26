@@ -32,7 +32,7 @@
   </defs>
   <rect width="1440" height="900" rx="16" fill="#fff"/>
   <g id="window-controls"><circle cx="30" cy="30" r="6" fill="#ff625b"/><circle cx="50" cy="30" r="6" fill="#ffbf44"/><circle cx="70" cy="30" r="6" fill="#35c84a"/></g>
-  <g id="workspace-tabs" transform="translate(262 12)">
+  <g id="workspace-tabs" transform="translate(108 12)">
     <rect width="344" height="36" rx="18" fill="#fff" filter="url(#tool-shadow)"/>
     <g id="local-tab" transform="translate(4 4)"><use href="#terminal" x="19" y="7" width="14" height="14" class="s"/><circle cx="32" cy="8" r="3" class="busy"/><text x="43" y="19" class="sec">Local Terminal</text><use href="#close" x="148" y="8" width="12" height="12" class="s"/></g>
     <g id="independent-ai-tab" transform="translate(174 4)"><rect width="134" height="28" rx="7" class="sel"/><use href="#spark" x="19" y="7" width="14" height="14" class="s brand"/><circle cx="32" cy="8" r="3" class="busy"/><text x="43" y="19" class="title">AI Agent</text><use href="#close" x="114" y="8" width="12" height="12" class="s"/></g>
@@ -51,8 +51,8 @@
     <text x="14" y="27" class="h">检查构建日志</text><rect x="117" y="11" width="156" height="22" rx="11" class="control"/><use href="#spark" x="124" y="15" width="13" height="13" class="s brand"/><text x="141" y="26" class="small sec">独立 AI · 1 个关联目标</text>
     <rect x="609" y="8" width="108" height="28" rx="14" class="control"/><use href="#folder" x="618" y="15" width="14" height="14" class="s"/><text x="637" y="26" class="sec small">ZeroWork</text><use href="#down" x="694" y="16" width="12" height="12" class="s"/>
     <rect x="726" y="8" width="74" height="28" rx="14" class="sel"/><use href="#pane" x="735" y="15" width="14" height="14" class="s brand"/><text x="754" y="26" class="small sec">检查器</text>
-    <rect x="479" y="82" width="307" height="40" rx="13" fill="#4f5ed9"/><text x="496" y="107" class="msg">请汇总这次构建的错误和下一步检查项。</text>
-    <text x="25" y="176">构建在链接阶段中断：编译器没有找到目标库。</text><text x="25" y="207">先确认本机库文件的架构，再核对构建配置里的搜索路径。</text>
+    <rect x="479" y="62" width="307" height="40" rx="13" fill="#4f5ed9"/><text x="496" y="87" class="msg">请汇总这次构建的错误和下一步检查项。</text>
+    <text x="25" y="156">构建在链接阶段中断：编译器没有找到目标库。</text><text x="25" y="187">先确认本机库文件的架构，再核对构建配置里的搜索路径。</text>
     <g id="composer" transform="translate(0 738)"><rect width="814" height="90" rx="12" fill="#f6f6f7"/><text x="13" y="29" class="sec">继续提问…</text>
       <g transform="translate(12 54)"><rect width="26" height="26" rx="8" fill="#efeff2"/><use href="#plus" x="5" y="5" width="16" height="16" class="s"/>
         <rect x="34" width="94" height="26" rx="8" fill="#efeff2"/><use href="#link" x="41" y="6" width="13" height="13" class="s"/><text x="59" y="17" class="small">已关联 1</text><use href="#down" x="109" y="7" width="12" height="12" class="s"/>
@@ -63,6 +63,10 @@
         <rect x="597" width="155" height="26" rx="8" fill="#efeff2"/><text x="607" y="17" class="small">DeepSeek V4 · 高</text><use href="#down" x="731" y="7" width="12" height="12" class="s"/><rect x="763" width="27" height="26" rx="8" fill="#efeff2"/><use href="#send" x="769" y="5" width="15" height="15" class="s"/>
       </g>
     </g>
+  </g>
+  <g id="inspector-resize" transform="translate(1076 60)" style="cursor:ew-resize">
+    <style>#inspector-resize .grip {opacity:0} #inspector-resize:hover .grip {opacity:1}</style>
+    <rect width="12" height="828" fill="transparent"/><rect class="grip" x="4" y="400" width="4" height="28" rx="2" fill="#676771"/>
   </g>
   <g id="inspector" transform="translate(1088 60)">
     <rect width="340" height="828" rx="16" class="panel" filter="url(#panel-shadow)"/><use href="#pane" x="12" y="14" width="16" height="16" class="s brand"/><text x="35" y="27" class="title">检查器</text><use href="#close" x="309" y="14" width="15" height="15" class="s"/>

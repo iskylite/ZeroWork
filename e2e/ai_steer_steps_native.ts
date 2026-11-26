@@ -101,8 +101,9 @@ try {
   assert(answer && toggle.rect.y + toggle.rect.h + 8 <= answer.rect.y && answer.rect.y + answer.rect.h <= footer.rect.y, 'process toggle precedes the answer with spacing and the original summary follows it');
   const footerIds = new Set(flat(footer).map((n: any) => n.test_id));
   assert(['ai.turn.logo', 'ai.turn.tokens', 'ai.turn.copy', 'ai.turn.fork'].every(id => footerIds.has(id)), 'original summary controls stay together');
-  assert.equal(text(footer).includes('～回合结束～'), true);
-  assert.match(text(toggle).trim(), /^用时 (?:\d+分钟 )?\d+秒$/);
+  assert.equal(text(footer).includes('回合结束'), true);
+  assert.equal(flat(footer).filter((n: any) => n.test_id === 'ai.turn.elapsed').length, 1, 'elapsed only appears in the footer');
+  assert.equal(text(toggle).trim(), '处理过程');
   assert.equal((await h.query('ai.followup.consumed')).length, 0, 'completed process starts collapsed');
   await capture('03-collapsed');
   await click('ai.turn.process.toggle');

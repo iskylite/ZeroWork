@@ -26,3 +26,19 @@ test "assistant prose removes repeated history markers only at the start" {
     try eq("正文 " ++ marker, assistantText("正文 " ++ marker));
     try eq("`" ++ marker ++ "`", assistantText("`" ++ marker ++ "`"));
 }
+
+/// Local/remote attachment wrappers are appended by the host, not portable
+/// user instructions. Strip at the first wrapper even when a later suffix is
+/// malformed, rather than copying retained source bytes to another context.
+pub fn portableUserText(wire: []const u8) []const u8 {
+    var end = wire.len;
+    for ([_][]const u8{
+        "\n\n<local_text_attachment>",         "\n\n<local_file_reference>",
+        "\n\n<remote_file_attachment>",        "\n\n<remote_file_reference>",
+        "\n\n<terminal_selection_attachment>", "\n@file: ",
+    }) |prefix| if (std.mem.indexOf(u8, wire, prefix)) |i| {
+        end = @min(end, i);
+    };
+    if (std.mem.startsWith(u8, wire, "@file: ")) return "";
+    return wire[0..end];
+}

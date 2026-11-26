@@ -19,6 +19,22 @@ pub const Command = struct {
     operation: identity.HostOperationId,
     pinned: ?lifecycle.Store.ForkSnapshot = null,
     end_started: bool = false,
+    text_only: bool = false,
+
+    /// Saved terminal/group numbers can be reused on a later launch. Only
+    /// the original live Agent and its unchanged environment may rebind
+    /// the original conversation identity.
+    pub fn canRestore(record: *const lifecycle.Record, agent: *const lifecycle.Agent) bool {
+        const ended = record.last_end orelse return false;
+        return record.binding == null and record.closed_revision != null and record.ending == null and
+            record.recoverable and record.history.failure == null and !record.task_pending and !agent.closing and
+            ended.fence.agent.eql(agent.id) and ended.fence.environment == agent.environment;
+    }
+
+    pub fn sameLiveEnvironment(record: *const lifecycle.Record, agent: *const lifecycle.Agent) bool {
+        if (record.binding) |binding| return !record.needs_recovery and binding.agent.eql(agent.id) and binding.owner.eql(agent.owner);
+        return canRestore(record, agent);
+    }
     pub fn prepare(service: *runtime.Service, kind: Kind, source: ?identity.ConversationId, target: identity.AgentId) !Command {
         const runner = service.runnerFor(target) orelse return error.AgentNotFound;
         if (runner.agent.role != .attached) return error.ChildRequiresParent;
@@ -32,8 +48,14 @@ pub const Command = struct {
             if (kind == .restore) {
                 if (record.binding != null or record.ending != null) return error.BindingConflict;
                 if (!record.recoverable or record.history.failure != null) return error.ConversationNotRecoverable;
-                if (record.closed_revision == null and record.parent == null) return error.MissingEndReceipt;
-            } else command.pinned = try service.store.pinFork(record.id);
+                if (!canRestore(record, runner.agent)) return error.RestoreEnvironmentChanged;
+            } else {
+                command.text_only = kind == .copy_use and !sameLiveEnvironment(record, runner.agent);
+                command.pinned = if (command.text_only)
+                    try service.store.pinTextFork(record.id, runner.agent.owner)
+                else
+                    try service.store.pinFork(record.id);
+            }
         }
         if (command.previous) |ticket| if (kind != .copy and service.store.find(ticket.conversation).?.ending != null) {
             command.deinit();
@@ -42,11 +64,12 @@ pub const Command = struct {
         return command;
     }
     pub fn needsConfirmation(self: Command) bool {
-        return self.previous != null and self.kind != .copy;
+        return self.text_only or (self.previous != null and self.kind != .copy);
     }
     /// The host's completed Turn owns this canonical prefix. Freeze it before
     /// confirmation, using the same End/use-copy transaction as the list.
     pub fn selectCheckpoint(self: *Command, store: *lifecycle.Store, turn: u64, messages: []const @import("provider.zig").Message) !void {
+        if (self.text_only) return error.RestoreEnvironmentChanged;
         const pin = if (self.pinned) |*value| value else return error.NoStableCheckpoint;
         const source = store.find(pin.source) orelse return error.ConversationNotFound;
         if (source.content_revision != pin.revision) return error.CheckpointChanged;
@@ -81,7 +104,7 @@ pub const Command = struct {
         // stop somebody's current task or acquire a second writer.
         if (self.kind == .restore) {
             const source = service.store.find(self.source.?) orelse return error.ConversationNotFound;
-            if (source.binding != null or source.ending != null or source.revision != self.source_revision or source.content_revision != self.source_content_revision) return error.BindingChanged;
+            if (source.revision != self.source_revision or source.content_revision != self.source_content_revision or !canRestore(source, runner.agent)) return error.BindingChanged;
         }
         if (self.previous) |ticket| if (runner.agent.current != null) {
             try service.endConversation(ticket, self.operation);

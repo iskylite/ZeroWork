@@ -28,11 +28,10 @@ test "fullscreen titlebar leaves native controls outside the expanded workspace"
 const Hook = struct {
     cx: *ui.Cx,
     bar: *ui.Node,
-    leading_column: f32 = 0,
     chrome: Chrome = .{ .native_controls_count = 3 },
     fn run(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
         const self: *@This() = @ptrCast(@alignCast(raw));
-        return if (styles.syncWorkspaceChrome(self.cx.allocator, self.bar, self.chrome, true, self.leading_column)) .needs_layout else .done;
+        return if (styles.syncWorkspaceChrome(self.cx.allocator, self.bar, self.chrome, true)) .needs_layout else .done;
     }
     fn frame(self: *@This()) void {
         self.cx.frame_count += 1;
@@ -92,21 +91,13 @@ test "collapsed workspace retains children focus and window isolation across ful
     try std.testing.expectEqual(tab_id, controls.children.items[0].id);
     try std.testing.expectEqual(tab, cx.focused_node.?);
     try std.testing.expectEqual(@as(f32, 96), other_bar.style.padding.left);
-    try std.testing.expect(!styles.syncWorkspaceChrome(allocator, bar, hook.chrome, true, 0));
+    try std.testing.expect(!styles.syncWorkspaceChrome(allocator, bar, hook.chrome, true));
     hook.chrome = .{ .native_controls_count = 3 };
     cx.setViewport(1440, 900);
     hook.frame();
     try std.testing.expectApproxEqAbs(styles.outer + 96, tab.globalRect().x, 0.01);
     try std.testing.expectEqual(tab, cx.focused_node.?);
     try std.testing.expectEqual(tab_id, controls.children.items[0].id);
-    // An AI page can supply its own leading conversation column in place of
-    // the host sidebar. Collapsing it must not collapse the traffic-light inset.
-    hook.leading_column = 250;
-    hook.frame();
-    try std.testing.expectApproxEqAbs(styles.outer + 250, tab.globalRect().x, 0.01);
-    hook.leading_column = 0;
-    hook.frame();
-    try std.testing.expectApproxEqAbs(styles.outer + 96, tab.globalRect().x, 0.01);
     // The second window deliberately has no tabs; its own fullscreen state
     // still changes the title inset independently.
     other.chrome = .{ .fullscreen = true };

@@ -2,10 +2,10 @@
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
 import {createServer} from 'node:http';
-import {mkdtemp,mkdir,writeFile,readFile,open,copyFile,realpath} from 'node:fs/promises';
+import {mkdtemp,mkdir,writeFile,readFile,open,copyFile,realpath,rm} from 'node:fs/promises';
 import {join,resolve} from 'node:path';
 import * as h from '../zig-out/share/zenit/harness/client.ts';
-const out=resolve(process.argv[2]??'dist/ui-acceptance/ai-conversation-revision-20261027');await mkdir(out,{recursive:true});
+const out=resolve(process.argv[2]??'/private/tmp/zw-ai-conversation-evidence');await mkdir(out,{recursive:true});
 const manifest=process.env.ZW_AI_TEST_BINARY?{binary:resolve(process.env.ZW_AI_TEST_BINARY)}:JSON.parse(await readFile('dist/ui-check-build.json','utf8'));
 const binary=manifest.binary??join(manifest.bundle_path,'Contents/MacOS/ZeroWork');
 await writeFile(join(out,'build-manifest.json'),JSON.stringify(manifest,null,2));
@@ -140,10 +140,10 @@ try{
  held.end(usage(23,13)+'data: [DONE]\n\n');held=null;
  await absence('ai.stop');
  const doneRow=await visible('ai.turn.complete'),copyButton=await visible('ai.turn.copy'),forkButton=await visible('ai.turn.fork');
- assert.equal((await visible('ai.turn.label')).text,'～回合结束～');
+ assert.equal((await visible('ai.turn.label')).text,'回合结束');
  assert.equal((await h.query('ai.turn.wave.glyph')).length,0);
  assert.equal(nodeText(await visible('ai.turn.tokens')),'用量明细');
- assert(copyButton.rect.x<doneRow.rect.x+450);assert(forkButton.rect.x<doneRow.rect.x+500);assert(Math.abs(copyButton.rect.y-forkButton.rect.y)<1);assert.equal((await visible('ai.turn.logo')).rect.w,16);
+ assert(copyButton.rect.x<doneRow.rect.x+450);assert(forkButton.rect.x<doneRow.rect.x+500);assert(Math.abs(copyButton.rect.y-forkButton.rect.y)<1);assert.equal((await visible('ai.turn.logo')).rect.w,14);
  report.checks.push('Completed lifecycle row uses the latest AI logo, a usage details action and left-aligned dot-separated actions');
  await cap('05-first-complete');await click('ai.turn.tokens');
  assert.equal(nodeText(await visible('ai.turn.usage.total')),'本回合累计用量54 Token');
@@ -216,5 +216,5 @@ try{
 
  assert.ifError(fixtureError);report.viewport={width:1440,height:1000};report.backing_scale=2;report.status='passed';
 }catch(error){report.status='failed';report.error=String(error);await cap('failure').catch(()=>{});process.exitCode=1;}
-finally{if(planning)planning.res.end();if(held)held.end();server.closeAllConnections();await new Promise<void>(done=>server.close(()=>done()));app.kill('SIGTERM');if(app.exitCode===null&&app.signalCode===null)await new Promise(done=>app.once('close',done));await log.close();report.requests=requests;await writeFile(join(out,'report.json'),JSON.stringify(report,null,2));}
+finally{if(planning)planning.res.end();if(held)held.end();server.closeAllConnections();await new Promise<void>(done=>server.close(()=>done()));app.kill('SIGTERM');if(app.exitCode===null&&app.signalCode===null)await new Promise(done=>app.once('close',done));await log.close();report.requests=requests;await writeFile(join(out,'report.json'),JSON.stringify(report,null,2));await rm(isolated,{recursive:true,force:true});}
 console.log(JSON.stringify({status:report.status,error:report.error,checks:report.checks,out}));

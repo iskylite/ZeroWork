@@ -18,7 +18,7 @@ pub const DiffAccess = struct {
     turn_id: u64,
     records: []const *@import("../ai/tool_results.zig").Record,
 };
-pub const ConversationAction = union(enum) { new_chat, history, preview: u64, choose_workspace: WorkspaceTicket, reference_workspace_file: WorkspaceText.Selection };
+pub const ConversationAction = union(enum) { new_chat, history, preview: u64, pin: struct { id: u64, value: bool }, delete: u64, choose_workspace: WorkspaceTicket, reference_workspace_file: WorkspaceText.Selection };
 pub const ConversationActions = struct {
     context: *anyopaque,
     invoke: *const fn (*anyopaque, identity.SessionHandle, ConversationAction) void,
@@ -45,6 +45,8 @@ pub const Slot = struct {
     actions: ?ConversationActions = null,
     shown: [visible_conversation_limit]u64 = undefined,
     shown_count: usize = 0,
+    projected: [visible_conversation_limit]u64 = undefined,
+    projected_count: usize = 0,
     next: ?*Slot = null,
 };
 
@@ -91,8 +93,14 @@ pub fn observeConversation(owner: identity.SessionHandle, id: u64) []const u64 {
 
 pub fn setConversations(owner: identity.SessionHandle, title: []const u8, rows: []const workspace_shell.Conversation, actions: ConversationActions) !void {
     const slot = lookup(owner) orelse return;
-    slot.actions = actions;
     if (slot.set_conversations) |set| try set(slot.context, title, rows, actions.can_open_global_history);
+    slot.actions = actions;
+    slot.projected_count = 0;
+    for (rows[0..@min(rows.len, slot.projected.len)]) |row| {
+        const id = @import("std").fmt.parseInt(u64, row.id, 10) catch continue;
+        slot.projected[slot.projected_count] = id;
+        slot.projected_count += 1;
+    }
 }
 
 pub fn setWorkspace(owner: identity.SessionHandle, ticket: ?WorkspaceTicket, source: ?WorkspacePreview.Source) void {
@@ -106,9 +114,15 @@ pub fn setWorkspaceWithDiff(owner: identity.SessionHandle, ticket: ?WorkspaceTic
 pub fn dispatch(slot: *Slot, action: ConversationAction) void {
     // A retired view cannot address a replacement, even for the same handle.
     if (lookup(slot.owner) != slot) return;
-    if (action == .preview) {
-        for (slot.shown[0..slot.shown_count]) |id| {
-            if (id == action.preview) break;
+    const requested: ?u64 = switch (action) {
+        .preview => |id| id,
+        .pin => |pin| pin.id,
+        .delete => |id| id,
+        else => null,
+    };
+    if (requested) |id| {
+        for (slot.projected[0..slot.projected_count]) |visible| {
+            if (visible == id) break;
         } else return;
     }
     if (slot.actions) |actions| {
@@ -188,7 +202,7 @@ test "conversation rail accepts only visible-owner IDs from the still-mounted re
                 .new_chat => self.new_count += 1,
                 .history => self.history_count += 1,
                 .preview => |id| self.preview = id,
-                .choose_workspace, .reference_workspace_file => {},
+                .pin, .delete, .choose_workspace, .reference_workspace_file => {},
             }
         }
     };
@@ -214,6 +228,8 @@ test "conversation rail accepts only visible-owner IDs from the still-mounted re
     try std.testing.expectEqual(@as(usize, 1), probe.history_count);
     try std.testing.expectEqualSlices(u64, &.{11}, observeConversation(owner, 11));
     try std.testing.expectEqualSlices(u64, &.{22}, observeConversation(newer, 22));
+    try setConversations(owner, "", &.{.{ .id = "11", .title = "" }}, standalone_hooks);
+    try setConversations(newer, "", &.{.{ .id = "22", .title = "" }}, hooks);
     dispatch(&a, .{ .preview = 22 });
     try std.testing.expectEqual(@as(u64, 0), probe.preview);
     dispatch(&a, .{ .preview = 11 });
@@ -226,6 +242,7 @@ test "conversation rail accepts only visible-owner IDs from the still-mounted re
     const recent = observeConversation(newer, 103);
     try std.testing.expectEqual(@as(usize, visible_conversation_limit), recent.len);
     try std.testing.expectEqual(@as(u64, 103), recent[0]);
+    try setConversations(newer, "", &.{.{ .id = "103", .title = "" }}, hooks);
     dispatch(&b, .{ .preview = 22 });
     try std.testing.expectEqual(@as(u64, 11), probe.preview);
     var replacement: Slot = .{ .owner = owner, .center = &node, .context = &probe, .set_badge = Probe.setBadge, .set_host = Probe.setHost };

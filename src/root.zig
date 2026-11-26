@@ -32,6 +32,7 @@ test {
     _ = ai_session_runtime;
     _ = @import("file_workspace_icons_tests.zig");
     _ = @import("ui/ai_workspace_shell_tests.zig");
+    _ = @import("ui/ai_dock_slot.zig");
     _ = @import("ui/mascot_island.zig");
     _ = @import("ai/host_recall.zig");
     _ = @import("ai/swarm_wake.zig");

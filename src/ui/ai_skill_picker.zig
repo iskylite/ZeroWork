@@ -37,6 +37,18 @@ pub const Shortcut = enum {
             .boost => "强化智能体编排",
         };
     }
+    fn glyph(self: Shortcut) ui.SvgAsset {
+        return switch (self) {
+            .skill => ui.icons.sparkles,
+            .model => ui.icons.bot,
+            .session => ui.icons.link,
+            .permission => ui.icons.shield,
+            .execution => ui.icons.terminal,
+            .auto => ui.icons.wand_sparkles,
+            .swarm => ui.icons.users,
+            .boost => ui.icons.zap,
+        };
+    }
     fn testId(self: Shortcut) []const u8 {
         return switch (self) {
             .skill => "ai.skill_picker.command",
@@ -56,12 +68,10 @@ pub const Actions = struct {
     available: *const fn (*anyopaque, u64, Shortcut) bool,
     open: *const fn (*anyopaque, u64, Shortcut) void,
 };
-const row_height: f32 = 32;
-const row_gap: f32 = 4;
-const padding: f32 = 6;
-const panel_width: f32 = 320;
+const row_height = S.completion_row_height;
+const row_gap = S.completion_row_gap;
+const padding = S.completion_padding;
 const max_rows = 6;
-const max_height = padding * 2 + row_height * max_rows + row_gap * (max_rows - 1);
 
 fn menu(line: []const u8) ?Menu {
     if (line.len == 0) return null;
@@ -80,6 +90,7 @@ pub fn isIncomplete(text: []const u8) bool {
 
 pub const View = struct {
     cx: *ui.Cx,
+    composer: *ui.Node,
     input: ui.widgets.input.TextareaResult,
     on_change: ui.Handler([]const u8),
     popup: ui.widgets.popover.PopoverResult,
@@ -94,31 +105,32 @@ pub const View = struct {
     conversation: ?u64 = null,
     reveal_selection: bool = false,
 
-    pub fn mount(cx: *ui.Cx, scope: *ui.Scope, input: ui.widgets.input.TextareaResult, on_change: ui.Handler([]const u8)) !*View {
-        const popup = try ui.widgets.Popover(.{
-            .trigger = .manual,
-            .anchor = .{ .node = input.wrapper },
-            .position = .top_start,
-            .offset = .{ .static = 6 },
-            .width = panel_width,
-            .max_height = max_height,
-            .constrain_width_to_viewport = true,
-            .shift_main_axis = true,
-            .close_on_escape = false,
-        }).mount(scope, cx);
+    pub fn mount(cx: *ui.Cx, scope: *ui.Scope, composer: *ui.Node, input: ui.widgets.input.TextareaResult, on_change: ui.Handler([]const u8)) !*View {
+        const popup = try ui.widgets.Popover(S.completionPopover(composer)).mount(scope, cx);
         popup.wrapper.setStyleInline(cx.allocator, S.wrapper());
         popup.chrome.meta.ownership.meta.test_id = "ai.skill_picker";
+        popup.chrome.setStyleInline(cx.allocator, S.completionPanel(cx.viewport));
         const scroll = try ui.widgets.ScrollArea(.{ .direction = .vertical, .background = ui.Color.TRANSPARENT, .rubber_band_y = false }).mount(popup.scope, cx);
         scroll.container.setStyleInline(cx.allocator, S.models());
         scroll.content.setStyleInline(cx.allocator, .{ .width = .fill(), .direction = .column, .gap = row_gap });
         try popup.content.appendChild(cx.allocator, scroll.container);
-        const self = try scope.createState(View, .{ .cx = cx, .input = input, .on_change = on_change, .popup = popup, .scroll = scroll });
+        const self = try scope.createState(View, .{ .cx = cx, .composer = composer, .input = input, .on_change = on_change, .popup = popup, .scroll = scroll });
+        try cx.addAfterLayoutHook(self, afterLayout);
         try scope.onCleanup(View, self, cleanup);
         return self;
     }
 
     fn cleanup(self: *View) void {
+        self.cx.removeAfterLayoutHook(self);
         self.rows.deinit(self.cx.allocator);
+    }
+
+    fn afterLayout(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
+        const self: *View = @ptrCast(@alignCast(raw));
+        if (!self.popup.open.?.peek()) return .done;
+        const count: f32 = @floatFromInt(@min(@max(self.rows.items.len, 1), max_rows));
+        const height = padding * 2 + row_height * count + row_gap * (count - 1);
+        return if (S.layoutCompletion(self.cx, self.popup.chrome, self.composer, height)) .needs_layout else .done;
     }
 
     pub fn refresh(self: *View, conversation: ?u64, revision: u64, skills: []const Skill, allowed_ids: ?[]const []const u8) !void {
@@ -178,14 +190,7 @@ pub const View = struct {
         }
         self.selected = 0;
         self.reveal_selection = true;
-        const count: f32 = @floatFromInt(@min(@max(self.rows.items.len, 1), max_rows));
-        const height = padding * 2 + row_height * count + row_gap * (count - 1);
-        var style = S.panel(.attachment, self.cx.viewport);
-        style.width = .{ .px = @min(panel_width, @max(0, self.cx.viewport.width - 16)) };
-        style.height = .{ .px = height };
-        style.min_height = 0;
-        style.padding = ui.Padding.all(padding);
-        self.popup.chrome.setStyleInline(self.cx.allocator, style);
+        S.paintCompletionPanel(self.cx, self.popup.chrome);
         self.active = key;
         self.editor_revision = self.input.state.doc.revision;
         self.popup.open.?.set(true);
@@ -193,7 +198,7 @@ pub const View = struct {
     }
 
     fn emptyHint(self: *View, hint: []const u8) !void {
-        const label = try ui.text(self.cx, hint, S.text(13, 400, 20, true));
+        const label = try ui.text(self.cx, hint, S.completionHint());
         label.setStyleInline(self.cx.allocator, .{ .height = .{ .px = row_height }, .width = .fill(), .padding = .{ .left = 8, .top = 6 } });
         try self.scroll.content.appendChild(self.cx.allocator, label);
     }
@@ -221,21 +226,13 @@ pub const View = struct {
         }
     };
 
-    fn rowStyle(selected: bool) ui.BoxStyle {
-        var style = S.option(row_height, selected);
-        style.padding = .{ .left = 8, .right = 8 };
-        style.gap = 8;
-        if (!selected) style.background = ui.Color.TRANSPARENT;
-        return style;
-    }
-
     fn addRow(self: *View, scope: *ui.Scope, name: []const u8, shortcut: ?Shortcut) !void {
         try self.rows.ensureUnusedCapacity(self.cx.allocator, 1);
         const selected = self.rows.items.len == 0;
         const row = try scope.createState(Row, .{
             .view = self,
             .name = try scope.createText(name, .{}),
-            .style = try scope.createSignal(ui.BoxStyle, rowStyle(selected)),
+            .style = try scope.createSignal(ui.BoxStyle, S.completionRow(selected)),
             .shortcut = shortcut,
         });
         const button = try ui.widgets.Button(.{
@@ -246,17 +243,21 @@ pub const View = struct {
             .on_click = self.cx.on(Row, row, Row.click),
         }).mount(scope, self.cx);
         for (button.children.items) |child| child.setDisplay(.none);
+        button.setStyleInline(self.cx.allocator, .{ .justify = .start });
         errdefer self.cx.destroyDetached(button);
         button.meta.ownership.meta.test_id = if (shortcut) |item| item.testId() else "ai.skill_picker.skill";
         if (button.behavior.interaction.a11y) |*attrs| attrs.selected = selected;
-        try button.appendChild(self.cx.allocator, try ui.iconTint(self.cx, ui.icons.sparkles, S.theme.current().accent, S.icon(16)));
-        const label = try ui.text(self.cx, "", S.text(13, 400, 20, false));
+        try button.appendChild(self.cx.allocator, try ui.iconTint(self.cx, if (shortcut) |item| item.glyph() else ui.icons.sparkles, S.theme.current().fg_2, S.icon(14)));
+        const label = try ui.text(self.cx, "", S.completionLabel());
         try label.setTextContent(self.cx.allocator, name);
-        label.setStyleInline(self.cx.allocator, S.flexibleLabel(20));
+        label.setStyleInline(self.cx.allocator, S.flexibleLabel(17));
+        label.setHitTestVisible(false);
         try button.appendChild(self.cx.allocator, label);
         if (shortcut) |item| {
-            try button.appendChild(self.cx.allocator, try ui.text(self.cx, item.hint(), S.text(11, 400, 16, true)));
-            try button.appendChild(self.cx.allocator, try ui.iconTint(self.cx, ui.icons.get("chevron-right").?, S.theme.current().fg_2, S.icon(14)));
+            const hint = try ui.text(self.cx, item.hint(), S.completionHint());
+            hint.setHitTestVisible(false);
+            try button.appendChild(self.cx.allocator, hint);
+            try button.appendChild(self.cx.allocator, try ui.iconTint(self.cx, ui.icons.chevron_right, S.theme.current().fg_2, S.icon(12)));
         }
         try self.scroll.content.appendChild(self.cx.allocator, button);
         row.button = button;
@@ -322,7 +323,7 @@ pub const View = struct {
                 self.selected = if (key.key == .up) previous -| 1 else @min(previous + 1, self.rows.items.len - 1);
                 for ([_]usize{ previous, self.selected }) |index| {
                     const row = self.rows.items[index];
-                    row.style.set(rowStyle(index == self.selected));
+                    row.style.set(S.completionRow(index == self.selected));
                     if (row.button.behavior.interaction.a11y) |*attrs| attrs.selected = index == self.selected;
                 }
                 self.reveal_selection = true;

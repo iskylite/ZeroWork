@@ -42,7 +42,7 @@ python3 scripts/verify_vendor_zenit.py
 if [ ! -s vendor/libssh2/src/.libs/libssh2.a ] || [ ! -s vendor/mbedtls/library/libmbedcrypto.a ]; then
   sh scripts/build_ssh_deps.sh
 fi
-zig build -j2 -Doptimize=ReleaseFast --prefix "$STAGING/build" --summary all
+zig build -j2 -Doptimize=ReleaseFast -Dtest-mode=false --prefix "$STAGING/build" --summary all
 mkdir -p "$APP/Contents/Helpers" "$APP/Contents/MacOS" "$APP/Contents/Resources" "$OUT"
 cp "$STAGING/build/bin/ZeroWorkUpdater" "$APP/Contents/Helpers/ZeroWorkUpdater"
 cp "$STAGING/build/bin/zerowork" "$APP/Contents/MacOS/ZeroWork"

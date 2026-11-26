@@ -141,6 +141,68 @@ pub fn attachmentRow() ui.BoxStyle {
     result.border = .{ .width = 0, .radius = 0 };
     return result;
 }
+
+// / commands, skills and @ targets share the same borderless list recipe.
+// Placement tracks the actual composer node, not the text area or a chip.
+pub const completion_offset: f32 = 6;
+pub const completion_padding: f32 = 6;
+pub const completion_row_height: f32 = 30;
+pub const completion_row_gap: f32 = 3;
+
+pub fn completionPopover(composer: *ui.Node) ui.widgets.popover.PopoverProps {
+    return .{
+        .trigger = .manual,
+        .anchor = .{ .node = composer },
+        .position = .top_start,
+        .offset = .{ .static = completion_offset },
+        .match_trigger_width = true,
+        .constrain_width_to_viewport = true,
+        .viewport_padding = 0, // The composer already owns both horizontal insets.
+        .flip = false,
+        .close_on_escape = false, // Keep Escape in the owning composer's key handling.
+        .exit_transition = .none,
+    };
+}
+
+pub fn completionPanel(viewport: ui.Size) ui.BoxStyle {
+    var style = panel(.attachment, viewport);
+    style.height = .{ .px = completion_padding * 2 + completion_row_height };
+    style.min_height = 0;
+    style.padding = ui.Padding.all(completion_padding);
+    style.gap = completion_row_gap;
+    return style;
+}
+
+pub fn paintCompletionPanel(cx: *ui.Cx, chrome: *ui.Node) void {
+    const style = completionPanel(cx.viewport);
+    chrome.setStyleInline(cx.allocator, .{ .background = style.background, .glass = style.glass, .border = style.border, .shadow = style.shadow });
+}
+
+/// Even while dragging or resizing a window, preserve the gap above the
+/// composer and scroll the list rather than letting the panel overlap input.
+pub fn layoutCompletion(cx: *ui.Cx, chrome: *ui.Node, composer: *ui.Node, desired_height: f32) bool {
+    const room = @max(1, composer.globalRect().y - completion_offset - 8);
+    const next = @min(desired_height, room);
+    if (chrome.style.height == .px and @abs(chrome.style.height.px - next) < 0.1) return false;
+    chrome.setStyleInline(cx.allocator, .{ .height = .{ .px = next } });
+    return true;
+}
+
+pub fn completionRow(active: bool) ui.BoxStyle {
+    var style = option(completion_row_height, active);
+    style.padding = .{ .left = 8, .right = 8 };
+    style.gap = 8;
+    if (!active) style.background = ui.Color.TRANSPARENT;
+    return style;
+}
+
+pub fn completionLabel() ui.TextStyle {
+    return text(11.5, 500, 17, false);
+}
+
+pub fn completionHint() ui.TextStyle {
+    return text(10.5, 400, 16, true);
+}
 pub fn sliderArea() ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 28 }, .direction = .column, .flex_shrink = 0 };
 }

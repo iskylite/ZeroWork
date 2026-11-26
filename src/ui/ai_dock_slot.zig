@@ -7,22 +7,37 @@ const theme = @import("app_theme.zig");
 pub const min_width: f32 = 360;
 pub const default_width: f32 = 468;
 pub const gap: f32 = 12;
+/// Even at the window minimum, reserve room for the terminal and the dock's
+/// real controls rather than letting an oversized left rail clip them.
+pub const min_row_width: f32 = 592;
+const max_preference_width: f32 = 2400;
 
 pub const Hooks = struct {
     context: *anyopaque,
-    resize: *const fn (*anyopaque, f32) void,
     persist: *const fn (*anyopaque, f32) void,
 };
 
+const WidthRange = struct { min: f32, max: f32 };
+
+fn widthRange(row_width: f32, window_width: f32) WidthRange {
+    // Ask the current row (after the host rail has taken its space), not the
+    // window, how much room can be shared by the terminal and the assistant.
+    const terminal_room = @min(260, row_width * 0.4);
+    const max = @max(0, @min(@max(min_width, window_width * 0.5), row_width - gap - terminal_room));
+    return .{ .min = @min(min_width, max), .max = max };
+}
+
 pub const View = struct {
     cx: *ui.Cx,
-    scope: *ui.Scope,
     hooks: Hooks,
+    parent: *ui.Node,
     root: *ui.Node,
     card_slot: *ui.Node,
     grip: *ui.Node,
-    width: f32 = default_width,
+    preferred_width: f32 = default_width,
+    effective_width: f32 = default_width,
     drag_start: f32 = default_width,
+    drag_restore: f32 = default_width,
     dragging: bool = false,
 
     pub fn mount(cx: *ui.Cx, scope: *ui.Scope, parent: *ui.Node, hooks: Hooks, initial: f32) !*View {
@@ -35,33 +50,62 @@ pub const View = struct {
         const card_slot = try ui.box(cx, .{ .height = .fill(), .min_width = 0, .direction = .column, .flex_shrink = 0 }, .{});
         card_slot.meta.ownership.meta.test_id = "workspace.ai_dock.slot";
         try root.appendChild(cx.allocator, card_slot);
-        const self = try scope.createState(View, .{ .cx = cx, .scope = scope, .hooks = hooks, .root = root, .card_slot = card_slot, .grip = grip, .width = @max(min_width, initial) });
+        const self = try scope.createState(View, .{ .cx = cx, .hooks = hooks, .parent = parent, .root = root, .card_slot = card_slot, .grip = grip });
         _ = try ui.interaction.drag.Binding.attach(scope, cx, grip, .{ .axis = .horizontal, .activation_distance = 1, .active_cursor = .ew_resize }, View.drag, self);
         try parent.appendChild(cx.allocator, root);
+        self.setWidth(initial);
+        try cx.addAfterLayoutHook(self, View.afterLayout);
+        errdefer cx.removeAfterLayoutHook(self);
+        try scope.onCleanup(View, self, View.cleanup);
         return self;
     }
 
     pub fn setOpen(self: *View, open: bool) void {
         self.root.setDisplay(if (open) .flex else .none);
-        self.applyWidth(self.width);
+        if (open) _ = self.applyWidth();
     }
 
     pub fn setWidth(self: *View, value: f32) void {
-        self.width = value;
-        self.applyWidth(value);
+        self.preferred_width = if (std.math.isFinite(value)) std.math.clamp(value, min_width, max_preference_width) else default_width;
+        _ = self.applyWidth();
     }
 
-    fn applyWidth(self: *View, value: f32) void {
-        const max = @max(min_width, self.cx.viewport.width * 0.5);
-        self.width = std.math.clamp(value, min_width, max);
-        const width: ui.Sizing = .{ .px = self.width };
-        if (!std.meta.eql(self.card_slot.style.width, width))
+    fn limits(self: *const View) WidthRange {
+        const parent_width = self.parent.globalRect().w;
+        const window_width = self.cx.viewport.width;
+        return widthRange(if (parent_width > 0) parent_width else window_width, window_width);
+    }
+
+    fn applyWidth(self: *View) bool {
+        const range = self.limits();
+        self.effective_width = std.math.clamp(self.preferred_width, range.min, range.max);
+        self.grip.setHitTestVisible(range.max - range.min > 0.5);
+        const width: ui.Sizing = .{ .px = self.effective_width };
+        const root_width: ui.Sizing = .{ .px = self.effective_width + gap };
+        var changed = false;
+        if (!std.meta.eql(self.root.style.width, root_width)) {
+            self.root.setStyleInline(self.cx.allocator, .{ .width = root_width });
+            changed = true;
+        }
+        if (!std.meta.eql(self.card_slot.style.width, width)) {
             self.card_slot.setStyleInline(self.cx.allocator, .{ .width = width });
+            changed = true;
+        }
+        return changed;
+    }
+
+    fn afterLayout(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
+        const self: *View = @ptrCast(@alignCast(raw));
+        return if (self.root.style.display != .none and self.applyWidth()) .needs_layout else .done;
+    }
+
+    fn cleanup(self: *View) void {
+        self.cx.removeAfterLayoutHook(self);
     }
 
     pub fn attach(self: *View, card: *ui.Node) !void {
         try self.card_slot.appendChild(self.cx.allocator, card);
-        self.applyWidth(self.width);
+        _ = self.applyWidth();
         card.setStyleInline(self.cx.allocator, .{
             .position = .relative,
             .inset = .{ .left = .{ .px = 0 }, .top = .{ .px = 0 } },
@@ -87,22 +131,33 @@ pub const View = struct {
         switch (event.phase) {
             .start => {
                 self.dragging = true;
-                self.drag_start = self.width;
+                self.drag_start = self.effective_width;
+                self.drag_restore = self.preferred_width;
             },
             .move => {
-                self.applyWidth(self.drag_start - event.delta.x);
-                self.hooks.resize(self.hooks.context, self.width);
+                const range = self.limits();
+                if (range.max - range.min <= 0.5) return;
+                self.setWidth(std.math.clamp(self.drag_start - event.delta.x, range.min, range.max));
                 self.cx.requestRedraw();
             },
             .end => {
                 self.dragging = false;
-                self.hooks.persist(self.hooks.context, self.width);
+                if (@abs(self.preferred_width - self.drag_restore) > 0.5)
+                    self.hooks.persist(self.hooks.context, self.preferred_width);
             },
             .cancel => {
                 self.dragging = false;
-                self.applyWidth(self.drag_start);
-                self.hooks.resize(self.hooks.context, self.width);
+                self.setWidth(self.drag_restore);
             },
         }
     }
 };
+
+test "dock budget respects the actual row and retains terminal room" {
+    const small = widthRange(592, 860);
+    try std.testing.expectApproxEqAbs(@as(f32, 343.2), small.max, 0.01);
+    try std.testing.expectEqual(small.min, small.max);
+    const wide = widthRange(1154, 1440);
+    try std.testing.expect(wide.min <= default_width and wide.max >= default_width);
+    try std.testing.expect(wide.max + gap < 1154);
+}

@@ -77,7 +77,7 @@ pub fn regionIcon() ui.Style {
     return .{ .width = .{ .px = 18 }, .height = .{ .px = 18 }, .flex_shrink = 0 };
 }
 pub fn ownerPill(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .{ .fit = .{} }, .max_width = 160, .height = .{ .px = 20 }, .flex_shrink = 0, .direction = .row, .align_items = .center, .padding = .{ .left = 8, .right = 8 }, .background = theme.popupInset(), .border = .{ .radius = 8 }, .overflow = .hidden };
+    return .{ .width = .{ .fit = .{} }, .min_width = 16, .max_width = 160, .height = .{ .px = 20 }, .flex_shrink = 1, .direction = .row, .align_items = .center, .padding = .{ .left = 8, .right = 8 }, .background = theme.popupInset(), .border = .{ .radius = 8 }, .overflow = .hidden, .overflow_hidden = true };
 }
 pub fn userBubbleMaxWidth(content_width: f32) f32 {
     return @max(0, content_width) * 0.75;
@@ -102,7 +102,7 @@ pub fn conversation(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .direction = .column, .gap = 6, .padding = .{ .left = 14, .right = 14 }, .height = .{ .fit = .{} }, .flex_shrink = 0 };
 }
 pub fn turnProcessButton() ui.BoxStyle {
-    return .{ .height = .{ .px = 24 }, .padding = .{}, .gap = 4, .font_size = 14, .font_weight = 500, .text_color = theme.current().fg_1 };
+    return .{ .height = .{ .px = 24 }, .padding = .{}, .gap = 5, .font_size = turn_metadata_font_size, .font_weight = 500, .text_color = theme.current().fg_2 };
 }
 pub fn markdownSectionGap(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 8 }, .flex_shrink = 0 };
@@ -142,6 +142,13 @@ pub fn assistantMessage() ui.BoxStyle {
 pub fn markdownOptions() ui.widgets.MarkdownOptions {
     return .{ .base_font_size = body_font_size, .code_font_size = 11, .text_color = theme.current().fg_1, .code_color = theme.current().fg_1, .code_bg = theme.popupInset(), .link_color = theme.current().accent_ink, .rule_color = theme.current().border, .heading_color = theme.current().fg_1, .paragraph_gap = 4, .line_height = body_line_height, .code_line_height = 16.0 / 11.0 };
 }
+pub fn tableMarkdownOptions() ui.widgets.MarkdownOptions {
+    // Dense tabular data stays compact when the surrounding answer is enlarged.
+    var options = markdownOptions();
+    options.base_font_size = 12.5;
+    options.line_height = 1.65;
+    return options;
+}
 
 pub const table_min_column_width: f32 = 40;
 pub const table_wrapped_column_min_width: f32 = 120;
@@ -163,13 +170,14 @@ pub fn tableCell(width: f32, is_header: bool, first_column: bool) ui.BoxStyle {
     };
 }
 
-pub const body_font_size: f32 = 12.5;
-pub const body_line_height: f32 = 1.65;
+pub const turn_metadata_font_size: f32 = 11;
+pub const body_font_size: f32 = 13.5;
+pub const body_line_height: f32 = 1.6;
 /// Zenit's Markdown renderer emits h1..h6 at `base_font_size * mdHeadingSizeMul(level)`,
 /// spanning 1.0×..1.4×. AI bubbles remap that whole range onto these two sizes so
 /// all six levels stay visually ordered with a compact per-line rhythm.
 pub const heading_scale_max: f32 = 1.4;
-pub const heading_font_size: f32 = 13;
+pub const heading_font_size: f32 = 14;
 pub const heading_max_font_size: f32 = 15.5;
 pub const heading_vertical_margin: f32 = 8;
 

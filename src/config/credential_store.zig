@@ -9,6 +9,7 @@ const default_service = "com.zerowork.app.credentials";
 var service: ?[:0]const u8 = null;
 var local_store: ?LocalStore = null;
 var local_mode: std.atomic.Value(bool) = .init(false);
+var pending_local_import: std.atomic.Value(bool) = .init(false);
 var startup_reserved: std.atomic.Value(bool) = .init(false);
 var startup_finished: std.Io.Event = .unset;
 var startup_failure: ?anyerror = null;
@@ -47,12 +48,16 @@ pub fn configureLocal(io: std.Io, directory: []const u8) !void {
     if (local_store != null) return error.CredentialScopeAlreadyConfigured;
     local_store = .{ .io = io, .directory = directory };
     local_mode.store(try local_store.?.isSelected(), .release);
+    pending_local_import.store(!usesLocal() and try local_store.?.hasUnmarkedReferences(validReference), .release);
 }
 fn local() !LocalStore {
     return local_store orelse error.CredentialScopeNotConfigured;
 }
 pub fn usesLocal() bool {
     return local_mode.load(.acquire);
+}
+pub fn hasPendingLocalImport() bool {
+    return pending_local_import.load(.acquire);
 }
 pub fn isUnlocked() bool {
     return if (builtin.is_test) true else usesLocal() or native.cached();
@@ -107,7 +112,8 @@ pub const Conversion = enum { complete, local_cleanup_pending };
 pub fn beginConversion(target: Storage) bool {
     if (startupPending()) return false;
     if (converting.cmpxchgStrong(false, true, .seq_cst, .seq_cst) != null) return false;
-    if (usesLocal() != (target == .local) and transactions.load(.seq_cst) == 0 and readers.load(.seq_cst) == 0) return true;
+    const can_switch = usesLocal() != (target == .local) or (target == .keychain and hasPendingLocalImport());
+    if (can_switch and transactions.load(.seq_cst) == 0 and readers.load(.seq_cst) == 0) return true;
     endConversion();
     return false;
 }
@@ -117,12 +123,129 @@ pub fn endConversion() void {
 pub fn convertToLocal() !void {
     if (builtin.is_test) return error.CredentialUnavailable;
     const target = try local();
-    try target.collect(&.{}, validReference);
-    try native.copyToLocal(try scope(), target);
-    for (pending_cleanup.items) |reference| try target.remove(&reference);
+    // Do not clear the target before authorization. Export into bounded memory
+    // first, then preflight every immutable reference before any local writes.
+    var incoming: LocalImport = .{};
+    defer incoming.deinit();
+    try native.copyToLocal(try scope(), &incoming);
+    try incoming.publish(target, pending_cleanup.items);
     try target.select();
     pending_cleanup.clearRetainingCapacity();
     local_mode.store(true, .release);
+    pending_local_import.store(false, .release);
+}
+
+const LocalImport = struct {
+    const Entry = struct { reference: [68]u8, value: []u8, created: bool = false };
+    entries: std.ArrayList(Entry) = .empty,
+    total: usize = 0,
+
+    fn deinit(self: *LocalImport) void {
+        for (self.entries.items) |entry| {
+            std.crypto.secureZero(u8, entry.value);
+            alloc.free(entry.value);
+        }
+        self.entries.deinit(alloc);
+    }
+    pub fn importValue(self: *LocalImport, reference: []const u8, value: []const u8) !void {
+        if (!validReference(reference)) return error.InvalidCredentialReference;
+        if (self.entries.items.len >= 16384 or value.len > 8 * 1024 * 1024 - self.total) return error.CredentialLimitExceeded;
+        try self.entries.ensureUnusedCapacity(alloc, 1);
+        self.entries.appendAssumeCapacity(.{ .reference = reference[0..68].*, .value = try alloc.dupe(u8, value) });
+        self.total += value.len;
+    }
+    fn publish(self: *LocalImport, target: LocalStore, retired: []const [68]u8) !void {
+        for (self.entries.items) |*entry| {
+            if (isRetired(retired, &entry.reference)) continue;
+            const prior = target.get(alloc, &entry.reference) catch |err| switch (err) {
+                error.CredentialMissing => continue,
+                else => return err,
+            };
+            defer {
+                std.crypto.secureZero(u8, prior);
+                alloc.free(prior);
+            }
+            if (!std.mem.eql(u8, prior, entry.value)) return error.CredentialAlreadyExists;
+        }
+        errdefer for (self.entries.items) |entry| {
+            if (entry.created) _ = target.removeIfEqual(&entry.reference, entry.value) catch false;
+        };
+        for (self.entries.items) |*entry| {
+            if (isRetired(retired, &entry.reference)) continue;
+            target.add(&entry.reference, entry.value) catch |err| switch (err) {
+                error.CredentialAlreadyExists => {
+                    try target.importValue(&entry.reference, entry.value);
+                    continue;
+                },
+                else => return err,
+            };
+            entry.created = true;
+        }
+    }
+};
+
+fn isRetired(retired: []const [68]u8, reference: *const [68]u8) bool {
+    for (retired) |*entry| if (std.mem.eql(u8, entry, reference)) return true;
+    return false;
+}
+
+test "credential import preserves unmarked values across cancellation conflict and restart" {
+    const io = std.testing.io;
+    const a = std.testing.allocator;
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    const directory = try temp.dir.realPathFileAlloc(io, ".", a);
+    defer a.free(directory);
+    const store: LocalStore = .{ .io = io, .directory = directory };
+    const legacy = "zw1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const other = "zw1_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const newer = "zw1_cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+    try std.testing.expect(!try store.isSelected());
+    try std.testing.expect(!try store.hasUnmarkedReferences(validReference));
+    try store.add(legacy, "one");
+    try std.testing.expect(!try store.isSelected());
+    try std.testing.expect(try store.hasUnmarkedReferences(validReference));
+    {
+        // A rejected/partial export never reaches publish.
+        var staged: LocalImport = .{};
+        defer staged.deinit();
+        try staged.importValue(other, "two");
+    }
+    try std.testing.expectError(error.CredentialMissing, store.get(a, other));
+    {
+        var staged: LocalImport = .{};
+        defer staged.deinit();
+        try staged.importValue(other, "two");
+        try staged.importValue(legacy, "different");
+        try std.testing.expectError(error.CredentialAlreadyExists, staged.publish(store, &.{}));
+    }
+    try std.testing.expectError(error.CredentialMissing, store.get(a, other));
+    const old = try store.get(a, legacy);
+    defer a.free(old);
+    try std.testing.expectEqualStrings("one", old);
+    {
+        var staged: LocalImport = .{};
+        defer staged.deinit();
+        try staged.importValue(legacy, "one");
+        try staged.importValue(other, "two");
+        try staged.publish(store, &.{});
+        try staged.publish(store, &.{}); // identical data is safe to retry
+    }
+    try std.testing.expect(try store.hasUnmarkedReferences(validReference));
+    try store.select();
+    try std.testing.expect(try store.isSelected());
+    try std.testing.expect(!try store.hasUnmarkedReferences(validReference));
+    try store.add(newer, "keep");
+    try std.testing.expect(try store.deselect());
+    try std.testing.expect(try store.deselect());
+    try std.testing.expect(try store.removeIfEqual(legacy, "one"));
+    try std.testing.expect(!try store.removeIfEqual(other, "obsolete"));
+    const remaining = try store.get(a, newer);
+    defer a.free(remaining);
+    try std.testing.expectEqualStrings("keep", remaining);
+    const reopened: LocalStore = .{ .io = io, .directory = directory };
+    try std.testing.expect(!try reopened.isSelected());
+    try std.testing.expect(!try reopened.hasUnmarkedReferences(validReference));
 }
 
 pub fn convertToKeychain() !Conversion {
@@ -150,10 +273,14 @@ pub fn convertToKeychain() !Conversion {
     try native.importVerified(try scope(), entries.items);
     const durable = try source.deselect();
     local_mode.store(false, .release);
+    pending_local_import.store(false, .release);
     pending_cleanup.clearRetainingCapacity();
     if (!durable) return .local_cleanup_pending;
-    source.collect(&.{}, validReference) catch return .local_cleanup_pending;
-    return .complete;
+    var complete = true;
+    for (entries.items) |entry| {
+        if (!(source.removeIfEqual(std.mem.span(entry.reference), entry.value[0..entry.length]) catch false)) complete = false;
+    }
+    return if (complete) .complete else .local_cleanup_pending;
 }
 fn scope() ![:0]const u8 {
     if (service) |s| return s;

@@ -129,6 +129,10 @@ pub const Host = struct {
                 if (record.draft) |text| state.draft = try self.allocator.dupe(u8, text);
                 const presentation = @import("conversation_presentation.zig");
                 state.history = try presentation.restoreHistory(self.allocator, record.presentation, record.last_turn, record.history.messages);
+                if (record.history_pinned) {
+                    try self.presentations.reserveHistoryPin(state.id, true);
+                    self.presentations.projectHistoryPin(state.id, true);
+                }
             }
         }
         self.local_file_reference_key = @import("../host/local_file_reference.zig").loadOrCreate(io.io(), dir) catch |err| blk: {

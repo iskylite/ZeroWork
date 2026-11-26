@@ -16,6 +16,9 @@ pub fn mountContent(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
             try section.iconActionWithValue("凭据存储", storage, "切换到本地存储…", ui.icons.lock, "settings.data.credential_local", .credential_local);
         }
         if (bound.hooks.read) |read| {
+            if (read(bound.hooks.context, .{ .section = "data", .key = "credential_import_pending" })) |value| {
+                if (value == .boolean and value.boolean) try section.iconAction("已有本地凭据", "导入到钥匙串…", ui.icons.lock, "settings.data.credential_import", .credential_keychain);
+            }
             if (read(bound.hooks.context, .{ .section = "data", .key = "config_path" })) |value| try readonlyPath(section, "配置文件", value.text);
             if (read(bound.hooks.context, .{ .section = "data", .key = "hosts_path" })) |value| try readonlyPath(section, "主机配置", value.text);
         }
