@@ -104,7 +104,7 @@ test "background SOCKS counts only actual registry owners and reports allocated 
     try std.testing.expectEqual(@as(?usize, 1), fixture.last_options.?.exit_index);
     try std.testing.expectEqual(@as(u16, 1080), fixture.last_options.?.listener.requested_port);
     try std.testing.expectEqual(@as(?u16, 1083), model.rows.items[0].local_port);
-    try std.testing.expectEqual(@as(u32, 2), model.rows.items[0].connections);
+    try std.testing.expectEqual(@as(u32, 2), model.rows.items[0].stats.?.connections_active);
     try std.testing.expectEqual(M.Phase.listening, model.rows.items[0].phase);
 }
 test "background SOCKS reconnect follows actual generation and rejects stale management callbacks" {
@@ -182,7 +182,8 @@ test "background SOCKS excludes mismatched registry source and stale listener ge
     _ = try model.refresh();
     try std.testing.expectEqual(M.Phase.starting, model.rows.items[0].phase);
     try std.testing.expectEqual(@as(?u16, null), model.rows.items[0].local_port);
-    try std.testing.expectEqual(@as(u32, 0), model.rows.items[0].connections);
+    try std.testing.expect(model.rows.items[0].stats == null);
+    try std.testing.expect(model.rows.items[0].bind127 == null);
     try std.testing.expectEqualStrings("原始主机", model.rows.items[0].name);
 }
 test "background SOCKS requires exposure approval before creating a native owner" {
@@ -297,7 +298,7 @@ test "background SOCKS attached list uses real count owner callbacks and theme r
     try view.update(&.{});
     frames(cx);
     try std.testing.expect(view.remote_entry.style.display == .none);
-    const rows: [1]M.Row = .{.{ .owner = owner, .source = asset, .name = "原始主机", .phase = .listening, .local_port = 1083, .connections = 2, .failure = null }};
+    const rows: [1]M.Row = .{.{ .owner = owner, .source = asset, .name = "原始主机", .phase = .listening, .local_port = 1083, .bind127 = true, .stats = .{ .connections_active = 2 }, .failure = null }};
     try view.update(&rows);
     frames(cx);
     try std.testing.expectEqualStrings("后台转发 ×1", view.count_text.get());
@@ -310,9 +311,11 @@ test "background SOCKS attached list uses real count owner callbacks and theme r
     try std.testing.expectEqual(@as(f32, 360), card.w);
     try std.testing.expect(card.x >= 0 and card.y >= 0 and card.x + card.w <= 900 and card.y + card.h <= 600);
     const row_node = find(view.popover.content, "socks.background.row").?;
-    try std.testing.expectEqual(@as(f32, 64), row_node.globalRect().h);
+    try std.testing.expectEqual(@as(f32, 62), row_node.globalRect().h);
     const status = find(view.popover.content, "socks.background.state").?;
-    try std.testing.expectEqualStrings(":1083 · 后台监听 · 2 个连接", status.getText().?.content);
+    try std.testing.expectEqualStrings("正在监听", status.getText().?.content);
+    try std.testing.expectEqualStrings("127.0.0.1:1083", find(row_node, "socks.background.endpoint").?.getText().?.content);
+    try std.testing.expectEqualStrings("#2", find(row_node, "socks.background.connections").?.getText().?.content);
     try std.testing.expect(ui.Color.eql(V.S.theme.current().ok_ink, status.getText().?.color));
     click(cx, find(view.popover.content, "socks.background.stop").?);
     try std.testing.expectEqual(@as(usize, 1), capture.count);
@@ -328,7 +331,7 @@ test "background SOCKS attached list uses real count owner callbacks and theme r
         try std.testing.expect(ui.Color.eql(V.S.theme.current().overlay, view.popover.content.getBackground()));
         try std.testing.expect(ui.Color.eql(V.S.theme.current().ok_ink, find(view.popover.content, "socks.background.state").?.getText().?.color));
     }
-    const second: M.Row = .{ .owner = .{ .session_id = @fromBackingInt(502) }, .source = .{ .id = @fromBackingInt(82) }, .name = "第二主机", .phase = .connecting, .local_port = null, .connections = 0, .failure = null };
+    const second: M.Row = .{ .owner = .{ .session_id = @fromBackingInt(502) }, .source = .{ .id = @fromBackingInt(82) }, .name = "第二主机", .phase = .connecting, .local_port = null, .failure = null };
     view.showAt(asset.id, view.remote_entry.globalRect());
     try view.update(&.{ rows[0], second });
     frames(cx);
@@ -344,4 +347,102 @@ test "background SOCKS attached list uses real count owner callbacks and theme r
     try view.update(&.{});
     frames(cx);
     try std.testing.expect(view.remote_entry.style.display == .none);
+}
+
+test "background SOCKS unified section keeps count hover and actions across traffic and scrolls independently of asset filter" {
+    V.S.theme.select(.light);
+    defer V.S.theme.select(.dark);
+    const cx = try ui.Cx.init(std.testing.allocator, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(800, 640);
+    cx.bindFrameClock();
+    cx.svg_textures.setLoader(.{ .load_fn = struct {
+        fn load(_: ?*anyopaque, _: []const u8, _: u32, _: u32) !u32 {
+            return 9002;
+        }
+    }.load });
+    cx.setTheme(V.S.theme.widgetTheme(.light));
+    const scope = try ui.Scope.init(std.testing.allocator, null, cx.owner);
+    defer scope.dispose();
+    const root = try ui.box(cx, .{ .width = .fill(), .height = .fill(), .direction = .column }, .{});
+    cx.root = root;
+    const body = try ui.box(cx, .{ .width = .{ .px = 348 }, .height = .{ .fit = .{} }, .direction = .column }, .{});
+    try root.appendChild(cx.allocator, body);
+    var capture: ViewCapture = .{};
+    const view = try V.View.mount(cx, scope, .{ .context = &capture, .action = ViewCapture.run });
+    try root.appendChild(cx.allocator, view.remote_entry);
+    try root.appendChild(cx.allocator, view.local_entry);
+    try root.appendChild(cx.allocator, view.popover.wrapper);
+    try view.attachInline(body);
+    var closed: bool = false;
+    view.inline_closed = .{ .context = &closed, .close = struct {
+        fn run(raw: *anyopaque) void {
+            const flag: *bool = @ptrCast(@alignCast(raw));
+            flag.* = true;
+        }
+    }.run };
+    const first: M.Row = .{ .owner = owner, .source = asset, .name = "server-01", .phase = .listening, .bind127 = false, .local_port = 1083, .stats = .{ .connections_active = 2, .bytes_down = 1048576, .bytes_up = 1024 }, .failure = null };
+    var rows: [4]M.Row = @splat(first);
+    for (rows[1..], 1..) |*row, i| {
+        row.owner.session_id = @fromBackingInt(@as(u64, 501) + i);
+        row.source.id = @fromBackingInt(@as(u64, 81) + i);
+    }
+    rows[1].phase = .paused;
+    rows[1].stats = null;
+    rows[1].bind127 = null;
+    rows[1].local_port = null;
+    view.filter = asset.id;
+    try view.update(&rows);
+    frames(cx);
+    const section = view.inline_section.?;
+    try std.testing.expectEqualStrings("4 条", section.count.getText().?.content);
+    try std.testing.expectEqual(@as(usize, 4), section.list.content.children.items.len);
+    try std.testing.expectEqual(@as(usize, 1), view.list.content.children.items.len);
+    try std.testing.expectEqual(@as(f32, 198), section.list.container.globalRect().h);
+    try std.testing.expect(view.local_entry.style.display == .none and view.remote_entry.style.display == .none);
+    const listening_row = section.list.content.children.items[0];
+    const paused_row = section.list.content.children.items[1];
+    try std.testing.expect(find(paused_row, "socks.background.connections") == null);
+    try std.testing.expect(find(paused_row, "socks.background.reconnect") != null);
+    try std.testing.expect(find(listening_row, "socks.background.reconnect") == null);
+    try std.testing.expectEqualStrings("", find(paused_row, "socks.background.traffic").?.getText().?.content);
+    try std.testing.expectEqualStrings("0.0.0.0:1083", find(listening_row, "socks.background.endpoint").?.getText().?.content);
+    const traffic = find(listening_row, "socks.background.traffic").?;
+    try std.testing.expectEqualStrings("↓ 1 MiB    ↑ 1 KiB", traffic.getText().?.content);
+    const count = find(listening_row, "socks.background.connections").?;
+    const btn = find(listening_row, "socks.background.open_terminal").?;
+    const position = count.globalRect();
+    try std.testing.expect(position.w > 0 and position.h > 0);
+    cx.handleMouseMove(position.x + position.w / 2, position.y + position.h / 2);
+    frames(cx);
+    frames(cx);
+    const tooltip = find(root, "socks.background.connections.hint").?;
+    try std.testing.expectEqualStrings("2 个活跃 TCP 连接", tooltip.behavior.interaction.a11y.?.label.?);
+    const rev = view.revision;
+    rows[0].stats.?.connections_active = 0;
+    rows[0].stats.?.bytes_down += 1048576;
+    try view.update(&rows);
+    frames(cx);
+    try std.testing.expectEqual(rev, view.revision);
+    try std.testing.expectEqual(btn, find(listening_row, "socks.background.open_terminal").?);
+    try std.testing.expectEqualStrings("#0", count.getText().?.content);
+    try std.testing.expectEqualStrings("0 个活跃 TCP 连接", tooltip.behavior.interaction.a11y.?.label.?);
+    try std.testing.expectEqualStrings("↓ 2 MiB    ↑ 1 KiB", traffic.getText().?.content);
+    cx.handleMouseMove(780, 620);
+    frames(cx);
+    click(cx, btn);
+    try std.testing.expectEqual(@as(usize, 1), capture.count);
+    try std.testing.expectEqualDeep(owner, capture.owner.?);
+    try std.testing.expectEqual(V.Action.open_terminal, capture.action.?);
+    try std.testing.expect(closed);
+    const viewport = section.list.container.globalRect();
+    cx.handleScroll(.{ .x = viewport.x + 20, .y = viewport.y + viewport.h / 2, .dx = 0, .dy = -500 });
+    frames(cx);
+    const last = section.list.content.children.items[3].globalRect();
+    try std.testing.expect(last.y + last.h <= viewport.y + viewport.h + 1);
+    try std.testing.expect(last.y >= viewport.y);
+    try view.update(&.{});
+    frames(cx);
+    try std.testing.expectEqualStrings("0 条", section.count.getText().?.content);
+    try std.testing.expect(find(body, "socks.background.open_terminal") == null);
 }

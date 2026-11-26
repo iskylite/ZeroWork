@@ -14,7 +14,7 @@ pub const Data = struct {
     read_only: bool = false,
     status_label: ?[]const u8 = null,
     intro_label: ?[]const u8 = null,
-    port: u16 = 1080,
+    port: ?u16 = null,
     bind: []const u8 = "127.0.0.1",
     host: []const u8 = "",
     /// Stable UI workspace session ID, matching the tab label (not a domain enum).
@@ -23,9 +23,9 @@ pub const Data = struct {
     exit: []const u8 = "",
     /// Actual route description; empty for a direct connection.
     route: []const u8 = "",
-    connections: usize = 0,
-    uploaded: u64 = 0,
-    downloaded: u64 = 0,
+    connections: ?usize = null,
+    uploaded: ?u64 = null,
+    downloaded: ?u64 = null,
     /// Real connection/test failure. No error row is shown when empty.
     error_text: []const u8 = "",
     /// Verified test outcome; displayed only after a real test.
@@ -39,12 +39,18 @@ pub const Hooks = struct {
 };
 
 pub fn mount(cx: *ui.Cx, scope: *ui.Scope, hooks: Hooks) !*View {
+    return mountAnchored(cx, scope, hooks, false);
+}
+
+/// The workspace tool rail is vertical; keep the bubble beside the tool, not
+/// over the mascot or the other tools. The legacy status chip stays top/bottom.
+pub fn mountAnchored(cx: *ui.Cx, scope: *ui.Scope, hooks: Hooks, beside_rail: bool) !*View {
     const self = try cx.allocator.create(View);
-    self.* = .{ .cx = cx, .scope = scope, .hooks = hooks, .root = undefined, .body = undefined, .header = undefined, .footer = undefined, .status = undefined, .address = undefined, .bind_note = undefined, .exit = undefined, .route = undefined, .statistics = undefined, .message = undefined, .control_text = undefined, .test_button = undefined, .copy_button = undefined, .config_button = undefined, .control_button = undefined, .pointer = undefined, .protocol = undefined, .owner = undefined, .title_icon = undefined, .close_button = undefined, .test_disabled = try scope.createSignal(bool, true), .control_disabled = try scope.createSignal(bool, false) };
+    self.* = .{ .beside_rail = beside_rail, .cx = cx, .scope = scope, .hooks = hooks, .root = undefined, .body = undefined, .header = undefined, .footer = undefined, .status = undefined, .address = undefined, .bind_note = undefined, .exit = undefined, .route = undefined, .statistics = undefined, .message = undefined, .control_text = undefined, .test_button = undefined, .copy_button = undefined, .config_button = undefined, .control_button = undefined, .pointer = undefined, .protocol = undefined, .owner = undefined, .title_icon = undefined, .close_button = undefined, .test_disabled = try scope.createSignal(bool, true), .control_disabled = try scope.createSignal(bool, false) };
     try scope.onCleanup(View, self, View.cleanup);
     const focus_guard = try scope.childScope();
     self.open = try scope.createSignal(bool, false);
-    const popup = try ui.widgets.Popover(.{ .group = @import("floating_surface.zig").workspace_popup, .open = self.open, .trigger = .manual, .close_on_outside_click = false, .position = .top, .width = S.width, .max_width = S.width, .offset = .{ .static = @as(f32, 6) }, .viewport_padding = 8, .flip = true, .shift_main_axis = true, .constrain_width_to_viewport = true, .enter_transition = .none, .exit_transition = .none, .anchor = .{ .virtual = .{ .ctx = self, .getRect = View.anchorRect } }, .on_open_change = cx.on(View, self, View.openChanged) }).mount(scope, cx);
+    const popup = try ui.widgets.Popover(.{ .group = @import("floating_surface.zig").workspace_popup, .open = self.open, .trigger = .manual, .close_on_outside_click = false, .position = @as(ui.widgets.popover.PopoverPosition, if (beside_rail) .left_end else .top), .width = S.width, .max_width = S.width, .offset = .{ .static = @as(f32, 6) }, .viewport_padding = 8, .flip = true, .shift_main_axis = true, .constrain_width_to_viewport = true, .enter_transition = .none, .exit_transition = .none, .anchor = .{ .virtual = .{ .ctx = self, .getRect = View.anchorRect } }, .on_open_change = cx.on(View, self, View.openChanged) }).mount(scope, cx);
     self.scope = popup.scope;
     self.wrapper = popup.wrapper;
     self.portaled = popup.portaled;
@@ -87,15 +93,17 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, hooks: Hooks) !*View {
     self.body.container.style.flex_shrink = 0;
     self.body.content.setStyleInline(cx.allocator, S.body());
     try self.frame.appendChild(cx.allocator, self.body.container);
+    self.current_content = try ui.box(cx, S.body(), .{});
+    try self.body.content.appendChild(cx.allocator, self.current_content);
     self.intro = try text(self, "添加规则后启动转发", 13, 400, .secondary, false);
     self.intro.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = 20 }, .flex_shrink = 0 });
-    try self.body.content.appendChild(cx.allocator, self.intro);
+    try self.current_content.appendChild(cx.allocator, self.intro);
     self.empty = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 126 }, .direction = .column, .align_items = .center, .justify = .center, .gap = 10, .flex_shrink = 0 }, .{});
     self.empty.meta.ownership.meta.test_id = "socks.info.empty";
     try self.empty.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.get("plug-zap").?, S.theme.current().fg_3, S.icon(24)));
     try self.empty.appendChild(cx.allocator, try text(self, "没有转发规则", 12, 500, .primary, false));
     try self.empty.appendChild(cx.allocator, try text(self, "本地 L · 远端 R · 动态 SOCKS5", 10, 400, .secondary, false));
-    try self.body.content.appendChild(cx.allocator, self.empty);
+    try self.current_content.appendChild(cx.allocator, self.empty);
     self.rule = try ui.box(cx, .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .gap = 6, .padding = ui.Padding.all(12), .margin = .{ .top = 10 }, .background = S.theme.popupInset(), .border = .{ .radius = 8 }, .flex_shrink = 0 }, .{});
     self.rule.meta.ownership.meta.test_id = "socks.info.rule";
     const identity = try ui.box(cx, S.line(24), .{});
@@ -112,6 +120,14 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, hooks: Hooks) !*View {
     self.bind_note = try text(self, "", 12, 400, .secondary, false);
     self.status = try text(self, "未开启", 15, 600, .muted, false);
     try identity.appendChild(cx.allocator, self.status);
+    self.connections_hint = try scope.createText("", .{});
+    self.connections_tip = try ui.widgets.Tooltip(.{ .text = self.connections_hint, .background = S.theme.current().overlay, .text_color = S.theme.current().fg_1 }).mount(scope, cx);
+    self.connections_tip.wrapper.setStyleInline(cx.allocator, .{ .flex_shrink = 0 });
+    self.connections_text = try text(self, "", 12, 400, .secondary, false);
+    self.connections_text.meta.ownership.meta.test_id = "socks.info.connections";
+    self.connections_tip.content.meta.ownership.meta.test_id = "socks.info.connections.hint";
+    try self.connections_tip.trigger.appendChild(cx.allocator, self.connections_text);
+    try identity.appendChild(cx.allocator, self.connections_tip.wrapper);
     try identity.appendChild(cx.allocator, try ui.spacer(cx));
     try self.rule.appendChild(cx.allocator, identity);
     self.mode_label = try text(self, "SOCKS5", 12, 400, .secondary, false);
@@ -130,12 +146,12 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, hooks: Hooks) !*View {
     try self.rule.appendChild(cx.allocator, self.statistics);
     const details_row = try ui.box(cx, S.line(34), .{});
     self.details_row = details_row;
-    self.protocol = try text(self, "0 个活跃连接 · TCP · 不支持 UDP", 12, 400, .primary, false);
+    self.protocol = try text(self, "TCP · 不支持 UDP", 12, 400, .primary, false);
     self.protocol.setStyleInline(cx.allocator, .{ .width = .fill(), .flex = 1, .min_width = 0 });
     try details_row.appendChild(cx.allocator, self.protocol);
     _ = try button(self, details_row, "查看日志", .logs);
     try self.rule.appendChild(cx.allocator, details_row);
-    try self.body.content.appendChild(cx.allocator, self.rule);
+    try self.current_content.appendChild(cx.allocator, self.rule);
     self.message = try text(self, "", 12, 400, .secondary, false);
     self.message.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .fit = .{} }, .min_height = 32, .min_width = 0, .margin = .{ .top = 8 }, .flex_shrink = 0 });
     if (self.message.getText()) |old| {
@@ -145,7 +161,7 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, hooks: Hooks) !*View {
         self.message.setText(style);
     }
     self.message.setDisplay(.none);
-    try self.body.content.appendChild(cx.allocator, self.message);
+    try self.current_content.appendChild(cx.allocator, self.message);
     self.logs_open = try scope.createSignal(bool, false);
     const logs_popup = try ui.widgets.Popover(.{ .on_group_dismiss = cx.on(View, self, View.hide), .group = @import("floating_surface.zig").workspace_popup, .open = self.logs_open, .trigger = .manual, .position = .top, .width = S.logs_width, .max_width = S.logs_width, .offset = .{ .static = @as(f32, 6) }, .viewport_padding = 8, .flip = true, .shift_main_axis = true, .constrain_width_to_viewport = true, .enter_transition = .none, .exit_transition = .none, .anchor = .{ .virtual = .{ .ctx = self, .getRect = View.anchorRect } }, .on_open_change = cx.on(View, self, View.logsOpenChanged) }).mount(scope, cx);
     self.logs_wrapper = logs_popup.wrapper;
@@ -204,7 +220,7 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, hooks: Hooks) !*View {
     self.copy_button.meta.ownership.meta.test_id = "socks.info.copy";
     self.config_button.meta.ownership.meta.test_id = "socks.info.config";
     self.control_button.meta.ownership.meta.test_id = "socks.info.control";
-    try self.frame.appendChild(cx.allocator, foot);
+    try self.rule.appendChild(cx.allocator, foot);
     try self.update(.{});
     try cx.addAfterLayoutHook(self, View.afterLayout);
     return self;
@@ -214,6 +230,12 @@ pub const View = struct {
     cx: *ui.Cx,
     scope: *ui.Scope,
     hooks: Hooks,
+    beside_rail: bool,
+    current_content: *ui.Node = undefined,
+    current_available: bool = true,
+    connections_tip: ui.widgets.TooltipResult = undefined,
+    connections_text: *ui.Node = undefined,
+    connections_hint: *ui.Signal([]const u8) = undefined,
     root: *ui.Node,
     wrapper: *ui.Node = undefined,
     frame: *ui.Node = undefined,
@@ -276,6 +298,9 @@ pub const View = struct {
     /// All borrowed strings are copied before return. Nodes and callbacks remain stable,
     /// so callbacks may synchronously update/hide this view without disposing their context.
     pub fn update(self: *View, data: Data) !void {
+        const known_port = if (data.port) |p| if (p != 0) p else null else null;
+        self.current_available = true;
+        self.current_content.setDisplay(.flex);
         self.state = data.state;
         const logs = if (data.logs.len > 0) data.logs else "尚无转发日志，启动后记录关键步骤耗时。";
         if (!std.mem.eql(u8, self.logs_text.getText().?.content, logs))
@@ -287,6 +312,13 @@ pub const View = struct {
         self.intro.setDisplay(if (!data.read_only or data.configured) .flex else .none);
         self.empty.setDisplay(if (self.has_rule or data.read_only) .none else .flex);
         self.rule.setDisplay(if (self.has_rule or data.read_only) .flex else .none);
+        // The existing controls follow their rule; when unconfigured the same
+        // Add action belongs to the empty state rather than an unattached bar.
+        const control_parent = if (self.has_rule or data.read_only) self.rule else self.empty;
+        if (self.footer.parent != control_parent) {
+            if (self.footer.parent) |previous| self.cx.detachChildRetained(previous, self.footer);
+            try control_parent.appendChild(self.cx.allocator, self.footer);
+        }
         self.footer.setDisplay(if (data.read_only) .none else .flex);
         self.control_button.setDisplay(if (self.has_rule and !data.read_only) .flex else .none);
         self.config_button.setDisplay(if (data.read_only) .none else .flex);
@@ -295,7 +327,7 @@ pub const View = struct {
         self.bind_note.setDisplay(if (has_endpoint) .flex else .none);
         self.exit.setDisplay(if (!data.read_only or data.exit.len != 0) .flex else .none);
         self.mode_label.setDisplay(if (!data.read_only or data.configured) .flex else .none);
-        self.statistics.setDisplay(if (!data.read_only or data.configured) .flex else .none);
+        self.statistics.setDisplay(if (data.uploaded != null or data.downloaded != null) .flex else .none);
         self.details_row.setDisplay(if (!data.read_only or data.configured) .flex else .none);
         try self.config_text.setTextContent(self.cx.allocator, if (self.has_rule) "配置" else "添加转发");
         try self.mode_label.setTextContent(self.cx.allocator, switch (data.mode) {
@@ -304,7 +336,12 @@ pub const View = struct {
             .remote => "远端 R",
         });
         var buffer: [384]u8 = undefined;
-        try self.address.setTextContent(self.cx.allocator, if (data.mode == .socks5) try std.fmt.bufPrint(&buffer, "{s}:{d}", .{ data.bind, data.port }) else try std.fmt.bufPrint(&buffer, "{s}:{d} → {s}:{d}", .{ data.bind, data.port, data.target_host, data.target_port }));
+        try self.address.setTextContent(self.cx.allocator, if (known_port) |port|
+            if (data.mode == .socks5) try std.fmt.bufPrint(&buffer, "{s}:{d}", .{ data.bind, port }) else try std.fmt.bufPrint(&buffer, "{s}:{d} → {s}:{d}", .{ data.bind, port, data.target_host, data.target_port })
+        else if (data.port == 0 and data.state != .running and !data.read_only)
+            "自动分配端口"
+        else
+            "尚无监听地址");
         try self.bind_note.setTextContent(self.cx.allocator, if (data.mode == .remote) "SSH 端监听 → 本机目标" else if (std.mem.eql(u8, data.bind, "0.0.0.0")) "本机监听 · 局域网可访问" else "本机监听 · 仅本机可访问");
         try self.exit.setTextContent(self.cx.allocator, try std.fmt.bufPrint(&buffer, "出口 {s}", .{if (data.exit.len > 0) data.exit else if (data.host.len > 0) data.host else "—"}));
         try self.route.setTextContent(self.cx.allocator, data.route);
@@ -312,8 +349,16 @@ pub const View = struct {
         var count_buffer: [192]u8 = undefined;
         var down_buf: [32]u8 = undefined;
         var up_buf: [32]u8 = undefined;
-        try self.statistics.setTextContent(self.cx.allocator, try std.fmt.bufPrint(&count_buffer, "下载 {s}  ·  上传 {s}", .{ try formatBytes(&down_buf, data.downloaded), try formatBytes(&up_buf, data.uploaded) }));
-        try self.protocol.setTextContent(self.cx.allocator, try std.fmt.bufPrint(&count_buffer, "{d} 个活跃连接 · {s}", .{ data.connections, if (data.mode == .socks5) "TCP · 不支持 UDP" else "固定TCP目标" }));
+        try self.statistics.setTextContent(self.cx.allocator, try std.fmt.bufPrint(&count_buffer, "下载 {s}  ·  上传 {s}", .{ if (data.downloaded) |v| try S.formatBytes(&down_buf, v) else "—", if (data.uploaded) |v| try S.formatBytes(&up_buf, v) else "—" }));
+        if (data.state == .running and data.connections != null) {
+            const count = data.connections.?;
+            try self.connections_text.setTextContent(self.cx.allocator, try std.fmt.bufPrint(&count_buffer, "#{d}", .{count}));
+            self.connections_hint.set(try std.fmt.bufPrint(&count_buffer, "{d} 个活跃 TCP 连接", .{count}));
+            self.connections_tip.wrapper.setDisplay(.flex);
+        } else {
+            self.hideConnections();
+        }
+        try self.protocol.setTextContent(self.cx.allocator, if (data.mode == .socks5) "TCP · 不支持 UDP" else "固定 TCP 目标");
         try self.owner.setTextContent(self.cx.allocator, if (data.host.len > 0) try std.fmt.bufPrint(&count_buffer, "#{s}", .{data.host}) else "");
         try self.logs_owner.setTextContent(self.cx.allocator, try std.fmt.bufPrint(&count_buffer, "{s}  ·  最近 24 条", .{self.owner.getText().?.content}));
         try self.status.setTextContent(self.cx.allocator, data.status_label orelse switch (data.state) {
@@ -332,7 +377,7 @@ pub const View = struct {
             .stopping => "正在释放监听与连接，请稍候",
             .off => if (self.has_rule) "配置已就绪" else "尚未配置转发规则",
         });
-        self.test_disabled.set(data.state != .running or data.mode != .socks5);
+        self.test_disabled.set(data.state != .running or data.mode != .socks5 or known_port == null);
         self.copy_button.setDisplay(if (has_endpoint and self.has_rule and data.mode == .socks5) .flex else .none);
         self.test_button.setDisplay(if (!data.read_only and self.has_rule and data.mode == .socks5) .flex else .none);
         self.control_disabled.set(data.state == .stopping);
@@ -345,6 +390,24 @@ pub const View = struct {
         self.message.setDisplay(if (message.len > 0) .flex else .none);
         self.retheme();
         self.paintState();
+    }
+
+    fn hideConnections(self: *View) void {
+        if (self.connections_tip.open) |open| open.set(false);
+        self.connections_tip.wrapper.setDisplay(.none);
+        self.connections_hint.set("");
+    }
+    /// No current forwarding owner: keep only the application-owned list.
+    /// Hidden state cannot dispatch old actions or restore old logs.
+    pub fn withoutCurrent(self: *View) void {
+        if (!self.current_available) return;
+        self.current_available = false;
+        self.current_content.setDisplay(.none);
+        self.hideConnections();
+        self.owner.setTextContent(self.cx.allocator, "") catch {};
+        self.logs_visible = false;
+        self.logs_open.set(false);
+        self.logs_root.setDisplay(.none);
     }
 
     /// Paint only: retain original nodes, action state, trigger and geometry.
@@ -414,6 +477,7 @@ pub const View = struct {
         self.cx.requestRedraw();
     }
     pub fn hide(self: *View) void {
+        if (self.connections_tip.open) |open| open.set(false);
         self.logs_visible = false;
         self.logs_open.set(false);
         self.logs_root.setDisplay(.none);
@@ -437,12 +501,12 @@ pub const View = struct {
             return false;
         };
         const upper = availableHeight(self);
-        const available = @max(@as(f32, 1), @min(self.cx.viewport.height - 16, upper - 14));
+        const available = @max(@as(f32, 1), if (self.beside_rail) self.cx.viewport.height - 16 else @min(self.cx.viewport.height - 16, upper - 14));
         const width = @max(@as(f32, 1), @min(S.width, self.cx.viewport.width - 16));
         // Hug the measured content; only a viewport-constrained body scrolls.
         // The popover remains anchored to the same bottom-bar trigger.
         const natural = @max(@as(f32, 1), self.body.content.globalRect().h);
-        const chrome_height = if (self.read_only) S.chrome_height - S.footer_height else S.chrome_height;
+        const chrome_height = S.chrome_height;
         const body_h = @min(natural, @max(@as(f32, 1), available - chrome_height));
         const card_h = body_h + chrome_height;
         var changed = false;
@@ -492,6 +556,7 @@ pub const View = struct {
         if (self.cx.focus_manager.current_focus) |focused| if (focused.isDescendantOf(self.root) or focused.isDescendantOf(self.logs_root)) self.cx.clearFocus();
     }
     pub fn dispatch(self: *View, requested: Action) void {
+        if (!self.current_available) return;
         if (self.read_only and requested != .copy_export and requested != .logs and requested != .logs_back) return;
         if (requested == .logs) {
             self.logs_visible = true;
@@ -507,7 +572,7 @@ pub const View = struct {
             return;
         }
         const action = if (requested == .start or requested == .stop) (if (self.state == .running or self.state == .paused or self.state == .connecting) Action.stop else Action.start) else requested;
-        if ((action == .test_proxy or action == .copy_export) and self.state != .running) return;
+        if ((action == .test_proxy or action == .copy_export) and self.test_disabled.peek()) return;
         if ((action == .start or action == .stop) and self.state == .stopping) return;
         self.hooks.action(self.hooks.context, action);
     }
@@ -544,11 +609,6 @@ fn setColor(node: *ui.Node, color: ui.Color) void {
         next.color = color;
         node.setText(next);
     }
-}
-fn formatBytes(buffer: []u8, value: u64) ![]const u8 {
-    if (value >= 1024 * 1024) return std.fmt.bufPrint(buffer, "{d:.1} MiB", .{@as(f64, @floatFromInt(value)) / (1024 * 1024)});
-    if (value >= 1024) return std.fmt.bufPrint(buffer, "{d:.1} KiB", .{@as(f64, @floatFromInt(value)) / 1024});
-    return std.fmt.bufPrint(buffer, "{d} B", .{value});
 }
 fn button(self: *View, parent: *ui.Node, label: []const u8, action: Action) !*ui.Node {
     const icon_only = action == .copy_export or action == .logs;

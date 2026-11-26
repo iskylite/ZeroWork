@@ -16,6 +16,13 @@ const within = (n:any,id:string):any => flat(n).find(v=>v.test_id===id);
 async function visible(id:string):Promise<any>{return waitFor(async()=>(await query(id)).find(shown)??null,20000)}
 async function clickNode(n:any){assert(shown(n));assert((await clickAt(n.rect.x+n.rect.w/2,n.rect.y+n.rect.h/2)).ok)}
 async function click(id:string){await clickNode(await visible(id))}
+async function openMascotTool(which:'transfer'|'forward'){
+ const badge=await visible('workspace.mascot.body');
+ assert((await mouseMove(badge.rect.x+badge.rect.w/2,badge.rect.y+badge.rect.h/2)).ok);
+ await visible('workspace.mascot.'+which);
+ await sleep(280); // Let the floating slot reach its final hit target before clicking.
+ await click('workspace.mascot.'+which);
+}
 export async function resourceSnapshot():Promise<any>{const result=await request('POST','/zerowork/windows',{action:'snapshot'});assert(result.ok);return result}
 export async function selectResourceWindow(window:number){assert((await request('POST','/zerowork/windows',{action:'select',window})).ok);await sleep(100)}
 async function approveClose(){
@@ -49,7 +56,7 @@ export async function exerciseRetainedTransfer(options:RetainedOptions):Promise<
  assert(created.session>0);const job=created.job,originalSession=created.session;
  if(options.releasePeer)await options.releasePeer();
  await waitFor(async()=>{const current=(await resourceSnapshot()).tasks.find((t:any)=>t.job===job);return current?.state==='running'&&current.done_bytes>0?current:null},45000);
- if(!(await query('transfer.manager')).some(shown))await click('toolbar.transfers');
+ if(!(await query('transfer.manager')).some(shown))await openMascotTool('transfer');
  const task=await waitFor(async()=>{const rows=(await query('transfer.task')).filter(shown);return rows.find((r:any)=>text(r).includes(sourceName))??null},15000);
  await clickNode(within(task,'transfer.task.primary'));
  await waitFor(async()=>{const current=(await resourceSnapshot()).tasks.find((t:any)=>t.job===job);return current?.state==='paused'&&current.cleanup==='released'?current:null},30000);
@@ -59,12 +66,12 @@ export async function exerciseRetainedTransfer(options:RetainedOptions):Promise<
  assert((await request('POST','/zerowork/windows',{action:'close',window:firstWindow})).ok);
  await waitFor(async()=>{await approveClose();const s=await resourceSnapshot();return !s.windows.some((w:any)=>w.window===firstWindow)?s:null},60000);
  await selectResourceWindow(secondWindow);
- if(!(await query('transfer.manager')).some(shown))await click('toolbar.transfers');
+ if(!(await query('transfer.manager')).some(shown))await openMascotTool('transfer');
  await taskLabel('已暂停');
  const retained=await capture('tasks-02-origin-window-closed-retained-in-second');
  const retainedJob=retained.tasks.find((t:any)=>t.job===job);assert(retainedJob);assert.equal(retainedJob.state,'paused');assert(retainedJob.retained_owner>0);assert.equal(retainedJob.original_session,originalSession);
  assert((await request('POST','/zerowork/windows',{action:'select',window:secondWindow})).ok);
- if(!(await query('transfer.manager')).some(shown))await click('toolbar.transfers');
+ if(!(await query('transfer.manager')).some(shown))await openMascotTool('transfer');
  const secondRow=await waitFor(async()=>(await query('transfer.task')).find((n:any)=>shown(n)&&text(n).includes(sourceName))??null,15000);
  assert(text(secondRow).includes(`#${originalSession}`),'Second manager displays the original source');
  await clickNode(within(secondRow,'transfer.task.primary'));
@@ -88,8 +95,12 @@ export async function exerciseSharedBackground(options:BackgroundOptions):Promis
  if(options.closeFirst){assert((await request('POST','/zerowork/windows',{action:'close',window:options.firstWindow})).ok);await waitFor(async()=>{await approveClose();return !(await resourceSnapshot()).windows.some((w:any)=>w.window===options.firstWindow)||null},60000)}
  await selectResourceWindow(options.secondWindow);
  const after=await resourceSnapshot();const shared=after.backgrounds.find((b:any)=>b.session===owner.session);assert(shared);assert.equal(shared.generation,owner.generation);assert.equal(shared.asset,options.asset);assert.equal(shared.local_port,owner.local_port);assert.equal(shared.phase,'listening');
- const entry=(await query('status.background.forward')).find(shown)??(await query('local.status.background.forward')).find(shown);await clickNode(entry);
- const row=await waitFor(async()=>(await query('socks.background.row')).find((n:any)=>shown(n)&&text(n).includes(owner.name))??null,15000);
+ await openMascotTool('forward');
+ const row=await waitFor(async()=>{
+   const section=(await query('socks.info.background')).find(shown);
+   return section ? flat(section).find((n:any)=>n.test_id==='socks.background.row'&&text(n).includes(owner.name))??null : null;
+ },15000);
+ const endpoint=within(row,'socks.background.endpoint');assert(endpoint&&text(endpoint).endsWith(':'+String(owner.local_port)),'actual allocated listener for captured background owner');
  await clickNode(within(row,'socks.background.stop'));
  await waitFor(async()=>!(await resourceSnapshot()).backgrounds.some((b:any)=>b.session===owner.session)||null,60000);
  await writeFile(join(options.output,'background-shared-owner.json'),JSON.stringify({before,after,owner,stopped:await resourceSnapshot()},null,2));

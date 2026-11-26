@@ -5,6 +5,7 @@ const identity = @import("../host/identity.zig");
 pub const M = @import("socks_background_model.zig");
 pub const S = @import("socks_background_styles.zig");
 const Sidebar = @import("sidebar_view.zig");
+const ForwardStyle = @import("socks_info_styles.zig");
 pub const Action = enum { open_terminal, reconnect, stop };
 pub const Hooks = struct {
     context: *anyopaque,
@@ -28,6 +29,10 @@ pub const View = struct {
     revision: u64 = 0,
     last_hash: ?u64 = null,
     colors: S.theme.Colors,
+    inline_section: ?struct { root: *ui.Node, list: ui.widgets.ScrollAreaResult, count: *ui.Node } = null,
+    inline_closed: ?struct { context: *anyopaque, close: *const fn (*anyopaque) void } = null,
+    shape_hash: ?u64 = null,
+    meters: ?*Meter = null,
 
     pub fn mount(cx: *ui.Cx, scope: *ui.Scope, hooks: Hooks) !*View {
         const tint = try scope.createSignal(?ui.Color, S.theme.current().fg_2);
@@ -61,11 +66,13 @@ pub const View = struct {
                 _ = ctx.theme.get();
                 const view = ctx.view;
                 Sidebar.styles.repaint(view.popover.content, view.colors);
+                if (view.inline_section) |section| Sidebar.styles.repaint(section.root, view.colors);
                 view.colors = S.theme.current();
                 view.tint.set(view.colors.fg_2);
                 view.hover.set(.{ .background = view.colors.hover });
                 view.count_style.set(S.count());
                 view.last_hash = null;
+                view.shape_hash = null;
             }
         }.run);
         return self;
@@ -100,92 +107,209 @@ pub const View = struct {
         self.popover.show.invoke();
         self.cx.requestRedraw();
     }
-    pub fn update(self: *View, rows: []const M.Row) !void {
-        var hash = std.hash.Wyhash.init(0);
-        std.hash.autoHash(&hash, self.filter);
-        hash.update(std.mem.asBytes(&self.cx.viewport.width));
-        hash.update(std.mem.asBytes(&self.cx.viewport.height));
-        for (rows) |row| {
-            std.hash.autoHash(&hash, row.owner);
-            std.hash.autoHash(&hash, row.source);
-            std.hash.autoHash(&hash, row.phase);
-            std.hash.autoHash(&hash, row.local_port);
-            std.hash.autoHash(&hash, row.connections);
-            std.hash.autoHash(&hash, if (row.failure) |err| @intFromError(err) else @as(u16, 0));
-            hash.update(row.name);
-        }
-        const next = hash.final();
-        if (self.last_hash != null and self.last_hash.? == next) return;
-        for (self.list.content.children.items) |node| self.cx.invalidateReferencesTo(node);
-        if (self.row_scope) |old| old.dispose();
-        self.row_scope = null;
-        while (self.list.content.children.items.len > 0) {
-            const node = self.list.content.children.items[self.list.content.children.items.len - 1];
-            self.cx.detachChild(self.list.content, node);
+    /// The asset menu keeps its filtered popup. The workspace renders the same
+    /// row projection inline, independent of that filter and its open state.
+    pub fn attachInline(self: *View, parent: *ui.Node) !void {
+        if (self.inline_section != null) return error.AlreadyAttached;
+        const cx = self.cx;
+        const root = try ui.box(cx, .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .gap = 6, .margin = .{ .top = 14 }, .flex_shrink = 0 }, .{});
+        try parent.appendChild(cx.allocator, root);
+        root.meta.ownership.meta.test_id = "socks.info.background";
+        const header = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 20 }, .direction = .row, .align_items = .center, .gap = 8, .flex_shrink = 0 }, .{});
+        try root.appendChild(cx.allocator, header);
+        try header.appendChild(cx.allocator, try ui.text(cx, "后台转发", S.text(13, 600, 20, S.theme.current().fg_1)));
+        try header.appendChild(cx.allocator, try ui.spacer(cx));
+        const count = try ui.text(cx, "", S.text(11, 400, 16, S.theme.current().fg_2));
+        count.meta.ownership.meta.test_id = "socks.info.background.total";
+        try header.appendChild(cx.allocator, count);
+        const list = try ui.widgets.ScrollArea(.{ .direction = .vertical }).mount(self.popover.scope, cx);
+        list.container.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = 20 }, .min_height = 0, .flex_shrink = 0 });
+        list.content.setStyleInline(cx.allocator, .{ .width = .fill(), .direction = .column, .gap = 6, .min_width = 0 });
+        try root.appendChild(cx.allocator, list.container);
+        self.inline_section = .{ .root = root, .list = list, .count = count };
+        self.shape_hash = null;
+        self.last_hash = null;
+    }
+
+    fn discardRows(self: *View, content: *ui.Node) void {
+        while (content.children.items.len != 0) {
+            const node = content.children.items[content.children.items.len - 1];
+            self.cx.detachChild(content, node);
             self.cx.destroyDetached(node);
         }
-        if (self.revision == std.math.maxInt(u64)) return error.RevisionExhausted;
-        self.revision += 1;
-        const scope = try self.popover.scope.childScope();
-        self.row_scope = scope;
+    }
+    fn addEmpty(self: *View, content: *ui.Node) !void {
+        try content.appendChild(self.cx.allocator, try ui.text(self.cx, "没有后台转发", S.text(11.5, 400, 17, S.theme.current().fg_2)));
+    }
+    pub fn update(self: *View, rows: []const M.Row) !void {
+        var shape = std.hash.Wyhash.init(0);
+        var counters = std.hash.Wyhash.init(1);
+        std.hash.autoHash(&shape, self.filter);
         var shown: usize = 0;
         for (rows) |row| {
-            if (self.filter) |filter| if (row.source.id != filter) continue;
-            try self.addRow(scope, row);
-            shown += 1;
+            if (self.filter == null or self.filter.? == row.source.id) shown += 1;
+            std.hash.autoHash(&shape, row.owner);
+            std.hash.autoHash(&shape, row.source);
+            std.hash.autoHash(&shape, row.phase);
+            std.hash.autoHash(&shape, row.mode);
+            std.hash.autoHash(&shape, row.local_port);
+            std.hash.autoHash(&shape, row.bind127);
+            std.hash.autoHash(&shape, row.stats != null);
+            std.hash.autoHash(&shape, if (row.failure) |err| @as(u32, @intFromError(err)) else @as(u32, 0));
+            std.hash.autoHash(&shape, row.name.len);
+            shape.update(row.name);
+            std.hash.autoHash(&counters, row.stats);
         }
-        if (shown == 0) {
-            const empty = try ui.text(self.cx, "没有后台转发", S.text(11.5, 400, 17, S.theme.current().fg_2));
-            try self.list.content.appendChild(self.cx.allocator, empty);
+        const structural = shape.final();
+        std.hash.autoHash(&counters, structural);
+        counters.update(std.mem.asBytes(&self.cx.viewport.width));
+        counters.update(std.mem.asBytes(&self.cx.viewport.height));
+        const next = counters.final();
+        if (self.last_hash == next) return;
+        var buffer: [128]u8 = undefined;
+        if (self.shape_hash != structural) {
+            self.shape_hash = null;
+            self.last_hash = null;
+            self.meters = null;
+            for (self.list.content.children.items) |node| self.cx.invalidateReferencesTo(node);
+            if (self.inline_section) |section| for (section.list.content.children.items) |node| self.cx.invalidateReferencesTo(node);
+            if (self.row_scope) |old| old.dispose();
+            self.row_scope = null;
+            self.discardRows(self.list.content);
+            if (self.inline_section) |section| self.discardRows(section.list.content);
+            self.revision = try std.math.add(u64, self.revision, 1);
+            const scope = try self.popover.scope.childScope();
+            self.row_scope = scope;
+            for (rows, 0..) |row, idx| {
+                if (self.filter == null or self.filter.? == row.source.id)
+                    try self.addRow(scope, row, idx, self.list.content, false);
+                if (self.inline_section) |section| try self.addRow(scope, row, idx, section.list.content, true);
+            }
+            if (shown == 0) try self.addEmpty(self.list.content);
+            if (self.inline_section) |section| {
+                if (rows.len == 0) try self.addEmpty(section.list.content);
+                try section.count.setTextContent(self.cx.allocator, try std.fmt.bufPrint(&buffer, "{d} 条", .{rows.len}));
+                const slots: f32 = @floatFromInt(@min(3, rows.len));
+                section.list.container.setStyleInline(self.cx.allocator, .{ .height = .{ .px = if (rows.len == 0) 20 else slots * 62 + (slots - 1) * 6 } });
+            }
+            self.count_text.set(try std.fmt.bufPrint(&buffer, "后台转发 ×{d}", .{rows.len}));
+            self.remote_entry.setDisplay(if (rows.len == 0 or self.inline_section != null) .none else .flex);
+            self.local_entry.setDisplay(if (rows.len == 0 or self.inline_section != null) .none else .flex);
+            self.shape_hash = structural;
         }
-        var buffer: [64]u8 = undefined;
-        self.count_text.set(try std.fmt.bufPrint(&buffer, "后台转发 ×{d}", .{rows.len}));
-        self.remote_entry.setDisplay(if (rows.len == 0) .none else .flex);
-        self.local_entry.setDisplay(if (rows.len == 0) .none else .flex);
-        const height = @min(@max(@as(f32, 128), 67 + @as(f32, @floatFromInt(shown)) * 64 + @as(f32, @floatFromInt(shown -| 1)) * 6), @max(0, @min(420, self.cx.viewport.height - 16)));
+        // Changing traffic must not replace the hovered node, scroll position,
+        // keyboard focus, or a pointer-down action on a still-current owner.
+        var next_meter = self.meters;
+        while (next_meter) |meter| : (next_meter = meter.next) try meter.update(self.cx, rows[meter.index]);
+        const height = @min(@max(@as(f32, 128), 67 + @as(f32, @floatFromInt(shown)) * 62 + @as(f32, @floatFromInt(shown -| 1)) * 6), @max(0, @min(420, self.cx.viewport.height - 16)));
         self.popover.content.setStyleInline(self.cx.allocator, S.panel(height, self.cx.viewport.width));
         self.last_hash = next;
         self.cx.requestRedraw();
     }
-    fn addRow(self: *View, scope: *ui.Scope, row: M.Row) !void {
-        const node = try ui.box(self.cx, S.row(), .{});
+
+    const Meter = struct {
+        next: ?*Meter,
+        index: usize,
+        count: ?*ui.Node = null,
+        hint: ?*ui.Signal([]const u8) = null,
+        traffic: *ui.Node,
+        fn update(self: *Meter, cx: *ui.Cx, row: M.Row) !void {
+            const stats = row.stats orelse return;
+            var buf: [112]u8 = undefined;
+            if (self.count) |count| {
+                try put(cx, count, try std.fmt.bufPrint(&buf, "#{d}", .{stats.connections_active}));
+                const hint = try std.fmt.bufPrint(&buf, "{d} 个活跃 TCP 连接", .{stats.connections_active});
+                if (!std.mem.eql(u8, hint, self.hint.?.peek())) self.hint.?.set(hint);
+            }
+            var down: [32]u8 = undefined;
+            var up: [32]u8 = undefined;
+            try put(cx, self.traffic, try std.fmt.bufPrint(&buf, "↓ {s}    ↑ {s}", .{ try ForwardStyle.formatBytes(&down, stats.bytes_down), try ForwardStyle.formatBytes(&up, stats.bytes_up) }));
+        }
+        fn put(cx: *ui.Cx, text: *ui.Node, content: []const u8) !void {
+            if (!std.mem.eql(u8, text.getText().?.content, content)) try text.setTextContent(cx.allocator, content);
+        }
+    };
+    fn addRow(self: *View, scope: *ui.Scope, row: M.Row, idx: usize, parent: *ui.Node, embedded: bool) !void {
+        const cx = self.cx;
+        const colors = S.theme.current();
+        const node = try ui.box(cx, S.row(), .{});
+        try parent.appendChild(cx.allocator, node);
         node.meta.ownership.meta.test_id = "socks.background.row";
-        const labels = try ui.box(self.cx, .{ .width = .fill(), .min_width = 0, .direction = .column, .gap = 3 }, .{});
-        const title = try std.fmt.allocPrint(self.cx.allocator, "{s} #{d}", .{ row.name, @backingInt(row.owner.session_id) });
-        defer self.cx.allocator.free(title);
-        try labels.appendChild(self.cx.allocator, try ui.text(self.cx, title, S.text(11.5, 500, 17, S.theme.current().fg_1)));
-        var buffer: [160]u8 = undefined;
-        const status = if (row.local_port) |port| try std.fmt.bufPrint(&buffer, ":{d} · {s} · {d} 个连接", .{ port, M.phaseLabel(row.phase), row.connections }) else try std.fmt.bufPrint(&buffer, "{s}{s}{s}", .{ M.phaseLabel(row.phase), if (row.failure != null) " · " else "", if (row.failure) |err| @errorName(err) else "" });
-        const state = try ui.text(self.cx, status, S.text(10.5, 400, 16, S.ink(row.phase)));
+        const top = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 22 }, .direction = .row, .align_items = .center, .gap = 6, .min_width = 0, .flex_shrink = 0 }, .{});
+        try node.appendChild(cx.allocator, top);
+        const name = try ui.text(cx, row.name, S.text(12, 550, 18, colors.fg_1));
+        name.setStyleInline(cx.allocator, .{ .min_width = 0, .flex_shrink = 1 });
+        try top.appendChild(cx.allocator, name);
+        const mode = try ui.text(cx, switch (row.mode) {
+            .socks5 => "SOCKS5 · 动态目标",
+            .local => "本地 L",
+            .remote => "远端 R",
+        }, S.text(11, 400, 16, colors.fg_2));
+        mode.setStyleInline(cx.allocator, .{ .min_width = 0, .flex_shrink = 1 });
+        try top.appendChild(cx.allocator, mode);
+        try top.appendChild(cx.allocator, try ui.spacer(cx));
+        const state = try ui.text(cx, M.phaseLabel(row.phase), S.text(11, 550, 16, S.ink(row.phase)));
         state.meta.ownership.meta.test_id = "socks.background.state";
-        try labels.appendChild(self.cx.allocator, state);
-        try node.appendChild(self.cx.allocator, labels);
+        state.setStyleInline(cx.allocator, .{ .flex_shrink = 0 });
+        try top.appendChild(cx.allocator, state);
+        const bottom = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 25 }, .direction = .row, .align_items = .center, .gap = 6, .min_width = 0, .flex_shrink = 0 }, .{});
+        try node.appendChild(cx.allocator, bottom);
+        var buffer: [112]u8 = undefined;
+        const endpoint: []const u8 = if (row.local_port != null and row.bind127 != null)
+            try std.fmt.bufPrint(&buffer, "{s}:{d}", .{ if (row.bind127.?) @as([]const u8, "127.0.0.1") else "0.0.0.0", row.local_port.? })
+        else if (row.failure) |err| @errorName(err) else "—";
+        const address = try ui.text(cx, endpoint, S.text(11.5, 500, 18, colors.fg_1));
+        address.meta.ownership.meta.test_id = "socks.background.endpoint";
+        address.setStyleInline(cx.allocator, .{ .min_width = 0, .flex_shrink = 1 });
+        try bottom.appendChild(cx.allocator, address);
+        const traffic = try ui.text(cx, "", S.text(11, 400, 16, colors.fg_2));
+        traffic.meta.ownership.meta.test_id = "socks.background.traffic";
+        traffic.setStyleInline(cx.allocator, .{ .min_width = 0, .flex_shrink = 1 });
+        try bottom.appendChild(cx.allocator, traffic);
+        const meter = try scope.createState(Meter, .{ .next = self.meters, .index = idx, .traffic = traffic });
+        self.meters = meter;
+        if (row.phase == .listening and row.stats != null) {
+            const hint = try scope.createText("", .{});
+            const tip = try ui.widgets.Tooltip(.{ .text = hint, .background = colors.overlay, .text_color = colors.fg_1 }).mount(scope, cx);
+            const count = try ui.text(cx, "", S.text(11, 400, 16, colors.fg_2));
+            count.meta.ownership.meta.test_id = "socks.background.connections";
+            tip.content.meta.ownership.meta.test_id = "socks.background.connections.hint";
+            try tip.trigger.appendChild(cx.allocator, count);
+            tip.wrapper.setStyleInline(cx.allocator, .{ .flex_shrink = 0 });
+            try top.appendChild(cx.allocator, tip.wrapper);
+            meter.count = count;
+            meter.hint = hint;
+        }
+        try bottom.appendChild(cx.allocator, try ui.spacer(cx));
         for ([_]Action{ .open_terminal, .reconnect, .stop }, [_][]const u8{ "terminal", "refresh-cw", "square" }, [_][]const u8{ "打开终端", "重新连接", "停止后台转发" }) |action, icon, label| {
-            const enabled = switch (action) {
-                .open_terminal => true,
-                .reconnect => row.phase == .paused or row.phase == .failed,
-                .stop => row.phase != .closing,
-            };
-            const capture = try scope.createState(RowAction, .{ .view = self, .owner = row.owner, .revision = self.revision, .action = action });
-            const button = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.get(icon), .icon_size = @as(f32, 18), .icon_tint = self.tint, .a11y_label = label, .base_style = S.action(24), .hover_style = self.hover, .disabled = !enabled, .on_click = self.cx.on(RowAction, capture, RowAction.run) }).mount(scope, self.cx);
+            if (action == .reconnect and row.phase != .paused and row.phase != .failed) continue;
+            if (action == .stop and row.phase == .closing) continue;
+            const capture = try scope.createState(RowAction, .{ .view = self, .owner = row.owner, .revision = self.revision, .action = action, .embedded = embedded });
+            var appearance = S.action(24);
+            appearance.background = S.theme.popupAction();
+            const button = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.get(icon), .icon_size = @as(f32, 14), .icon_tint = if (action == .stop) colors.danger_ink else colors.fg_2, .a11y_label = label, .base_style = appearance, .hover_style = self.hover, .on_click = cx.on(RowAction, capture, RowAction.run) }).mount(scope, cx);
             button.meta.ownership.meta.test_id = switch (action) {
                 .open_terminal => "socks.background.open_terminal",
                 .reconnect => "socks.background.reconnect",
                 .stop => "socks.background.stop",
             };
-            try node.appendChild(self.cx.allocator, button);
+            try bottom.appendChild(cx.allocator, try @import("connection_details_view.zig").iconTooltip(cx, scope, button, label));
         }
-        try self.list.content.appendChild(self.cx.allocator, node);
     }
     const RowAction = struct {
         view: *View,
         owner: identity.SessionHandle,
         revision: u64,
         action: Action,
+        embedded: bool,
         fn run(self: *@This()) void {
             if (self.view.revision != self.revision) return;
             self.view.hooks.action(self.view.hooks.context, self.owner, self.action);
-            if (self.action == .open_terminal) self.view.popover.close.invoke();
+            if (self.action == .open_terminal) {
+                if (self.embedded) {
+                    if (self.view.inline_closed) |on_close| on_close.close(on_close.context);
+                } else self.view.popover.close.invoke();
+            }
         }
     };
 };

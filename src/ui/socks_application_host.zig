@@ -32,6 +32,9 @@ pub const Host = struct {
     chip: ?*ui.Node = null,
     info: ?*Info.View = null,
     info_owner: ?identity.SessionHandle = null,
+    /// Only the unified workspace popover observes these app-owned rows.
+    /// Its session controls never receive a background owner's handle.
+    background_model: ?*@import("socks_background_model.zig").Model = null,
     config: ?*Config.View = null,
     config_host_id: ?ws.HostId = null,
     config_session_id: ?ws.SessionId = null,
@@ -138,6 +141,7 @@ pub const Host = struct {
             return null;
         }
         const active = self.workspace.active_tab orelse return null;
+        if (active >= self.workspace.tabs.items.len) return null;
         return self.workspace.tabs.items[active].id;
     }
     fn activeOwner(self: *Host) ?identity.SessionHandle {
@@ -488,7 +492,8 @@ pub const Host = struct {
     pub fn currentForwarding(self: *Host) ?Summary {
         const legacy = self.activeSession() orelse return null;
         const tab = self.workspace.sessionTab(legacy) orelse return null;
-        if (tab.closing or tab.archived or self.activeOwner() == null) return null;
+        const current = self.activeOwner() orelse return null;
+        if (tab.closing or tab.archived or tab.owned_pending or !tab.content_owner.eql(.{ .session = current })) return null;
         if (rendererForwarding(tab)) |forwarding| {
             const data = automaticForwardingData(tab, forwarding);
             return forwardingSummary(data.state, data.configured, data.status_label);
@@ -506,12 +511,22 @@ pub const Host = struct {
             .stopping => "停止中",
             .failed => "启动失败",
             .off => if (configured_) "配置已就绪" else "未配置",
-        }, .active = state == .running or state == .connecting or state == .paused };
+        }, .active = state == .running };
     }
 
+    pub fn hasBackgroundRows(self: *const Host) bool {
+        return if (self.background_model) |model| model.rows.items.len != 0 else false;
+    }
+    pub fn backgroundIsListening(self: *const Host) bool {
+        const model = self.background_model orelse return false;
+        for (model.rows.items) |row| if (row.phase == .listening) return true;
+        return false;
+    }
     pub fn showInfo(self: *Host) void {
         const info = self.info orelse return;
-        self.info_owner = self.activeOwner() orelse return;
+        const owner = if (self.currentForwarding() != null) self.activeOwner() else null;
+        if (owner == null and !self.hasBackgroundRows()) return;
+        self.info_owner = owner;
         self.updateInfo();
         if (self.chip) |chip| info.showNode(chip);
     }
@@ -522,9 +537,15 @@ pub const Host = struct {
     }
     fn updateInfo(self: *Host) void {
         const info = self.info orelse return;
-        if (!self.infoOwnerIsCurrent()) {
-            info.hide();
+        if (!self.infoOwnerIsCurrent() or self.currentForwarding() == null) {
             self.info_owner = null;
+            // On tab change or reconnect, never retarget an open current rule.
+            // Independent background rows can still be inspected and controlled.
+            if (self.hasBackgroundRows() and !info.logs_visible) {
+                info.withoutCurrent();
+            } else {
+                info.hide();
+            }
             return;
         }
         const legacy = self.activeSession() orelse return;
@@ -536,7 +557,7 @@ pub const Host = struct {
         }
         const host = self.configured(legacy) orelse return;
         const value = self.activeSnapshot();
-        const stats: routes.listener.Stats = if (value) |snapshot| snapshot.stats else .{};
+        const stats: ?routes.listener.Stats = if (value) |snapshot| snapshot.stats else null;
         const exit = if (value) |snapshot| self.backend.exitHost(snapshot.owner) else null;
         const state = snapshotState(value);
         const desired = self.desiredForward(self.activeSession() orelse return);
@@ -549,13 +570,13 @@ pub const Host = struct {
             .target_port = if (desired) |d| d.target.port else 0,
             .state = state,
             .session_id = self.activeSession(),
-            .port = if (value) |snapshot| if (snapshot.local_port != 0) snapshot.local_port else host.socks_port else host.socks_port,
-            .host = host.name,
+            .port = if (value) |snapshot| if (snapshot.local_port != 0) snapshot.local_port else if (state == .running) null else host.socks_port else host.socks_port,
+            .host = tab.titleSlice(),
             .exit = if (exit) |target| target.name else host.name,
             .bind = if (value) |snapshot| if (snapshot.bind127) "127.0.0.1" else "0.0.0.0" else host.socks_bind,
-            .connections = stats.connections_active,
-            .uploaded = stats.bytes_up,
-            .downloaded = stats.bytes_down,
+            .connections = if (stats) |v| v.connections_active else null,
+            .uploaded = if (stats) |v| v.bytes_up else null,
+            .downloaded = if (stats) |v| v.bytes_down else null,
             .error_text = if (value) |snapshot| if (snapshot.failure) |err| @errorName(err) else "" else "",
             .logs = if (value) |snapshot| snapshot.diagnostics.format(&log_buffer) else "",
             .test_result = if (value != null and self.probe_key != null and value.?.key.eql(self.probe_key.?)) self.probe_message[0..self.probe_message_len] else "",
@@ -565,7 +586,7 @@ pub const Host = struct {
         const self: *Host = @ptrCast(@alignCast(raw));
         // A retained card must never retarget its controls after a tab switch
         // or a reconnect changes the session generation.
-        if (!self.infoOwnerIsCurrent()) {
+        if (!self.infoOwnerIsCurrent() or self.currentForwarding() == null) {
             if (self.info) |info| info.hide();
             self.info_owner = null;
             return;
@@ -587,7 +608,7 @@ pub const Host = struct {
             .test_proxy => self.testProxy(self.activeSession() orelse return, self.info_owner orelse return),
             .copy_export => {
                 const value = self.activeSnapshot() orelse return;
-                if (value.phase != .ready) return;
+                if (value.phase != .ready or value.local_port == 0) return;
                 var buffer: [128]u8 = undefined;
                 const command = std.fmt.bufPrint(&buffer, "export ALL_PROXY=socks5://127.0.0.1:{d}", .{value.local_port}) catch return;
                 const success = ui.platform_services.clipboardSetText(self.cx.system_sdk, command);

@@ -1,6 +1,7 @@
 //! Palette/material roles read from Figma SOCKS panels 358:1419344 (Dark),
 //! 358:1420003 (Light), 358:1420766 (Sauber). Compact geometry follows the live V2 nodes.
 const ui = @import("ui");
+const std = @import("std");
 pub const theme = @import("app_theme.zig");
 pub const TextRole = enum { primary, secondary, muted, warning, success, danger };
 pub const ButtonRole = enum { test_proxy, control, ordinary, icon };
@@ -47,10 +48,8 @@ pub const logs_width: f32 = 560;
 pub const logs_height: f32 = 420;
 pub const normal_height: f32 = 451;
 pub const body_height: f32 = 320;
-const footer_row_height: f32 = 45;
-const footer_margin_top: f32 = 14;
-pub const footer_height: f32 = footer_row_height + footer_margin_top;
-pub const chrome_height: f32 = 131;
+// Panel padding (2 × 16), header (28) and its bottom gap (12).
+pub const chrome_height: f32 = 72;
 pub fn header() ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 28 }, .direction = .row, .align_items = .center, .gap = 8, .margin = .{ .bottom = 12 }, .flex_shrink = 0 };
 }
@@ -61,11 +60,21 @@ pub fn line(height: f32) ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = height }, .direction = .row, .align_items = .center, .gap = 4, .flex_shrink = 0, .min_width = 0, .overflow_hidden = true };
 }
 pub fn footer() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = footer_row_height }, .direction = .row, .align_items = .center, .gap = 8, .padding = .{ .top = 12, .bottom = 2 }, .margin = .{ .top = footer_margin_top }, .flex_shrink = 0 };
+    return .{ .width = .fill(), .height = .{ .px = 30 }, .direction = .row, .align_items = .center, .gap = 8, .margin = .{ .top = 3 }, .flex_shrink = 0 };
 }
 pub fn icon(size: f32) ui.Style {
     return .{ .width = .{ .px = size }, .height = .{ .px = size }, .flex_shrink = 0 };
 }
 pub fn iconButton(size: f32) ui.BoxStyle {
     return .{ .width = .{ .px = size }, .height = .{ .px = size }, .padding = .{}, .gap = 0, .background = ui.Color.TRANSPARENT, .border = .{ .radius = 7 }, .flex_shrink = 0, .align_items = .center, .justify = .center };
+}
+
+/// Same cumulative traffic units for session and application-owned listeners.
+pub fn formatBytes(buf: []u8, value: u64) ![]const u8 {
+    const units = [_][]const u8{ "B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB" };
+    var divisor: u64 = 1;
+    var n: usize = 0;
+    while (n + 1 < units.len and value / divisor >= 1024) : (n += 1) divisor *= 1024;
+    if (value % divisor == 0) return std.fmt.bufPrint(buf, "{d} {s}", .{ value / divisor, units[n] });
+    return std.fmt.bufPrint(buf, "{d:.1} {s}", .{ @as(f64, @floatFromInt(value)) / @as(f64, @floatFromInt(divisor)), units[n] });
 }

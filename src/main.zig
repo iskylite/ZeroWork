@@ -16180,7 +16180,6 @@ const AppNavHost = struct {
     ai_tab_owner: ?@import("host/identity.zig").SessionHandle = null,
     status_controls: ?*@import("ui/ssh_status_host.zig").Controls = null,
     mascot: ?*@import("ui/mascot_island.zig").View = null,
-    forward_entry: ?*@import("ui/forward_entry_view.zig").View = null,
     ime_composing: bool = false,
     app_runtime: ?*App = null,
     native_close_pending: bool = false,
@@ -16575,17 +16574,8 @@ const AppNavHost = struct {
         var activity: @import("ui/mascot_island.zig").Activity = .{};
         if (self.mist_transfer) |view| activity.transfer_active = view.phase != .idle;
         const forwarding = if (self.socks_host) |host| host.currentForwarding() else null;
-        if (forwarding) |current| {
-            activity.forward_active = current.active;
-            activity.forward_count += @intFromBool(current.active);
-        }
-        if (self.menu_host) |menu| {
-            if (menu.background_socks) |host| {
-                const rows = host.model.rows.items.len;
-                activity.forward_count += rows;
-                if (rows != 0) activity.forward_active = true;
-            }
-        }
+        activity.forward_available = forwarding != null or if (self.socks_host) |host| host.hasBackgroundRows() else false;
+        activity.forward_active = (if (forwarding) |current| current.active else false) or if (self.socks_host) |host| host.backgroundIsListening() else false;
         if (self.status_controls) |controls| {
             activity.chain_available = !controls.disabled.peek() or if (self.connection_details_host) |host|
                 host.ssh_status.file_active != null or if (self.workspace) |ws_| if (ws_.active_tab) |idx|
@@ -16604,21 +16594,6 @@ const AppNavHost = struct {
             }
         }
         mascot.setActivity(activity);
-        if (self.forward_entry) |entry| {
-            const session: @import("ui/forward_entry_view.zig").Row = if (forwarding) |current|
-                .{ .enabled = true, .active = current.active, .detail = current.label }
-            else
-                .{};
-            var background: @import("ui/forward_entry_view.zig").Row = .{};
-            var background_detail: [64]u8 = undefined;
-            if (self.menu_host) |menu| if (menu.background_socks) |host| {
-                const rows = host.model.rows.items.len;
-                background.enabled = rows != 0;
-                background.active = rows != 0;
-                background.detail = if (rows == 0) "无后台转发" else std.fmt.bufPrint(&background_detail, "{d} 条后台转发", .{rows}) catch "";
-            };
-            entry.update(session, background) catch {};
-        }
     }
 
     fn persistAiDock(raw: *anyopaque, width: f32) void {
@@ -16632,34 +16607,9 @@ const AppNavHost = struct {
         };
     }
 
-    fn showForwardEntry(raw: *anyopaque) void {
-        const self: *AppNavHost = @ptrCast(@alignCast(raw));
-        const entry = self.forward_entry orelse return;
-        const anchor = if (self.mascot) |mascot| mascot.slot(.forward).globalRect() else ui.ComputedRect{ .x = self.cx.viewport.width - 96, .y = self.cx.viewport.height - 96, .w = 28, .h = 28 };
-        entry.show(anchor);
-    }
-
-    fn openSessionForward(raw: *anyopaque) void {
-        const self: *AppNavHost = @ptrCast(@alignCast(raw));
-        if (self.socks_host) |host| host.showInfo();
-    }
-
-    fn openBackgroundForward(raw: *anyopaque) void {
-        const self: *AppNavHost = @ptrCast(@alignCast(raw));
-        const anchor = if (self.mascot) |mascot| mascot.slot(.forward).globalRect() else ui.ComputedRect{ .x = self.cx.viewport.width - 96, .y = self.cx.viewport.height - 96, .w = 28, .h = 28 };
-        if (self.menu_host) |menu| if (menu.background_socks) |background| {
-            if (self.workspace) |workspace| {
-                for (workspace.registry.hosts) |host| {
-                    if (background.hasAsset(host.owner())) {
-                        background.showAsset(host.owner(), anchor);
-                        return;
-                    }
-                }
-            }
-            background.view.showAt(null, anchor);
-            return;
-        };
-        if (self.workspace) |workspace| workspace.status("没有后台保持的端口转发");
+    fn showSessionForward(self: *AppNavHost) void {
+        const host = self.socks_host orelse return;
+        host.showInfo();
     }
 
     const MascotSlot = @import("ui/mascot_island.zig").Slot;
@@ -16670,7 +16620,10 @@ const AppNavHost = struct {
         if (mascot.glanceFor(which)) |glance| return glance;
         return switch (which) {
             .transfer => if (self.transfer_host) |host| if (host.manager_panel) |p| if (p.root.style.display != .none) p.root else null else null else null,
-            .forward => if (self.forward_entry) |v| if (v.popover.open.?.peek()) v.popover.chrome else null else null,
+            .forward => if (self.socks_host) |host| if (host.info) |view|
+                if (view.open.peek()) view.root else if (view.logs_open.peek()) view.logs_root else null
+            else
+                null else null,
             .history => if (self.command_history) |v| if (v.mode != .closed) v.root else null else null,
             .broadcast => if (self.broadcast_view) |v| if (v.open.peek() or v.requested) v.root else null else null,
             .chain => if (self.connection_details_host) |host| if (host.view.isVisible()) host.view.chrome else null else null,
@@ -16684,7 +16637,7 @@ const AppNavHost = struct {
         const workspace = self.workspace orelse return;
         switch (which) {
             .transfer => if (self.transfer_host) |host| host.presentGlobalManager(false),
-            .forward => showForwardEntry(self),
+            .forward => self.showSessionForward(),
             .history => if (self.command_history) |view| view.show(true),
             .broadcast => {
                 const group = self.roster.findById(workspace.active_group_view orelse return) orelse return;
@@ -16735,7 +16688,7 @@ const AppNavHost = struct {
                 if (host.manager_panel) |panel| panel.dismiss();
                 host.manager_visible = false;
             },
-            .forward => if (self.forward_entry) |entry| entry.hide(),
+            .forward => if (self.socks_host) |host| if (host.info) |view| view.hide(),
             .history => if (self.command_history) |view| view.hide(),
             .broadcast => if (self.broadcast_view) |view| view.dismiss(),
             .chain => if (self.connection_details_host) |host| host.view.dismiss(),
@@ -20160,7 +20113,7 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     socks_host.bindAuthentication();
     socks_host.chip_label = status_bar.socks_label;
     socks_host.chip = status_bar.socks_chip;
-    const socks_info = try @import("ui/socks_info_view.zig").mount(cx, scope, .{ .context = @ptrCast(socks_host), .action = Socks5Host.infoAction });
+    const socks_info = try @import("ui/socks_info_view.zig").mountAnchored(cx, scope, .{ .context = @ptrCast(socks_host), .action = Socks5Host.infoAction }, nav_host.mist != null);
     socks_host.info = socks_info;
     try background_view.isolate(socks_info.scope, socks_info.root);
     try background_view.isolate(socks_info.scope, socks_info.logs_root);
@@ -20250,8 +20203,16 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
         // V0.8: session/task controls live on the mascot island, not the top bar.
         try chrome.groups[0].insertChildBefore(cx.allocator, c.theme_button, settings_host.focus_return);
 
-        background_socks.view.remote_entry.setDisplay(.none);
-        background_socks.view.local_entry.setDisplay(.none);
+        // A single mascot tool presents both owner scopes. The old status-bar
+        // buttons remain on hidden legacy bars, never in the workspace toolbar.
+        socks_host.background_model = background_socks.model;
+        try background_socks.view.attachInline(socks_info.body.content);
+        background_socks.view.inline_closed = .{ .context = socks_info, .close = struct {
+            fn dismiss(raw: *anyopaque) void {
+                const info: *@import("ui/socks_info_view.zig").View = @ptrCast(@alignCast(raw));
+                info.hide();
+            }
+        }.dismiss };
         const mascot = try @import("ui/mascot_island.zig").View.mount(cx, scope, terminal_area, .{ .context = nav_host, .save_anchor = AppNavHost.saveMascotAnchor, .open_preview = AppNavHost.showMascotPreview, .close_preview = AppNavHost.hideMascotPreview, .panel = AppNavHost.mascotPanel, .pin_preview = AppNavHost.pinMascotPreview }, app_config.value.ui.mascot_anchor_x, app_config.value.ui.mascot_anchor_y);
         nav_host.mascot = mascot;
         if (nav_host.transfer_anchor) |node| {
@@ -20260,12 +20221,7 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
         }
         try MistChrome.move(cx, mascot.slot(.forward), c.socks_button);
         fitMascotSlot(cx, c.socks_button);
-        // V0.8 §2.2.2: one entry opens both forward owners instead of two
-        // near-identical top-bar plug icons.
-        const forward_entry = try @import("ui/forward_entry_view.zig").View.mount(cx, scope, .{ .context = nav_host, .open_session = AppNavHost.openSessionForward, .open_background = AppNavHost.openBackgroundForward });
-        forward_entry.trigger_node = mascot.slot(.forward);
-        nav_host.forward_entry = forward_entry;
-        c.socks_button.behavior.events.on_click = .{ .context = nav_host, .callback = AppNavHost.showForwardEntry };
+        c.socks_button.behavior.events.on_click = cx.on(AppNavHost, nav_host, AppNavHost.showSessionForward);
         try MistChrome.move(cx, mascot.slot(.broadcast), c.broadcast_button);
         fitMascotSlot(cx, c.broadcast_button);
         try MistChrome.move(cx, mascot.slot(.chain), c.chain_button);
@@ -20301,8 +20257,8 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     // A graphical (web/BMC) session repoints the identity trigger at a sticky
     // route/details popover. Hover must stay inert there; only a real click opens it.
     try StatusPreview.mountVetoed(cx, scope, status_previews, status_bar.controls.identity_button, details_host.ssh_status.info.chrome, details_host.ssh_status.info.open, cx.on(@import("ui/status_connection_view.zig").View, details_host.ssh_status.info, @import("ui/status_connection_view.zig").View.dismiss), details_host.ssh_status, projectsGraphicalHost);
-    // The mascot owns the paired trigger and preview lifetime for these two;
-    // do not wrap its unified forwarding entry in the legacy SOCKS-only toggle.
+    // The mascot owns the preview lifetime for these two existing popovers;
+    // do not also attach the status bar hover controller to the same triggers.
     if (nav_host.mascot == null) {
         try StatusPreview.mountClick(cx, scope, status_previews, status_bar.chain_trigger, details_host.view.chrome, details_host.view.open, cx.on(@import("ui/connection_details_view.zig").View, details_host.view, @import("ui/connection_details_view.zig").View.dismiss));
         try StatusPreview.mountClick(cx, scope, status_previews, status_bar.socks_chip, socks_info.root, socks_info.open, cx.on(@import("ui/socks_info_view.zig").View, socks_info, @import("ui/socks_info_view.zig").View.hide));
@@ -20311,8 +20267,10 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
         try StatusPreview.mountClick(cx, scope, status_previews, trigger, theme_picker.chrome, theme_picker.open, cx.on(@import("ui/status_theme_view.zig").View, theme_picker, @import("ui/status_theme_view.zig").View.dismiss));
     }
     try StatusPreview.mount(cx, scope, status_previews, local_status.identity_button, status_detail.chrome, status_detail.open, cx.on(@import("ui/status_detail_view.zig").View, status_detail, @import("ui/status_detail_view.zig").View.dismiss));
-    for ([_]*ui.Node{ background_socks.view.remote_entry, background_socks.view.local_entry }) |trigger| {
-        try StatusPreview.mountClick(cx, scope, status_previews, trigger, background_socks.view.popover.chrome, background_socks.view.popover.open.?, background_socks.view.popover.close);
+    if (nav_host.mascot == null) {
+        for ([_]*ui.Node{ background_socks.view.remote_entry, background_socks.view.local_entry }) |trigger| {
+            try StatusPreview.mountClick(cx, scope, status_previews, trigger, background_socks.view.popover.chrome, background_socks.view.popover.open.?, background_socks.view.popover.close);
+        }
     }
     if (nav_host.mist) |chrome| try chrome.installFeedback(scope);
     nav_host.asset_group_host = try @import("ui/asset_group_host.zig").Host.mount(cx, scope, workspace, .{ .context = wiz_host, .open = WizardHost.openInAssetGroup });

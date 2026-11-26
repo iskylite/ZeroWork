@@ -18,6 +18,7 @@ fn directionFor(c: [2]f32, w: f32, h: f32, n: usize) Direction {
     const x: usize = if (space[0] >= space[1]) 0 else 1;
     const y: usize = if (space[2] >= space[3]) 2 else 3;
     const extent = S.body_size / 2 + S.rail_gap + railLength(@floatFromInt(n)) + 2;
+    if (space[2] >= extent) return .up;
     return @fromBackingInt(@intCast(if (space[x] >= extent or space[x] >= space[y]) x else y));
 }
 fn railLength(count: f32) f32 {
@@ -63,8 +64,8 @@ pub const Slot = enum(u8) { transfer = 0, forward = 1, broadcast = 2, chain = 3,
 
 pub const Activity = struct {
     transfer_active: bool = false,
+    forward_available: bool = false,
     forward_active: bool = false,
-    forward_count: usize = 0,
     broadcast_available: bool = false,
     broadcast_active: bool = false,
     broadcast_participants: usize = 0,
@@ -258,7 +259,8 @@ pub const View = struct {
 
     fn applicable(self: *const View, index: usize) bool {
         return switch (index) {
-            0, 1 => true,
+            0 => true,
+            1 => self.activity.forward_available,
             2 => self.activity.broadcast_available,
             3 => self.activity.chain_available,
             else => self.activity.history_available,
@@ -500,8 +502,10 @@ pub const View = struct {
     }
 };
 
-test "mascot tools stay on one inward axis at all four edges, without moving the badge" {
+test "mascot tools prefer up and fall back inside all viewport edges" {
     const cases = [_]struct { c: [2]f32, w: f32, h: f32, dir: Direction }{
+        .{ .c = .{ 362, 362 }, .w = 400, .h = 400, .dir = .up },
+        .{ .c = .{ 38, 362 }, .w = 400, .h = 400, .dir = .up },
         .{ .c = .{ 362, 162 }, .w = 400, .h = 200, .dir = .left },
         .{ .c = .{ 38, 38 }, .w = 400, .h = 200, .dir = .right },
         .{ .c = .{ 72, 38 }, .w = 140, .h = 450, .dir = .down },

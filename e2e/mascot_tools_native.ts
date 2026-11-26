@@ -11,6 +11,8 @@ const h = await import(join(prefix, 'share/zenit/harness/client.ts'));
 const root = await realpath(await mkdtemp('/tmp/zw-native-mascot-'));
 const data = join(root, 'data'), rpc = join(root, 'rpc');
 await mkdir(data); await mkdir(rpc);
+await mkdir(join(data, 'credentials'), {mode:0o700});
+await writeFile(join(data, 'credentials', '.local-storage'), '1', {mode:0o600});
 await writeFile(join(root,'.zshrc'),"bindkey -e\nPS1='workspace%# '\n");
 const left = process.argv.includes('--light');
 const [w,hgt] = left ? [860,480] : [1440,900];
@@ -40,8 +42,14 @@ try {
   const badge = await rect('workspace.mascot.body');
   const canvas = {x:0,y:0,w,h:hgt}; // Floating panels belong to the whole native window, including sidebar gutters.
   step='expand'; await hover('workspace.mascot.body'); await visible('workspace.mascot.history'); await pause(320);
-  const slots = await Promise.all(['transfer','forward','history'].map(s=>rect('workspace.mascot.'+s)));
-  for(let i=0;i<slots.length;i++){const [x,y]=center(slots[i]); assert(Math.abs(y-center(badge)[1])<1,'slots must align on one axis');assert(left?x>center(badge)[0]:x<center(badge)[0],'strip points into workspace');if(i>0)assert(Math.abs(x-center(slots[i-1])[0])>=28,'slots never overlap');}
+  await hidden('workspace.mascot.forward'); // A bare local shell owns no forwarding capability.
+  const slots = await Promise.all(['transfer','history'].map(s=>rect('workspace.mascot.'+s)));
+  for(let i=0;i<slots.length;i++){
+    const [x,y]=center(slots[i]), [bx,by]=center(badge);
+    if(left){assert(Math.abs(y-by)<1 && x>bx,'top-left rail opens right when it cannot fit above');}
+    else {assert(Math.abs(x-bx)<1 && y<by,'bottom-right rail opens upwards by default');}
+    if(i>0)assert(Math.hypot(x-center(slots[i-1])[0],y-center(slots[i-1])[1])>=28,'slots never overlap');
+  }
   await expectAnchor(badge);
   step='transfer hover'; await hover('workspace.mascot.transfer');
   const panel=await rect('transfer.manager');
@@ -55,9 +63,6 @@ try {
   await pause(380); await visible('transfer.manager');
   if(process.env.ZW_MASCOT_CAPTURE) await h.screenshot(process.env.ZW_MASCOT_CAPTURE);
   step='hover leave'; await outside(); await hidden('transfer.manager'); await hidden('workspace.mascot.tools'); await expectAnchor(badge);
-  step='forward hover'; await hover('workspace.mascot.body'); await visible('workspace.mascot.forward'); await pause(280); await hover('workspace.mascot.forward');
-  const fm=await rect('workspace.mascot.forward.menu');assert(inside(fm,{x:0,y:0,w,h:hgt}),'forward preview within window');
-  step='forward dismissal'; await outside();await hidden('workspace.mascot.forward.menu');await hidden('workspace.mascot.tools');
   step='history hover'; await hover('workspace.mascot.body');await visible('workspace.mascot.history');await pause(280);await hover('workspace.mascot.history');const hp=await rect('terminal.command-history');assert(inside(hp,canvas),'history preview within workspace');
   await outside();await hidden('terminal.command-history');await hidden('workspace.mascot.tools');
   step='click pin'; await hover('workspace.mascot.body'); await visible('workspace.mascot.transfer');await pause(280);await hover('workspace.mascot.transfer');await visible('transfer.manager');
@@ -92,16 +97,21 @@ try {
       const gr=summary.rect;assert(inside(gr,canvas),'link summary is fully visible');await h.mouseMove(...center(gr));await pause(400);await visible('workspace.mascot.preview');
       await outside();await hidden('workspace.mascot.preview');await hidden('workspace.mascot.tools');
       step='Web direct forwarding from current owner, without opening details first';
-      await hover('workspace.mascot.body');await visible('workspace.mascot.forward');await pause(280);await hover('workspace.mascot.forward');await visible('workspace.mascot.forward.menu');
-      const direct=await visible('workspace.mascot.forward.session');assert(list(direct).some(n=>n.text==='直接连接'),'current renderer, not old SSH popup');
-      await click('workspace.mascot.forward.session');const info=await visible('socks.info');assert(list(info).some(n=>n.text==='直接连接'));await click('socks.info.close');
+      await hover('workspace.mascot.body');await visible('workspace.mascot.forward');await pause(280);await hover('workspace.mascot.forward');
+      const info=await visible('socks.info');assert(inside(info.rect,canvas),'unified forwarding preview within window');
+      const body=list(info).filter(shown);
+      assert(body.some(n=>n.text==='直接连接') && body.some(n=>n.text==='#Loopback'),'current renderer, not an old SSH rule');
+      assert(body.some(n=>n.test_id==='socks.info.background'),'shared background section inside current popover');
+      assert(!body.some(n=>n.test_id==='socks.info.control'||n.test_id==='socks.info.config'),'direct Web is read-only');
+      assert.equal((await nodes('status.background.forward')).length,0,'no separate global toolbar trigger');
+      await outside();await hidden('socks.info');await hidden('workspace.mascot.tools');
       console.log('native embedded Web: live connection status, readable above the native web view, auto-close');
     } finally { await new Promise<void>(done=>{http.close(()=>done());http.closeAllConnections();}); }
   }
-  console.log(`native mascot OK: ${left?'light / top-left':'dark / bottom-right'} ${w}×${hgt}; stationary strip, real transfer/forward/history, hover bridge, auto-close, click pin, no fake handle`);
+  console.log(`native mascot OK: ${left?'light / top-left':'dark / bottom-right'} ${w}×${hgt}; stationary strip, real transfer/history and capability-scoped forwarding, hover bridge, auto-close, click pin, no fake handle`);
 } catch (err) {
   console.error('mascot native failed at '+step,await readFile(join(root,'app.log'),'utf8').then(s=>s.slice(-1300)));
-  for(const id of ['workspace.mascot.body','workspace.mascot.tools','workspace.mascot.transfer','transfer.manager','workspace.mascot.forward.menu']) try { console.error(id,(await nodes(id)).map((n:any)=>n.rect)); } catch {}
+  for(const id of ['workspace.mascot.body','workspace.mascot.tools','workspace.mascot.transfer','transfer.manager','socks.info']) try { console.error(id,(await nodes(id)).map((n:any)=>n.rect)); } catch {}
   throw err;
 } finally {
   app.kill('SIGTERM');await exited.catch(()=>{});await log.close();await rm(root,{recursive:true,force:true});

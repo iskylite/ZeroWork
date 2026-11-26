@@ -1,5 +1,4 @@
-//! Uses the inspected 258px host-menu rows and 360px forwarding-card roles.
-//! The no-Tab list is a SPEC completion; no matching Figma list state exists.
+//! The unified port-forwarding card and its asset-scoped counterpart share row geometry.
 const ui = @import("ui");
 const M = @import("socks_background_model.zig");
 const shared = @import("connection_details_styles.zig");
@@ -15,7 +14,7 @@ pub fn count() ui.BoxStyle {
     return .{ .height = .{ .px = 26 }, .direction = .row, .align_items = .center, .justify = .center, .gap = 5, .padding = .{ .left = 7, .right = 7 }, .border = .{ .radius = 7 }, .background = ui.Color.TRANSPARENT, .font_size = 10.5, .font_weight = 500, .text_color = theme.current().fg_2, .flex_shrink = 0 };
 }
 pub fn row() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 64 }, .direction = .row, .align_items = .center, .gap = 6, .padding = .{ .left = 8, .right = 8, .top = 8, .bottom = 8 }, .background = theme.current().surface_2, .border = .{ .radius = 7 }, .min_width = 0, .flex_shrink = 0 };
+    return .{ .width = .fill(), .height = .{ .px = 62 }, .direction = .column, .gap = 2, .padding = .{ .left = 12, .right = 8, .top = 7, .bottom = 6 }, .background = theme.popupInset(), .border = .{ .radius = 8 }, .min_width = 0, .flex_shrink = 0 };
 }
 pub fn action(size: f32) ui.BoxStyle {
     return .{ .width = .{ .px = size }, .height = .{ .px = size }, .padding = .{}, .direction = .row, .align_items = .center, .justify = .center, .border = .{ .radius = 7 }, .background = ui.Color.TRANSPARENT, .flex_shrink = 0 };

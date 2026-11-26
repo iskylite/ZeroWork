@@ -12,7 +12,9 @@ pub const Row = struct {
     name: []const u8,
     phase: Phase,
     local_port: ?u16,
-    connections: u32,
+    mode: Routes.listener.ForwardMode = .socks5,
+    bind127: ?bool = null,
+    stats: ?Routes.listener.Stats = null,
     failure: ?anyerror,
 };
 pub const Source = struct {
@@ -108,7 +110,10 @@ pub const Model = struct {
                 .name = entry.source.name,
                 .phase = phase,
                 .local_port = if (listener) |live| if (live.owner.eql(value.owner) and live.local_port != 0 and live.cleanup != .released) live.local_port else null else null,
-                .connections = if (listener) |live| if (live.owner.eql(value.owner) and live.cleanup != .released) live.stats.connections_active else 0 else 0,
+                .mode = entry.source.options.listener.mode,
+                .bind127 = if (listener) |live| if (live.local_port != 0 and live.cleanup != .released) live.bind127 else null else null,
+                // Only a receipt from this exact generation owns these counters.
+                .stats = if (listener) |live| if (live.local_port != 0) live.stats else null else null,
                 .failure = failureFor(entry.failure, value.failure, listener),
             });
         }
@@ -186,7 +191,7 @@ pub fn phaseLabel(phase: Phase) []const u8 {
     return switch (phase) {
         .connecting => "连接中",
         .starting => "开启监听中",
-        .listening => "后台监听",
+        .listening => "正在监听",
         .paused => "已暂停",
         .failed => "连接失败",
         .closing => "正在停止",

@@ -26,6 +26,7 @@
 | 设计稿 | 逻辑视口 |
 | --- | --- |
 | [主工作区](workspace/mist-workspace.svg) | 1440 × 900 |
+| [统一端口转发气泡](workspace/port-forwarding.svg) | 1440 × 900 |
 | [窄窗口收起态](workspace/mist-workspace-compact.svg) | 860 × 480 |
 | [窄窗口展开态](workspace/mist-workspace-compact-expanded.svg) | 860 × 480 |
 | [主机分组侧栏](workspace/host-group-sidebar.svg) | 262 × 600 |
